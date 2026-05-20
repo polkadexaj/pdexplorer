@@ -1211,10 +1211,10 @@ async function fetchAccountDetails(address) {
                 <thead>
                     <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-secondary);">
                         <th style="padding: 12px 10px; font-weight: 500;">Txn Hash</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">section</th>
-                        <th style="padding: 12px 10px; font-weight: 500;"></th>
-                        <th style="padding: 12px 10px; font-weight: 500;"></th>
-                        <th style="padding: 12px 10px; font-weight: 500;"></th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Method/Action</th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Age</th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Date</th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Status</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1250,10 +1250,10 @@ async function fetchAccountDetails(address) {
                 <thead>
                     <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-secondary);">
                         <th style="padding: 12px 10px; font-weight: 500;">Event Hash</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">section</th>
-                        <th style="padding: 12px 10px; font-weight: 500;"></th>
-                        <th style="padding: 12px 10px; font-weight: 500;"></th>
-                        <th style="padding: 12px 10px; font-weight: 500;"></th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Action</th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Age</th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Date</th>
+                        <th style="padding: 12px 10px; font-weight: 500;">Status</th>
                     </tr>
                 </thead>
                 <tbody>

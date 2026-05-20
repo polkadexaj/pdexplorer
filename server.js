@@ -825,11 +825,13 @@ app.get('/api/account/:address', async (req, res) => {
             if (index !== -1) rank = (index + 1).toString();
         } catch (e) { }
         try {
-            const accCache = await readJsonCache(ACCOUNT_CACHE_FILE, CACHE_DEFAULTS.get(ACCOUNT_CACHE_FILE));
-            if (accCache.accounts[address]) {
-                txs = accCache.accounts[address].transactions || [];
-                evs = accCache.accounts[address].events || [];
-                status = accCache.accounts[address].status || 'Synced';
+            const globalTxCache = await readJsonCache(TX_CACHE_FILE, CACHE_DEFAULTS.get(TX_CACHE_FILE));
+            if (globalTxCache && Array.isArray(globalTxCache.transactions)) {
+                txs = globalTxCache.transactions.filter(t => t.from === address || t.to === address);
+            }
+            const globalEventsCache = await readJsonCache(EVENTS_CACHE_FILE, CACHE_DEFAULTS.get(EVENTS_CACHE_FILE));
+            if (globalEventsCache && Array.isArray(globalEventsCache.events)) {
+                evs = globalEventsCache.events.filter(e => e.signerAddress === address);
             }
         } catch (e) { }
 
