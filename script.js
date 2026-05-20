@@ -1283,6 +1283,10 @@ async function fetchAccountDetails(address) {
         evHtml += `</tbody></table>`;
 
         let html = `
+            <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 style="font-size: 18px;">Account Details</h2>
+                <a href="javascript:history.back()" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+            </div>
             <div style="background: rgba(255,255,255,0.02); margin-bottom: 20px; border-radius: 4px; border: 1px solid var(--border-color);">
                 <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;">
                     <tr style="background: rgba(255,255,255,0.05);">
@@ -1345,8 +1349,9 @@ async function fetchBlockDetails(id) {
         if (data.error) throw new Error(data.error);
 
         let html = `
-            <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px;">
+            <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <h2>Block ${data.block.header.number}</h2>
+                <a href="javascript:history.back()" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             <div style="padding: 20px;">
                 <div style="margin-bottom: 10px;"><strong>hash</strong> <span class="address-cell">${data.hash}</span></div>
@@ -1370,8 +1375,9 @@ async function fetchTxDetails(block, hash) {
         if (data.error) throw new Error(data.error);
 
         let html = `
-            <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px;">
+            <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <h2>Tx: ${data.hash}</h2>
+                <a href="javascript:history.back()" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             <div style="padding: 20px;">
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px; text-align: left;">
