@@ -63,6 +63,10 @@
                     <div class="status-indicator live"></div>
                     <span class="status-text">Polkadex Mainnet</span>
                 </div>
+                <button id="connect-wallet-btn" class="connect-wallet-btn" title="Connect a Substrate wallet in read-only mode">
+                    <i class='bx bx-wallet'></i>
+                    <span id="connect-wallet-label">Connect Wallet</span>
+                </button>
             </header>
 
             <!-- Dashboard Content -->
@@ -228,6 +232,11 @@
                     </div>
                 </div>
                 <div class="list-container glass" id="staking-rewards-results" style="display: none; margin-top: 20px;"></div>
+            </div>
+
+            <!-- Wallet Dashboard Page -->
+            <div class="wallet-page page-section" data-page="wallet" style="display: none;">
+                <div id="wallet-dashboard"></div>
             </div>
 
             <!-- Holders Page -->

@@ -1107,6 +1107,9 @@ function routeTo(target) {
     } else if (target.startsWith('staking-rewards/')) {
         mainTarget = 'staking-rewards';
         detailId = target.substring('staking-rewards/'.length);
+    } else if (target.startsWith('wallet/')) {
+        mainTarget = 'wallet';
+        detailId = target.substring('wallet/'.length);
     }
 
     // Update active nav
@@ -1147,6 +1150,8 @@ function routeTo(target) {
                 fetchTxDetails(detailId, detailId2);
             } else if (mainTarget === 'staking-rewards') {
                 initStakingRewardsPage(detailId);
+            } else if (mainTarget === 'wallet') {
+                initWalletPage(detailId);
             }
         } else {
             page.style.display = 'none';
@@ -1647,31 +1652,57 @@ async function fetchValidatorDetails(address) {
     }
 }
 
-// --- Staking Rewards Page ---
-let stakingRewardsData = null;      // last fetched payload, reused for downloads
+// --- Shared wallet / staking-rewards helpers ---
+let stakingRewardsData = null;
 let stakingRewardsChart = null;
 let stakingRewardsDisplayLimit = 100;
+let stakingRewardFilter = 'all';
+let stakingUnclaimedPolls = 0;
+let walletPriceChart = null;
+const WALLET_STORAGE_KEY = 'pdex_wallet_address';
 
 function stakingEscapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[c]));
 }
-
 function stakingShortAddress(addr) {
     if (!addr || addr.length < 18) return addr || '';
     return addr.substring(0, 8) + '…' + addr.substring(addr.length - 6);
 }
-
 function stakingFormatPDEX(value) {
     return Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 }
-
+function stakingFormatNumber(value) {
+    return Number(value || 0).toLocaleString('en-US');
+}
 function isValidPolkadexAddress(addr) {
     try { decodeAddress(addr); return true; }
     catch (e) { return false; }
 }
+function formatDuration(ms) {
+    if (!ms || ms <= 0) return '—';
+    const hours = ms / 3600000;
+    if (hours < 48) return (Math.round(hours * 10) / 10) + ' hours';
+    return (Math.round(hours / 24 * 10) / 10) + ' days';
+}
+function stakingCsvCell(value) {
+    const s = String(value == null ? '' : value);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function downloadStakingBlob(filename, content, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
+// --- Staking Rewards Page ---
 async function loadStakingIndexStatus() {
     const el = document.getElementById('staking-index-status');
     if (!el) return;
@@ -1680,7 +1711,7 @@ async function loadStakingIndexStatus() {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const backfill = data.backfillComplete ? 'backfill complete' : 'backfill in progress';
-        el.textContent = `Indexer: blocks ${Number(data.oldestScannedBlock || 0).toLocaleString()}–${Number(data.latestScannedBlock || 0).toLocaleString()} · ${Number(data.totalRewardsIndexed || 0).toLocaleString()} payouts · ${backfill}`;
+        el.textContent = `Indexer: blocks ${stakingFormatNumber(data.oldestScannedBlock)}–${stakingFormatNumber(data.latestScannedBlock)} · ${stakingFormatNumber(data.totalRewardsIndexed)} payouts · ${backfill}`;
     } catch (e) {
         el.textContent = 'Indexer: status unavailable';
     }
@@ -1711,15 +1742,14 @@ function submitStakingSearch() {
         return;
     }
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-    // Route through the hash so the result is shareable / bookmarkable.
     window.location.hash = 'staking-rewards/' + addr;
 }
 
-async function fetchStakingRewards(address) {
+async function fetchStakingRewards(address, isPoll) {
     const resultsEl = document.getElementById('staking-rewards-results');
     const errEl = document.getElementById('staking-rewards-error');
     if (!resultsEl) return;
-    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    if (errEl && !isPoll) { errEl.style.display = 'none'; errEl.textContent = ''; }
 
     if (!isValidPolkadexAddress(address)) {
         if (errEl) { errEl.textContent = 'That does not look like a valid Polkadex wallet address.'; errEl.style.display = 'block'; }
@@ -1727,9 +1757,13 @@ async function fetchStakingRewards(address) {
         return;
     }
 
-    stakingRewardsDisplayLimit = 100;
-    resultsEl.style.display = 'block';
-    resultsEl.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-secondary);">Loading staking rewards…</div>';
+    if (!isPoll) {
+        stakingRewardsDisplayLimit = 100;
+        stakingRewardFilter = 'all';
+        stakingUnclaimedPolls = 0;
+        resultsEl.style.display = 'block';
+        resultsEl.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-secondary);">Loading staking rewards…</div>';
+    }
 
     try {
         const res = await fetch('/api/staking-rewards/' + encodeURIComponent(address));
@@ -1737,39 +1771,64 @@ async function fetchStakingRewards(address) {
         if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
         stakingRewardsData = data;
         renderStakingRewards(data);
+        // Unpaid rewards are computed in the background; poll until they are ready.
+        if (data.unclaimedComputing && stakingUnclaimedPolls < 12) {
+            stakingUnclaimedPolls++;
+            setTimeout(() => {
+                if (stakingRewardsData && stakingRewardsData.address === data.address) fetchStakingRewards(address, true);
+            }, 6000);
+        }
     } catch (e) {
-        stakingRewardsData = null;
-        resultsEl.innerHTML = `<div style="padding: 40px; text-align: center; color: var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+        if (!isPoll) {
+            stakingRewardsData = null;
+            resultsEl.innerHTML = `<div style="padding: 40px; text-align: center; color: var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+        }
     }
+}
+
+// Merge claimed + unclaimed reward records according to the active filter.
+function getFilteredRewards(data, filter) {
+    const claimed = (data.claimed || []).map(r => ({ ...r, status: 'claimed' }));
+    const unclaimed = (data.unclaimed || []).map(r => ({ ...r, status: 'unclaimed' }));
+    let list;
+    if (filter === 'claimed') list = claimed.slice();
+    else if (filter === 'unclaimed') list = unclaimed.slice();
+    else list = claimed.concat(unclaimed);
+    list.sort((a, b) => {
+        const ea = a.era == null ? -Infinity : a.era;
+        const eb = b.era == null ? -Infinity : b.era;
+        if (eb !== ea) return eb - ea;
+        return (b.block || 0) - (a.block || 0);
+    });
+    return list;
 }
 
 function renderStakingRewards(data) {
     const resultsEl = document.getElementById('staking-rewards-results');
     if (!resultsEl) return;
-    const rewards = Array.isArray(data.rewards) ? data.rewards : [];
     const summary = data.summary || {};
     const index = data.index || {};
     const identity = data.identity && data.identity !== 'Unknown' ? data.identity : null;
+    const claimedCount = (data.claimed || []).length;
+    const unclaimedCount = (data.unclaimed || []).length;
 
-    if (rewards.length === 0) {
-        const backfillNote = index.backfillComplete
-            ? 'The indexer has scanned the full available chain history.'
-            : 'The indexer is still backfilling older history — check back shortly.';
+    if (claimedCount === 0 && unclaimedCount === 0) {
+        const note = data.unclaimedComputing
+            ? 'Unpaid rewards are still being computed — this can take a moment.'
+            : (index.backfillComplete
+                ? 'The indexer has scanned the full available chain history.'
+                : 'The indexer is still backfilling older history — check back shortly.');
         resultsEl.innerHTML = `
             <div class="list-header"><h2>No staking rewards found</h2></div>
             <div style="padding: 32px 24px; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7;">
-                No claimed staking payouts were found for
-                <span style="color: var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(data.address))}</span>
-                in the indexed block range
-                (${Number(index.oldestScannedBlock || 0).toLocaleString()}–${Number(index.latestScannedBlock || 0).toLocaleString()}).
-                <br>${backfillNote}
+                No staking rewards were found for
+                <span style="color: var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(data.address))}</span>.
+                <br>${note}
             </div>`;
         return;
     }
 
-    const firstDate = summary.firstTimestamp ? new Date(summary.firstTimestamp).toLocaleDateString('en-US') : '—';
-    const lastDate = summary.lastTimestamp ? new Date(summary.lastTimestamp).toLocaleDateString('en-US') : '—';
-
+    const rewards = getFilteredRewards(data, stakingRewardFilter);
     const shown = rewards.slice(0, stakingRewardsDisplayLimit);
     let rowsHtml = '';
     shown.forEach(r => {
@@ -1777,19 +1836,30 @@ function renderStakingRewards(data) {
         const validatorCell = r.validator
             ? `<a href="#validator/${encodeURIComponent(r.validator)}" class="item-link" style="color: var(--brand-secondary);">${stakingShortAddress(r.validator)}</a>`
             : '<span style="color: var(--text-muted);">—</span>';
+        const blockCell = r.block != null
+            ? `<a href="#block/${r.block}" class="item-link" style="color: var(--brand-secondary);">${stakingFormatNumber(r.block)}</a>`
+            : '<span style="color: var(--text-muted);">—</span>';
+        const statusBadge = r.status === 'claimed'
+            ? '<span class="reward-badge claimed">Claimed</span>'
+            : '<span class="reward-badge unclaimed">Unpaid</span>';
         rowsHtml += `
             <tr>
                 <td>${r.era != null ? r.era : '<span style="color:var(--text-muted);">—</span>'}</td>
                 <td style="white-space: nowrap;">${date}</td>
                 <td class="staking-amount">${stakingFormatPDEX(r.amount)} PDEX</td>
+                <td>${statusBadge}</td>
                 <td>${validatorCell}</td>
-                <td><a href="#block/${r.block}" class="item-link" style="color: var(--brand-secondary);">${Number(r.block).toLocaleString()}</a></td>
+                <td>${blockCell}</td>
             </tr>`;
     });
 
     const remaining = rewards.length - shown.length;
     const showMoreHtml = remaining > 0
-        ? `<div style="text-align:center; padding: 18px;"><button id="staking-show-more" class="staking-download-btn">Show more (${remaining.toLocaleString()} remaining)</button></div>`
+        ? `<div style="text-align:center; padding: 18px;"><button id="staking-show-more" class="staking-download-btn">Show more (${stakingFormatNumber(remaining)} remaining)</button></div>`
+        : '';
+    const fbtn = (key, label) => `<button class="reward-filter-btn${stakingRewardFilter === key ? ' active' : ''}" data-filter="${key}">${label}</button>`;
+    const computingNote = data.unclaimedComputing
+        ? '<div style="padding: 0 24px 14px; color: var(--text-muted); font-size: 0.78rem;">Unpaid rewards are being computed in the background and will appear shortly.</div>'
         : '';
 
     resultsEl.innerHTML = `
@@ -1798,30 +1868,38 @@ function renderStakingRewards(data) {
             <a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color: var(--text-secondary); font-size: 0.78rem;">${stakingEscapeHtml(data.address)}</a>
         </div>
         <div class="staking-summary-grid">
-            <div class="staking-summary-card"><div class="label">Total Rewards</div><div class="value accent">${stakingFormatPDEX(summary.totalAmount)} PDEX</div></div>
-            <div class="staking-summary-card"><div class="label">Payouts</div><div class="value">${Number(summary.rewardCount || 0).toLocaleString()}</div></div>
-            <div class="staking-summary-card"><div class="label">Eras Rewarded</div><div class="value">${Number(summary.eraCount || 0).toLocaleString()}</div></div>
-            <div class="staking-summary-card"><div class="label">First Payout</div><div class="value">${firstDate}</div></div>
-            <div class="staking-summary-card"><div class="label">Latest Payout</div><div class="value">${lastDate}</div></div>
+            <div class="staking-summary-card"><div class="label">Claimed Rewards</div><div class="value accent">${stakingFormatPDEX(summary.claimedTotal)} PDEX</div></div>
+            <div class="staking-summary-card"><div class="label">Unpaid Rewards</div><div class="value" style="color: var(--brand-primary);">${stakingFormatPDEX(summary.unclaimedTotal)} PDEX</div></div>
+            <div class="staking-summary-card"><div class="label">Total Rewards</div><div class="value">${stakingFormatPDEX(summary.totalAmount)} PDEX</div></div>
+            <div class="staking-summary-card"><div class="label">Claimed Payouts</div><div class="value">${stakingFormatNumber(summary.claimedCount)}</div></div>
+            <div class="staking-summary-card"><div class="label">Eras</div><div class="value">${stakingFormatNumber(summary.eraCount)}</div></div>
         </div>
         <div class="staking-chart-wrap"><canvas id="staking-rewards-chart"></canvas></div>
+        ${computingNote}
         <div class="staking-toolbar">
-            <span style="color: var(--text-secondary); font-size: 0.82rem;">${rewards.length.toLocaleString()} payout record${rewards.length === 1 ? '' : 's'}</span>
+            <div class="reward-filter">${fbtn('all', 'All')}${fbtn('claimed', 'Claimed')}${fbtn('unclaimed', 'Unpaid')}</div>
             <div class="staking-toolbar-actions">
-                <button class="staking-download-btn" id="staking-dl-csv"><i class='bx bx-download'></i> Download CSV</button>
-                <button class="staking-download-btn" id="staking-dl-json"><i class='bx bx-download'></i> Download JSON</button>
+                <button class="staking-download-btn" id="staking-dl-csv"><i class='bx bx-download'></i> CSV</button>
+                <button class="staking-download-btn" id="staking-dl-json"><i class='bx bx-download'></i> JSON</button>
             </div>
         </div>
         <div class="table-responsive">
             <table class="staking-rewards-table">
                 <thead>
-                    <tr><th>Era</th><th>Date (UTC)</th><th>Amount</th><th>Validator</th><th>Block</th></tr>
+                    <tr><th>Era</th><th>Date (UTC)</th><th>Amount</th><th>Status</th><th>Validator</th><th>Block</th></tr>
                 </thead>
-                <tbody>${rowsHtml}</tbody>
+                <tbody>${rowsHtml || '<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text-secondary);">No rewards match this filter.</td></tr>'}</tbody>
             </table>
         </div>
         ${showMoreHtml}`;
 
+    resultsEl.querySelectorAll('.reward-filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            stakingRewardFilter = btn.getAttribute('data-filter');
+            stakingRewardsDisplayLimit = 100;
+            renderStakingRewards(stakingRewardsData);
+        });
+    });
     const csvBtn = document.getElementById('staking-dl-csv');
     if (csvBtn) csvBtn.addEventListener('click', downloadStakingRewardsCSV);
     const jsonBtn = document.getElementById('staking-dl-json');
@@ -1832,94 +1910,71 @@ function renderStakingRewards(data) {
         renderStakingRewards(stakingRewardsData);
     });
 
-    renderStakingRewardsChart(rewards);
+    renderStakingRewardsChart(data);
 }
 
-function renderStakingRewardsChart(rewards) {
+function renderStakingRewardsChart(data) {
     const canvas = document.getElementById('staking-rewards-chart');
     if (!canvas || typeof Chart === 'undefined') return;
     if (stakingRewardsChart) { stakingRewardsChart.destroy(); stakingRewardsChart = null; }
 
-    // Aggregate reward amounts per era; payouts with an unknown era are pooled.
-    const byEra = new Map();
-    let unknownTotal = 0;
-    let hasUnknown = false;
-    rewards.forEach(r => {
-        const amt = Number(r.amount) || 0;
-        if (r.era == null) { unknownTotal += amt; hasUnknown = true; }
-        else byEra.set(r.era, (byEra.get(r.era) || 0) + amt);
-    });
-    const eras = [...byEra.keys()].sort((a, b) => a - b);
-    const labels = eras.map(e => 'Era ' + e);
-    const values = eras.map(e => byEra.get(e));
-    if (hasUnknown) { labels.push('Unknown'); values.push(unknownTotal); }
-    if (labels.length === 0) return;
+    const claimedByEra = new Map();
+    const unclaimedByEra = new Map();
+    const eraSet = new Set();
+    const addTo = (map, era, amt) => {
+        const key = era == null ? 'Unknown' : era;
+        map.set(key, (map.get(key) || 0) + amt);
+        eraSet.add(key);
+    };
+    (data.claimed || []).forEach(r => addTo(claimedByEra, r.era, Number(r.amount) || 0));
+    (data.unclaimed || []).forEach(r => addTo(unclaimedByEra, r.era, Number(r.amount) || 0));
+
+    const eras = [...eraSet].filter(e => e !== 'Unknown').sort((a, b) => a - b);
+    if (eraSet.has('Unknown')) eras.push('Unknown');
+    if (eras.length === 0) return;
+    const labels = eras.map(e => e === 'Unknown' ? 'Unknown' : 'Era ' + e);
 
     stakingRewardsChart = new Chart(canvas.getContext('2d'), {
         type: 'bar',
         data: {
             labels: labels,
-            datasets: [{
-                label: 'Rewards (PDEX)',
-                data: values,
-                backgroundColor: 'rgba(0, 230, 118, 0.55)',
-                borderColor: '#00E676',
-                borderWidth: 1,
-                borderRadius: 3
-            }]
+            datasets: [
+                { label: 'Claimed', data: eras.map(e => claimedByEra.get(e) || 0), backgroundColor: 'rgba(0, 230, 118, 0.6)', borderColor: '#00E676', borderWidth: 1, borderRadius: 3 },
+                { label: 'Unpaid', data: eras.map(e => unclaimedByEra.get(e) || 0), backgroundColor: 'rgba(230, 0, 122, 0.55)', borderColor: '#E6007A', borderWidth: 1, borderRadius: 3 }
+            ]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: ctx => ' ' + Number(ctx.parsed.y).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' PDEX'
-                    }
-                }
+                legend: { position: 'bottom', labels: { color: '#ccc', font: { size: 11 } } },
+                tooltip: { callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + Number(ctx.parsed.y).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' PDEX' } }
             },
             scales: {
-                x: { ticks: { maxTicksLimit: 12, color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                y: { ticks: { color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+                x: { stacked: true, ticks: { maxTicksLimit: 12, color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                y: { stacked: true, ticks: { color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
             }
         }
     });
 }
 
-function stakingCsvCell(value) {
-    const s = String(value == null ? '' : value);
-    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-}
-
-function downloadStakingBlob(filename, content, type) {
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 function downloadStakingRewardsCSV() {
     if (!stakingRewardsData) return;
-    const rows = stakingRewardsData.rewards || [];
-    const lines = [['Era', 'Date (UTC)', 'Amount (PDEX)', 'Validator', 'Block', 'Block Hash'].join(',')];
+    const rows = getFilteredRewards(stakingRewardsData, stakingRewardFilter);
+    const lines = [['Era', 'Date (UTC)', 'Amount (PDEX)', 'Status', 'Validator', 'Block', 'Block Hash'].join(',')];
     rows.forEach(r => {
         const date = r.timestamp ? new Date(r.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '';
         lines.push([
             r.era != null ? r.era : '',
             date,
             Number(r.amount || 0).toFixed(6),
+            r.status || '',
             r.validator || '',
             r.block != null ? r.block : '',
             r.blockHash || ''
         ].map(stakingCsvCell).join(','));
     });
-    downloadStakingBlob(`staking-rewards-${stakingRewardsData.address || 'address'}.csv`, lines.join('\r\n'), 'text/csv;charset=utf-8');
+    downloadStakingBlob(`staking-rewards-${stakingRewardFilter}-${stakingRewardsData.address || 'address'}.csv`, lines.join('\r\n'), 'text/csv;charset=utf-8');
 }
 
 function downloadStakingRewardsJSON() {
@@ -1930,11 +1985,303 @@ function downloadStakingRewardsJSON() {
         generatedAt: new Date().toISOString(),
         summary: stakingRewardsData.summary,
         index: stakingRewardsData.index,
-        rewards: stakingRewardsData.rewards
+        claimed: stakingRewardsData.claimed,
+        unclaimed: stakingRewardsData.unclaimed
     };
     downloadStakingBlob(`staking-rewards-${stakingRewardsData.address || 'address'}.json`, JSON.stringify(payload, null, 2), 'application/json');
 }
 
+// --- Read-only Wallet Connect + Dashboard ---
+function getStoredWallet() {
+    try { return localStorage.getItem(WALLET_STORAGE_KEY) || ''; }
+    catch (e) { return ''; }
+}
+function setStoredWallet(addr) {
+    try { if (addr) localStorage.setItem(WALLET_STORAGE_KEY, addr); else localStorage.removeItem(WALLET_STORAGE_KEY); }
+    catch (e) { }
+}
+function refreshConnectWalletButton() {
+    const label = document.getElementById('connect-wallet-label');
+    if (!label) return;
+    const stored = getStoredWallet();
+    label.textContent = stored ? stakingShortAddress(stored) : 'Connect Wallet';
+}
+
+// Enumerate accounts from installed Substrate wallet extensions (read-only).
+async function getInjectedAccounts() {
+    const injected = window.injectedWeb3;
+    if (!injected || Object.keys(injected).length === 0) return null;
+    const accounts = [];
+    for (const key of Object.keys(injected)) {
+        try {
+            const provider = injected[key];
+            if (!provider || typeof provider.enable !== 'function') continue;
+            const ext = await provider.enable('Polkadex Explorer');
+            if (ext && ext.accounts && typeof ext.accounts.get === 'function') {
+                const accs = await ext.accounts.get();
+                for (const a of accs) accounts.push({ address: a.address, name: a.name || key, source: key });
+            }
+        } catch (e) { /* user rejected this extension */ }
+    }
+    return accounts;
+}
+
+function connectWallet() {
+    const stored = getStoredWallet();
+    window.location.hash = stored ? ('wallet/' + stored) : 'wallet';
+}
+function selectWallet(address) {
+    if (!isValidPolkadexAddress(address)) return;
+    setStoredWallet(address);
+    refreshConnectWalletButton();
+    window.location.hash = 'wallet/' + address;
+}
+function disconnectWallet() {
+    setStoredWallet('');
+    refreshConnectWalletButton();
+    window.location.hash = 'wallet';
+}
+
+function initWalletPage(address) {
+    const root = document.getElementById('wallet-dashboard');
+    if (!root) return;
+    if (address) {
+        if (isValidPolkadexAddress(address)) fetchWalletDashboard(address);
+        else root.innerHTML = '<div class="list-container glass" style="padding:32px;color:var(--error);">Invalid Polkadex address.</div>';
+        return;
+    }
+    renderWalletConnectPanel(root);
+}
+
+async function renderWalletConnectPanel(root) {
+    root.innerHTML = `
+        <div class="list-container glass">
+            <div class="list-header"><h2>Connect Wallet</h2><span style="color:var(--text-secondary);font-size:0.78rem;">Read-only mode</span></div>
+            <div style="padding: 24px;">
+                <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 16px; line-height: 1.6;">
+                    Connect a Substrate wallet extension to open your dashboard. The explorer only reads your
+                    address — it can never request a signature or move funds.
+                </p>
+                <div id="wallet-accounts" style="display:flex; flex-direction:column; gap:10px;">
+                    <div style="color: var(--text-muted); font-size: 0.85rem;">Looking for wallet extensions…</div>
+                </div>
+                <div style="margin-top: 22px; border-top: 1px solid var(--border-color); padding-top: 18px;">
+                    <p style="color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 10px;">…or view any address in read-only mode:</p>
+                    <div class="staking-search-bar">
+                        <input type="text" id="wallet-manual-input" placeholder="Polkadex address" autocomplete="off" spellcheck="false">
+                        <button id="wallet-manual-btn"><i class='bx bx-search'></i> View</button>
+                    </div>
+                    <div id="wallet-manual-error" class="staking-error" style="display:none;"></div>
+                </div>
+            </div>
+        </div>`;
+
+    const manualBtn = document.getElementById('wallet-manual-btn');
+    const manualInput = document.getElementById('wallet-manual-input');
+    const manualErr = document.getElementById('wallet-manual-error');
+    const submitManual = () => {
+        const addr = (manualInput.value || '').trim();
+        if (!isValidPolkadexAddress(addr)) {
+            manualErr.textContent = 'That does not look like a valid Polkadex address.';
+            manualErr.style.display = 'block';
+            return;
+        }
+        selectWallet(addr);
+    };
+    if (manualBtn) manualBtn.addEventListener('click', submitManual);
+    if (manualInput) manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitManual(); });
+
+    const accountsEl = document.getElementById('wallet-accounts');
+    const accounts = await getInjectedAccounts();
+    if (accounts === null) {
+        accountsEl.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.6;">
+            No Substrate wallet extension detected. Install
+            <a href="https://polkadot.js.org/extension/" target="_blank" rel="noopener" style="color:var(--brand-secondary);">Polkadot.js</a>,
+            Talisman or SubWallet, or use the read-only address option below.</div>`;
+        return;
+    }
+    if (accounts.length === 0) {
+        accountsEl.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No accounts were shared. Authorise this site in your wallet extension and try again.</div>';
+        return;
+    }
+    accountsEl.innerHTML = accounts.map(a => `
+        <button class="wallet-account-btn" data-address="${stakingEscapeHtml(a.address)}">
+            <span class="wallet-account-name">${stakingEscapeHtml(a.name)}</span>
+            <span class="wallet-account-addr">${stakingShortAddress(a.address)}</span>
+        </button>`).join('');
+    accountsEl.querySelectorAll('.wallet-account-btn').forEach(btn => {
+        btn.addEventListener('click', () => selectWallet(btn.getAttribute('data-address')));
+    });
+}
+
+async function fetchWalletDashboard(address) {
+    const root = document.getElementById('wallet-dashboard');
+    if (!root) return;
+    root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading wallet dashboard…</div>';
+    try {
+        const [walletRes, priceRes] = await Promise.all([
+            fetch('/api/wallet/' + encodeURIComponent(address)),
+            fetch('/api/price-history?days=30').catch(() => null)
+        ]);
+        const data = await walletRes.json();
+        if (!walletRes.ok || data.error) throw new Error(data.error || ('Request failed (' + walletRes.status + ')'));
+        let price = { history: [], configured: false };
+        if (priceRes) { try { price = await priceRes.json(); } catch (e) { } }
+        renderWalletDashboard(data, price);
+    } catch (e) {
+        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderWalletDashboard(data, price) {
+    const root = document.getElementById('wallet-dashboard');
+    if (!root) return;
+    const identity = data.identity && data.identity !== 'Unknown' ? data.identity : null;
+    const staking = data.staking || {};
+    const rewards = data.rewards || {};
+    const network = data.network || {};
+    const balance = data.balance || {};
+
+    const validatorsHtml = (staking.nominating && staking.nominating.length)
+        ? staking.nominating.map(v => `
+            <a href="#validator/${encodeURIComponent(v.address)}" class="wallet-validator-row item-link">
+                <span>${v.name && v.name !== 'Unknown' ? stakingEscapeHtml(v.name) : stakingShortAddress(v.address)}</span>
+                <i class='bx bx-chevron-right'></i>
+            </a>`).join('')
+        : '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 8px 0;">This wallet is not nominating any validators.</div>';
+
+    const txHtml = (data.recentTransactions && data.recentTransactions.length)
+        ? data.recentTransactions.map(t => {
+            const dir = t.from === data.address ? 'out' : 'in';
+            const date = t.timestamp ? new Date(t.timestamp).toLocaleDateString('en-US') : '—';
+            return `<tr>
+                <td><a href="#tx/${t.block}/${t.hash}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(t.hash)}</a></td>
+                <td><span class="reward-badge ${dir === 'out' ? 'unclaimed' : 'claimed'}">${dir === 'out' ? 'Sent' : 'Received'}</span></td>
+                <td>${stakingEscapeHtml(t.amount || '—')}</td>
+                <td style="white-space:nowrap;">${date}</td>
+            </tr>`;
+        }).join('')
+        : '<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text-muted);">No recent transactions.</td></tr>';
+
+    const recentRewardsHtml = (rewards.recentClaimed && rewards.recentClaimed.length)
+        ? rewards.recentClaimed.map(r => `<tr>
+            <td>${r.era != null ? r.era : '—'}</td>
+            <td class="staking-amount">${stakingFormatPDEX(r.amount)} PDEX</td>
+            <td style="white-space:nowrap;">${r.timestamp ? new Date(r.timestamp).toLocaleDateString('en-US') : '—'}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted);">No claimed rewards indexed yet.</td></tr>';
+
+    const priceConfigured = price && price.configured;
+    const priceHistory = (price && price.history) || [];
+    const latestPrice = data.price || (price && price.latest) || null;
+
+    root.innerHTML = `
+        <div class="list-container glass">
+            <div class="list-header">
+                <h2><i class='bx bx-wallet'></i> ${identity ? stakingEscapeHtml(identity) : 'Wallet Dashboard'}</h2>
+                <div style="display:flex; gap:14px; align-items:center;">
+                    <a href="#staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">Full reward history</a>
+                    <button id="wallet-switch-btn" class="staking-download-btn">Switch wallet</button>
+                </div>
+            </div>
+            <div style="padding: 12px 24px 0;">
+                <a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--text-secondary);font-size:0.78rem;">${stakingEscapeHtml(data.address)}</a>
+            </div>
+            <div class="staking-summary-grid">
+                <div class="staking-summary-card"><div class="label">Total Balance</div><div class="value accent">${stakingFormatPDEX(balance.total)} PDEX</div></div>
+                <div class="staking-summary-card"><div class="label">Total Staked</div><div class="value">${stakingFormatPDEX(staking.totalStaked)} PDEX</div></div>
+                <div class="staking-summary-card"><div class="label">Claimed Rewards</div><div class="value">${stakingFormatPDEX(rewards.claimedTotal)} PDEX</div></div>
+                <div class="staking-summary-card"><div class="label">Unpaid Rewards</div><div class="value" style="color:var(--brand-primary);">${stakingFormatPDEX(rewards.unpaidTotal)} PDEX${rewards.unclaimedFresh ? '' : ' <span style="font-size:0.6rem;color:var(--text-muted);">computing…</span>'}</div></div>
+            </div>
+        </div>
+
+        <div class="wallet-grid">
+            <div class="list-container glass">
+                <div class="list-header"><h2>PDEX Price (30d)</h2>${latestPrice ? `<span style="color:var(--brand-secondary);font-size:0.85rem;">$${Number(latestPrice.price).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>` : ''}</div>
+                <div class="staking-chart-wrap" style="height:220px;">
+                    ${priceHistory.length ? '<canvas id="wallet-price-chart"></canvas>' : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.85rem;text-align:center;padding:0 20px;">${priceConfigured ? 'Collecting price history — the chart fills in as data is polled.' : 'Price feed not configured (set CMC_API_KEY on the backend).'}</div>`}
+                </div>
+            </div>
+            <div class="list-container glass">
+                <div class="list-header"><h2>Staking Overview</h2></div>
+                <div class="wallet-stat-list">
+                    <div class="wallet-stat"><span>Total Staked</span><strong>${stakingFormatPDEX(staking.totalStaked)} PDEX</strong></div>
+                    <div class="wallet-stat"><span>Minimum Stake</span><strong>${stakingFormatPDEX(network.minStake)} PDEX</strong></div>
+                    <div class="wallet-stat"><span>Active Nominators</span><strong>${stakingFormatNumber(network.activeNominators)} / ${stakingFormatNumber(network.totalNominators)}</strong></div>
+                    <div class="wallet-stat"><span>Active Validators</span><strong>${stakingFormatNumber(network.activeValidators)} / ${stakingFormatNumber(network.totalValidators)}</strong></div>
+                    <div class="wallet-stat"><span>Staking Period (era)</span><strong>${formatDuration(network.eraDurationMs)}</strong></div>
+                    <div class="wallet-stat"><span>Unstaking Period</span><strong>${formatDuration(network.unbondingMs)}</strong></div>
+                    <div class="wallet-stat"><span>Current Era</span><strong>${stakingFormatNumber(network.currentEra)}</strong></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="wallet-grid">
+            <div class="list-container glass">
+                <div class="list-header"><h2>My Validators</h2><span style="color:var(--text-secondary);font-size:0.78rem;">${(staking.nominating || []).length} nominated</span></div>
+                <div style="padding: 8px 24px 20px;">${validatorsHtml}</div>
+            </div>
+            <div class="list-container glass">
+                <div class="list-header"><h2>Recent Staking Rewards</h2><a href="#staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View all</a></div>
+                <div class="table-responsive">
+                    <table class="staking-rewards-table">
+                        <thead><tr><th>Era</th><th>Amount</th><th>Date</th></tr></thead>
+                        <tbody>${recentRewardsHtml}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="list-container glass">
+            <div class="list-header"><h2>Recent Transactions</h2><a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View account</a></div>
+            <div class="table-responsive">
+                <table class="staking-rewards-table">
+                    <thead><tr><th>Hash</th><th>Direction</th><th>Amount</th><th>Date</th></tr></thead>
+                    <tbody>${txHtml}</tbody>
+                </table>
+            </div>
+        </div>`;
+
+    const switchBtn = document.getElementById('wallet-switch-btn');
+    if (switchBtn) switchBtn.addEventListener('click', disconnectWallet);
+    if (priceHistory.length) renderWalletPriceChart(priceHistory);
+}
+
+function renderWalletPriceChart(history) {
+    const canvas = document.getElementById('wallet-price-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (walletPriceChart) { walletPriceChart.destroy(); walletPriceChart = null; }
+    walletPriceChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: history.map(p => new Date(p.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })),
+            datasets: [{
+                label: 'PDEX / USD',
+                data: history.map(p => p.price),
+                borderColor: '#00E676',
+                backgroundColor: 'rgba(0, 230, 118, 0.12)',
+                borderWidth: 2,
+                pointRadius: 0,
+                fill: true,
+                tension: 0.25
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: ctx => ' $' + Number(ctx.parsed.y).toLocaleString('en-US', { maximumFractionDigits: 6 }) } }
+            },
+            scales: {
+                x: { ticks: { maxTicksLimit: 8, color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                y: { ticks: { color: '#888', callback: v => '$' + v }, grid: { color: 'rgba(255,255,255,0.05)' } }
+            }
+        }
+    });
+}
+
+// --- Event wiring: staking rewards + wallet connect ---
 const stakingSearchBtn = document.getElementById('staking-search-btn');
 if (stakingSearchBtn) stakingSearchBtn.addEventListener('click', submitStakingSearch);
 const stakingAddressInput = document.getElementById('staking-address-input');
@@ -1943,6 +2290,9 @@ if (stakingAddressInput) {
         if (e.key === 'Enter') submitStakingSearch();
     });
 }
+const connectWalletBtn = document.getElementById('connect-wallet-btn');
+if (connectWalletBtn) connectWalletBtn.addEventListener('click', connectWallet);
+refreshConnectWalletButton();
 
 setInterval(() => {
     renderBlocks();

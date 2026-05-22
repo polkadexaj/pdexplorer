@@ -2,8 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import { decodeAddress, encodeAddress } from '@polkadot/util-crypto';
-import fs from 'fs/promises';
 import path from 'path';
+import * as db from './db.js';
 
 const app = express();
 app.use(cors());
@@ -11,38 +11,6 @@ app.use(cors());
 // Use dedicated data directory for Docker volumes
 const PORT = process.env.PORT || 3001;
 const DATA_DIR = path.join(process.cwd(), 'data');
-const CACHE_FILE = path.join(DATA_DIR, 'cache.json');
-const HOLDERS_CACHE_FILE = path.join(DATA_DIR, 'holders_cache.json');
-const TX_CACHE_FILE = path.join(DATA_DIR, 'transactions_cache.json');
-const BLOCKS_CACHE_FILE = path.join(DATA_DIR, 'blocks_cache.json');
-const EVENTS_CACHE_FILE = path.join(DATA_DIR, 'events_cache.json');
-const VALIDATOR_HISTORY_CACHE_FILE = path.join(DATA_DIR, 'validator_history_cache.json');
-const ACCOUNT_CACHE_FILE = path.join(DATA_DIR, 'account_history_cache.json');
-const VALIDATOR_TRIGGERS_CACHE_FILE = path.join(DATA_DIR, 'validator_triggers_cache.json');
-const NETWORK_INFO_CACHE_FILE = path.join(DATA_DIR, 'network_info_cache.json');
-const STAKING_REWARDS_CACHE_FILE = path.join(DATA_DIR, 'staking_rewards_cache.json');
-
-const CACHE_DEFAULTS = new Map([
-    [CACHE_FILE, { validators: [], lastSync: 0, status: 'Initializing' }],
-    [HOLDERS_CACHE_FILE, { holders: [], lastSync: 0, status: 'Initializing' }],
-    [TX_CACHE_FILE, { transactions: [], lastSync: 0, status: 'Initializing', latestScannedBlock: 0, oldestScannedBlock: 0, scannedBlocks: 0, scannerVersion: 0 }],
-    [BLOCKS_CACHE_FILE, { blocks: [], lastSync: 0, status: 'Initializing' }],
-    [EVENTS_CACHE_FILE, { events: [], lastSync: 0, status: 'Initializing' }],
-    [VALIDATOR_HISTORY_CACHE_FILE, {}],
-    [ACCOUNT_CACHE_FILE, { accounts: {} }],
-    [VALIDATOR_TRIGGERS_CACHE_FILE, {}],
-    [NETWORK_INFO_CACHE_FILE, { networkInfo: null, lastSync: 0, status: 'Initializing' }],
-    [STAKING_REWARDS_CACHE_FILE, {
-        rewards: {},
-        latestScannedBlock: 0,
-        oldestScannedBlock: 0,
-        backfillCursor: 0,
-        backfillComplete: false,
-        initialized: false,
-        lastSync: 0,
-        status: 'Initializing'
-    }]
-]);
 const FIVE_MINUTES = 5 * 60 * 1000;
 const THIRTY_MINUTES = 30 * 60 * 1000;
 const THIRTY_SECONDS = 30 * 1000;
@@ -59,6 +27,11 @@ const STAKING_REWARDS_SCAN_BATCH = readPositiveInteger(process.env.STAKING_REWAR
 const STAKING_REWARDS_BACKFILL_CHUNK = readPositiveInteger(process.env.STAKING_REWARDS_BACKFILL_CHUNK, 500);
 const STAKING_REWARDS_FORWARD_MAX = readPositiveInteger(process.env.STAKING_REWARDS_FORWARD_MAX, 20000);
 const STAKING_REWARDS_MIN_BLOCK = readPositiveInteger(process.env.STAKING_REWARDS_MIN_BLOCK, 1);
+// Wallet dashboard / price chart / unpaid-reward tuning.
+const CMC_API_KEY = process.env.CMC_API_KEY || '';
+const CMC_SYMBOL = process.env.CMC_SYMBOL || 'PDEX';
+const PRICE_SYNC_INTERVAL = readPositiveInteger(process.env.PRICE_SYNC_INTERVAL_MS, 10 * 60 * 1000);
+const UNCLAIMED_TTL = readPositiveInteger(process.env.UNCLAIMED_TTL_MS, 20 * 60 * 1000);
 const DISPLAY_NAME_OVERRIDES = new Map([
     ['esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew', 'Polkadex Treasury'],
     ['esm4teFDTrvy4VJ8msKTQmAywumeinGjzsrFzmTEB5FBiiekE', 'Gate.IO']
@@ -70,6 +43,8 @@ let isSyncingTx = false;
 let isSyncingBlocks = false;
 let isSyncingEvents = false;
 let isSyncingStakingRewards = false;
+let isSyncingPrice = false;
+const computingUnclaimed = new Set();
 let isCrawlingAccount = {};
 let globalApi = null;
 let chainSS58 = 88; // Polkadex SS58 prefix; refreshed from the chain registry on connect.
@@ -78,54 +53,6 @@ const identityCache = new Map();
 function readPositiveInteger(value, fallback) {
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-// Ensure cache exists
-async function initCache() {
-    try { await fs.mkdir(DATA_DIR, { recursive: true }); } catch (e) { }
-    for (const [file, defaultData] of CACHE_DEFAULTS) {
-        await readJsonCache(file, defaultData);
-    }
-}
-
-function isPlainObject(value) {
-    return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function normalizeCacheData(data, defaultData) {
-    const normalized = isPlainObject(data) ? { ...data } : {};
-    for (const [key, fallback] of Object.entries(defaultData)) {
-        if (Array.isArray(fallback)) {
-            normalized[key] = Array.isArray(normalized[key]) ? normalized[key] : [...fallback];
-        } else if (isPlainObject(fallback)) {
-            normalized[key] = isPlainObject(normalized[key]) ? normalized[key] : { ...fallback };
-        } else if (normalized[key] === undefined) {
-            normalized[key] = fallback;
-        }
-    }
-    return normalized;
-}
-
-async function readJsonCache(file, defaultData) {
-    let data = defaultData;
-    let needsWrite = false;
-    try {
-        data = JSON.parse(await fs.readFile(file, 'utf8'));
-    } catch (err) {
-        needsWrite = true;
-    }
-
-    const normalized = normalizeCacheData(data, defaultData);
-    if (JSON.stringify(normalized) !== JSON.stringify(data)) needsWrite = true;
-    if (needsWrite) await fs.writeFile(file, JSON.stringify(normalized));
-    return normalized;
-}
-
-async function markCacheError(file, defaultData, err) {
-    const cacheData = await readJsonCache(file, defaultData);
-    cacheData.status = 'Error';
-    cacheData.error = err.message;
-    await fs.writeFile(file, JSON.stringify(cacheData));
 }
 
 function formatPDEX(balance) { return Number(balance) / 10 ** 12; }
@@ -180,7 +107,7 @@ async function getEraValidatorStake(api, era, address) {
 
 async function getNetworkInfo() {
     if (!globalApi) throw new Error('API not ready');
-    const cacheData = await readJsonCache(NETWORK_INFO_CACHE_FILE, CACHE_DEFAULTS.get(NETWORK_INFO_CACHE_FILE));
+    const cacheData = db.getKv('network_info') || { networkInfo: null, lastSync: 0, status: 'Initializing' };
     if (cacheData.networkInfo && Date.now() - cacheData.lastSync < FIVE_MINUTES) return cacheData;
 
     const activeEraOption = await globalApi.query.staking.activeEra();
@@ -262,7 +189,7 @@ async function getNetworkInfo() {
         lastSync: Date.now(),
         status: 'Synced'
     };
-    await fs.writeFile(NETWORK_INFO_CACHE_FILE, JSON.stringify(nextCacheData));
+    db.setKv('network_info', nextCacheData);
     return nextCacheData;
 }
 
@@ -551,13 +478,12 @@ async function applyDisplayNameOverridesToHolders(holders) {
 async function syncValidatorHistory(activeEra, validators) {
     if (!globalApi || !globalApi.query.staking.erasValidatorPrefs) return;
 
-    const historyData = {};
-    const triggerData = {};
     const validatorAddresses = validators.map(address => address.toString());
     const firstEra = Math.max(activeEra - VALIDATOR_HISTORY_ERAS + 1, 0);
+    const historyRows = [];
+    const perAddress = {};
 
     for (let era = activeEra; era >= firstEra; era--) {
-        historyData[era] = {};
         for (const address of validators) {
             const addrStr = address.toString();
             try {
@@ -566,44 +492,21 @@ async function syncValidatorHistory(activeEra, validators) {
                     getEraValidatorStake(globalApi, era, address)
                 ]);
                 const commission = getCommissionPercent(prefs);
-                const apy = 23.09 * (1 - (commission / 100));
-                historyData[era][addrStr] = {
-                    commission,
-                    stake: formatPDEX(totalStake),
-                    apy
-                };
+                const row = { era, address: addrStr, commission, stake: formatPDEX(totalStake), apy: 23.09 * (1 - (commission / 100)) };
+                historyRows.push(row);
+                (perAddress[addrStr] = perAddress[addrStr] || []).push(row);
             } catch (err) {
                 console.warn(`Validator history skipped ${addrStr} era ${era}:`, err.message);
             }
         }
     }
 
+    // UPSERT keeps eras already stored, so history grows past the rolling window.
+    db.upsertValidatorHistory(historyRows);
     for (const address of validatorAddresses) {
-        const rows = [];
-        for (let era = firstEra; era <= activeEra; era++) {
-            if (historyData[era] && historyData[era][address]) {
-                rows.push({ era, ...historyData[era][address] });
-            }
-        }
-        for (let i = 1; i < rows.length; i++) {
-            const prev = rows[i - 1];
-            const current = rows[i];
-            if (prev.commission <= 50 && current.commission > 50) {
-                if (!triggerData[address]) triggerData[address] = [];
-                triggerData[address].push({
-                    era: current.era,
-                    prevCommission: prev.commission,
-                    newCommission: current.commission,
-                    timestamp: Date.now()
-                });
-            }
-        }
+        const rows = (perAddress[address] || []).slice().sort((a, b) => a.era - b.era);
+        db.replaceValidatorTriggers(address, getCommissionTriggers(rows));
     }
-
-    await Promise.all([
-        fs.writeFile(VALIDATOR_HISTORY_CACHE_FILE, JSON.stringify(historyData)),
-        fs.writeFile(VALIDATOR_TRIGGERS_CACHE_FILE, JSON.stringify(triggerData))
-    ]);
 }
 
 function getCommissionTriggers(history) {
@@ -651,50 +554,44 @@ async function loadValidatorHistory(address) {
     }
 
     const triggers = getCommissionTriggers(history);
-    const [historyData, triggersCache] = await Promise.all([
-        readJsonCache(VALIDATOR_HISTORY_CACHE_FILE, CACHE_DEFAULTS.get(VALIDATOR_HISTORY_CACHE_FILE)),
-        readJsonCache(VALIDATOR_TRIGGERS_CACHE_FILE, CACHE_DEFAULTS.get(VALIDATOR_TRIGGERS_CACHE_FILE))
-    ]);
-    for (const row of history) {
-        if (!historyData[row.era]) historyData[row.era] = {};
-        historyData[row.era][address] = {
-            commission: row.commission,
-            stake: row.stake,
-            apy: row.apy
-        };
-    }
-    triggersCache[address] = triggers;
-    await Promise.all([
-        fs.writeFile(VALIDATOR_HISTORY_CACHE_FILE, JSON.stringify(historyData)),
-        fs.writeFile(VALIDATOR_TRIGGERS_CACHE_FILE, JSON.stringify(triggersCache))
-    ]);
+    db.upsertValidatorHistory(history.map(h => ({ era: h.era, address, commission: h.commission, stake: h.stake, apy: h.apy })));
+    db.replaceValidatorTriggers(address, triggers);
 
     return { history, triggers };
 }
 
-// --- FALLBACK LIST ENDPOINTS ---
-app.get('/api/validators', async (req, res) => { try { res.json(await readJsonCache(CACHE_FILE, CACHE_DEFAULTS.get(CACHE_FILE))); } catch (err) { res.json(CACHE_DEFAULTS.get(CACHE_FILE)); } });
+// --- LIST ENDPOINTS (served from SQLite) ---
+app.get('/api/validators', (req, res) => {
+    try { res.json(db.getValidators()); }
+    catch (err) { res.status(500).json({ validators: [], status: 'Error', error: err.message }); }
+});
 app.get('/api/network-info', async (req, res) => {
     try {
         res.json(await getNetworkInfo());
     } catch (err) {
-        const cacheData = await readJsonCache(NETWORK_INFO_CACHE_FILE, CACHE_DEFAULTS.get(NETWORK_INFO_CACHE_FILE));
+        const cacheData = db.getKv('network_info') || { networkInfo: null, lastSync: 0, status: 'Initializing' };
         res.json({ ...cacheData, status: 'Error', error: err.message });
     }
 });
 app.get('/api/holders', async (req, res) => {
     try {
-        const cacheData = await readJsonCache(HOLDERS_CACHE_FILE, CACHE_DEFAULTS.get(HOLDERS_CACHE_FILE));
+        const cacheData = db.getHolders();
         cacheData.holders = await applyDisplayNameOverridesToHolders(cacheData.holders);
         res.json(cacheData);
-    } catch (err) { res.json(CACHE_DEFAULTS.get(HOLDERS_CACHE_FILE)); }
+    } catch (err) { res.status(500).json({ holders: [], status: 'Error', error: err.message }); }
 });
-app.get('/api/transactions', async (req, res) => {
+app.get('/api/transactions', (req, res) => {
     try {
-        const cacheData = await readJsonCache(TX_CACHE_FILE, CACHE_DEFAULTS.get(TX_CACHE_FILE));
-        cacheData.transactions = getCachedFinancialTransactions(cacheData);
-        res.json(cacheData);
-    } catch (err) { res.json(CACHE_DEFAULTS.get(TX_CACHE_FILE)); }
+        const state = db.getSyncState('transactions');
+        res.json({
+            transactions: db.getRecentTransactions(1000),
+            totalCount: db.countTransactions(),
+            lastSync: state.lastSync || 0,
+            status: state.status || 'Initializing',
+            latestScannedBlock: state.latestScannedBlock || 0,
+            oldestScannedBlock: state.oldestScannedBlock || 0
+        });
+    } catch (err) { res.status(500).json({ transactions: [], status: 'Error', error: err.message }); }
 });
 app.get('/api/transactions/older', async (req, res) => {
     if (!globalApi) return res.status(500).json({ error: 'API not ready' });
@@ -720,8 +617,18 @@ app.get('/api/transactions/older', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-app.get('/api/blocks', async (req, res) => { try { res.json(await readJsonCache(BLOCKS_CACHE_FILE, CACHE_DEFAULTS.get(BLOCKS_CACHE_FILE))); } catch (err) { res.json(CACHE_DEFAULTS.get(BLOCKS_CACHE_FILE)); } });
-app.get('/api/events', async (req, res) => { try { res.json(await readJsonCache(EVENTS_CACHE_FILE, CACHE_DEFAULTS.get(EVENTS_CACHE_FILE))); } catch (err) { res.json(CACHE_DEFAULTS.get(EVENTS_CACHE_FILE)); } });
+app.get('/api/blocks', (req, res) => {
+    try {
+        const state = db.getSyncState('blocks');
+        res.json({ blocks: db.getRecentBlocks(200), lastSync: state.lastSync || 0, status: state.status || 'Initializing' });
+    } catch (err) { res.status(500).json({ blocks: [], status: 'Error', error: err.message }); }
+});
+app.get('/api/events', (req, res) => {
+    try {
+        const state = db.getSyncState('events');
+        res.json({ events: db.getRecentEvents(500), lastSync: state.lastSync || 0, status: state.status || 'Initializing' });
+    } catch (err) { res.status(500).json({ events: [], status: 'Error', error: err.message }); }
+});
 
 // --- DETAIL ENDPOINTS (Restored) ---
 app.get('/api/block/:id', async (req, res) => {
@@ -785,8 +692,6 @@ app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
 app.get('/api/validator/:address', async (req, res) => {
     try {
         const address = req.params.address.trim();
-        let historyData = {};
-        try { historyData = await readJsonCache(VALIDATOR_HISTORY_CACHE_FILE, CACHE_DEFAULTS.get(VALIDATOR_HISTORY_CACHE_FILE)); } catch (e) { }
 
         let identity = await getIdentity(globalApi, address);
         let controller = address;
@@ -795,25 +700,13 @@ app.get('/api/validator/:address', async (req, res) => {
             if (bondedOpt && bondedOpt.isSome) controller = bondedOpt.unwrap().toString();
         }
 
-        const eras = Object.keys(historyData).map(Number).sort((a, b) => b - a);
-        const history = [];
-        for (const era of eras) {
-            if (historyData[era] && historyData[era][address]) {
-                history.push({ era: era, commission: historyData[era][address].commission, stake: historyData[era][address].stake, apy: historyData[era][address].apy });
-            }
-        }
-
-        let triggers = [];
-        try {
-            const triggersCache = await readJsonCache(VALIDATOR_TRIGGERS_CACHE_FILE, CACHE_DEFAULTS.get(VALIDATOR_TRIGGERS_CACHE_FILE));
-            if (triggersCache[address]) triggers = triggersCache[address].sort((a, b) => b.era - a.era);
-        } catch (e) { }
+        let history = db.getValidatorHistory(address);
+        let triggers = db.getValidatorTriggers(address);
 
         if (history.length < VALIDATOR_HISTORY_ERAS) {
             const loadedHistory = await loadValidatorHistory(address);
-            history.length = 0;
-            history.push(...loadedHistory.history);
-            triggers = loadedHistory.triggers.sort((a, b) => b.era - a.era);
+            history = loadedHistory.history;
+            triggers = loadedHistory.triggers.slice().sort((a, b) => b.era - a.era);
         }
 
         res.json({ address: address, identity: identity, controller: controller, history: history, triggers: triggers });
@@ -857,39 +750,30 @@ app.get('/api/account/:address', async (req, res) => {
         const free = Number(accountInfo.data.free) / 10 ** 12;
         const reserved = Number(accountInfo.data.reserved) / 10 ** 12;
 
-        let txs = [], evs = [], rank = "0", status = 'Synced';
+        let txs = [], evs = [], rank = "0";
         try {
-            const holdersArray = (await readJsonCache(HOLDERS_CACHE_FILE, CACHE_DEFAULTS.get(HOLDERS_CACHE_FILE))).holders;
-            const index = holdersArray.findIndex(h => h.address === address);
-            if (index !== -1) rank = (index + 1).toString();
-        } catch (e) { }
-        try {
-            const globalTxCache = await readJsonCache(TX_CACHE_FILE, CACHE_DEFAULTS.get(TX_CACHE_FILE));
-            if (globalTxCache && Array.isArray(globalTxCache.transactions)) {
-                txs = globalTxCache.transactions.filter(t => t.from === address || t.to === address);
-            }
-            const globalEventsCache = await readJsonCache(EVENTS_CACHE_FILE, CACHE_DEFAULTS.get(EVENTS_CACHE_FILE));
-            if (globalEventsCache && Array.isArray(globalEventsCache.events)) {
-                evs = globalEventsCache.events.filter(e => e.signerAddress === address);
-            }
+            const holderRank = db.getHolderRank(address);
+            if (holderRank) rank = holderRank.toString();
+            txs = db.getTransactionsByAddress(address, 200);
+            evs = db.getEventsByAddress(address, 200);
         } catch (e) { }
 
-        res.json({ account: address, display: name, balanceTotal: free + reserved, balanceFree: free, balanceFrozen: reserved, roles: "User", rank: rank, transactions: txs, events: evs, status: status });
+        res.json({ account: address, display: name, balanceTotal: free + reserved, balanceFree: free, balanceFrozen: reserved, roles: "User", rank: rank, transactions: txs, events: evs, status: 'Synced' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- STAKING REWARDS ENDPOINTS ---
-app.get('/api/staking-rewards-status', async (req, res) => {
+app.get('/api/staking-rewards-status', (req, res) => {
     try {
-        const cacheData = await readJsonCache(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE));
+        const s = db.getSyncState('staking_rewards');
         res.json({
-            latestScannedBlock: cacheData.latestScannedBlock || 0,
-            oldestScannedBlock: cacheData.oldestScannedBlock || 0,
-            backfillComplete: !!cacheData.backfillComplete,
-            addressesIndexed: isPlainObject(cacheData.rewards) ? Object.keys(cacheData.rewards).length : 0,
-            totalRewardsIndexed: countIndexedRewards(cacheData),
-            lastSync: cacheData.lastSync || 0,
-            status: cacheData.status || 'Initializing'
+            latestScannedBlock: s.latestScannedBlock || 0,
+            oldestScannedBlock: s.oldestScannedBlock || 0,
+            backfillComplete: !!s.backfillComplete,
+            addressesIndexed: db.countStakingRewardStashes(),
+            totalRewardsIndexed: db.countStakingRewards(),
+            lastSync: s.lastSync || 0,
+            status: s.status || 'Initializing'
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -898,49 +782,184 @@ app.get('/api/staking-rewards-status', async (req, res) => {
 
 app.get('/api/staking-rewards/:address', async (req, res) => {
     const raw = (req.params.address || '').trim();
-    if (!isValidAddress(raw)) {
-        return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
-    }
+    if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
     let address;
     try { address = normalizeAddress(raw); }
     catch (e) { return res.status(400).json({ error: 'Invalid Polkadex wallet address.' }); }
 
     try {
-        const cacheData = await readJsonCache(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE));
-        const indexed = (isPlainObject(cacheData.rewards) && Array.isArray(cacheData.rewards[address]))
-            ? cacheData.rewards[address]
-            : [];
-        const rewards = [...indexed].sort((a, b) => (b.block - a.block) || (b.eventIndex - a.eventIndex));
+        const claimed = db.getStakingRewards(address).map(r => ({
+            era: r.era, amount: r.amount, validator: r.validator, block: r.block,
+            blockHash: r.blockHash, eventIndex: r.eventIndex, timestamp: r.timestamp, status: 'claimed'
+        }));
+        const unclaimed = db.getUnclaimed(address).map(r => ({
+            era: r.era, amount: r.amount, validator: r.validator || null, block: null,
+            blockHash: null, eventIndex: null, timestamp: null, status: 'unclaimed'
+        }));
+
+        // Unpaid rewards are computed on demand; refresh in the background when stale.
+        const unclaimedAt = db.getUnclaimedComputedAt(address);
+        const unclaimedFresh = unclaimedAt > Date.now() - UNCLAIMED_TTL;
+        if (!unclaimedFresh && !computingUnclaimed.has(address)) recomputeUnclaimed(address);
 
         let identity = 'Unknown';
         try { identity = await getIdentity(globalApi, address); } catch (e) { }
 
-        const totalAmount = rewards.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-        const eras = new Set(rewards.filter(r => r.era !== null && r.era !== undefined).map(r => r.era));
-        const newest = rewards.length ? rewards[0] : null;
-        const oldest = rewards.length ? rewards[rewards.length - 1] : null;
+        const claimedTotal = claimed.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+        const unclaimedTotal = unclaimed.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+        const eraSet = new Set([...claimed, ...unclaimed].filter(r => r.era != null).map(r => r.era));
+        const newest = claimed.length ? claimed[0] : null;
+        const oldest = claimed.length ? claimed[claimed.length - 1] : null;
+        const syncState = db.getSyncState('staking_rewards');
 
         res.json({
             address,
             identity,
-            rewards,
+            claimed,
+            unclaimed,
             summary: {
-                totalAmount,
-                rewardCount: rewards.length,
-                eraCount: eras.size,
+                claimedTotal,
+                claimedCount: claimed.length,
+                unclaimedTotal,
+                unclaimedCount: unclaimed.length,
+                totalAmount: claimedTotal + unclaimedTotal,
+                eraCount: eraSet.size,
                 firstBlock: oldest ? oldest.block : null,
                 lastBlock: newest ? newest.block : null,
                 firstTimestamp: oldest ? oldest.timestamp : null,
                 lastTimestamp: newest ? newest.timestamp : null
             },
+            unclaimedFresh,
+            unclaimedComputing: !unclaimedFresh,
             index: {
-                latestScannedBlock: cacheData.latestScannedBlock || 0,
-                oldestScannedBlock: cacheData.oldestScannedBlock || 0,
-                backfillComplete: !!cacheData.backfillComplete,
-                lastSync: cacheData.lastSync || 0,
-                status: cacheData.status || 'Initializing'
+                latestScannedBlock: syncState.latestScannedBlock || 0,
+                oldestScannedBlock: syncState.oldestScannedBlock || 0,
+                backfillComplete: !!syncState.backfillComplete,
+                lastSync: syncState.lastSync || 0,
+                status: syncState.status || 'Initializing'
             },
-            status: cacheData.status || 'Initializing'
+            status: syncState.status || 'Initializing'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- PRICE ENDPOINTS ---
+app.get('/api/price-latest', (req, res) => {
+    try {
+        const state = db.getSyncState('price');
+        res.json({ price: db.getLatestPrice(), lastSync: state.lastSync || 0, status: state.status || 'Initializing', configured: !!CMC_API_KEY });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.get('/api/price-history', (req, res) => {
+    try {
+        const days = Math.min(Math.max(parseInt(req.query.days || '30', 10) || 30, 1), 365);
+        const since = Date.now() - days * 24 * 60 * 60 * 1000;
+        res.json({ history: db.getPriceHistory(since), latest: db.getLatestPrice(), configured: !!CMC_API_KEY });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- WALLET DASHBOARD ENDPOINT ---
+app.get('/api/wallet/:address', async (req, res) => {
+    const raw = (req.params.address || '').trim();
+    if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
+    if (!globalApi) return res.status(503).json({ error: 'API not ready' });
+    let address;
+    try { address = normalizeAddress(raw); }
+    catch (e) { return res.status(400).json({ error: 'Invalid Polkadex wallet address.' }); }
+
+    try {
+        const [accountInfo, identity, bondedOpt, nominatorsOpt, activeEraOpt, sessionValidators] = await Promise.all([
+            globalApi.query.system.account(address),
+            getIdentity(globalApi, address),
+            globalApi.query.staking.bonded(address),
+            globalApi.query.staking.nominators(address),
+            globalApi.query.staking.activeEra(),
+            globalApi.query.session.validators()
+        ]);
+        const free = balanceToPDEX(accountInfo.data.free);
+        const reserved = balanceToPDEX(accountInfo.data.reserved);
+
+        // Bonded ledger (total staked).
+        let totalStaked = 0, activeStaked = 0, unlocking = 0;
+        const controller = (bondedOpt && bondedOpt.isSome) ? bondedOpt.unwrap().toString() : address;
+        try {
+            const ledgerOpt = await globalApi.query.staking.ledger(controller);
+            if (ledgerOpt && ledgerOpt.isSome) {
+                const ledger = ledgerOpt.unwrap();
+                totalStaked = balanceToPDEX(ledger.total);
+                activeStaked = balanceToPDEX(ledger.active);
+                for (const u of (ledger.unlocking || [])) unlocking += balanceToPDEX(u.value);
+            }
+        } catch (e) { }
+
+        // My validators (nomination targets).
+        let nominating = [];
+        if (nominatorsOpt && nominatorsOpt.isSome) {
+            const targets = nominatorsOpt.unwrap().targets.map(t => t.toString());
+            nominating = await Promise.all(targets.map(async t => ({ address: t, name: await getIdentity(globalApi, t) })));
+        }
+        const sessionValAddrs = sessionValidators.map(v => v.toString());
+
+        // Rewards from the local index; trigger an unpaid-reward refresh if stale.
+        const claimed = db.getStakingRewards(address);
+        const claimedTotal = claimed.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        const unclaimed = db.getUnclaimed(address);
+        const unpaidTotal = unclaimed.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        const unclaimedAt = db.getUnclaimedComputedAt(address);
+        const unclaimedFresh = unclaimedAt > Date.now() - UNCLAIMED_TTL;
+        if (!unclaimedFresh && !computingUnclaimed.has(address)) recomputeUnclaimed(address);
+
+        // Network staking parameters.
+        const networkData = await getNetworkInfo().catch(() => null);
+        const ni = networkData ? networkData.networkInfo : null;
+        let minStake = 0;
+        try { minStake = balanceToPDEX(await globalApi.query.staking.minNominatorBond()); } catch (e) { }
+        const constNumber = c => { try { return c != null ? Number(c.toString()) : 0; } catch (e) { return 0; } };
+        const staking = globalApi.consts.staking || {};
+        const babe = globalApi.consts.babe || {};
+        const sessionsPerEra = constNumber(staking.sessionsPerEra);
+        const bondingDuration = constNumber(staking.bondingDuration);
+        const epochDuration = constNumber(babe.epochDuration);
+        const blockTime = constNumber(babe.expectedBlockTime);
+        const eraDurationMs = (sessionsPerEra && epochDuration && blockTime) ? sessionsPerEra * epochDuration * blockTime : 0;
+
+        res.json({
+            address,
+            identity,
+            balance: { free, reserved, total: free + reserved },
+            staking: {
+                isStaker: totalStaked > 0,
+                isValidator: sessionValAddrs.includes(address),
+                isNominator: nominating.length > 0,
+                totalStaked,
+                activeStaked,
+                unlocking,
+                nominating
+            },
+            rewards: {
+                claimedTotal,
+                claimedCount: claimed.length,
+                unpaidTotal,
+                unpaidCount: unclaimed.length,
+                unclaimedFresh,
+                recentClaimed: claimed.slice(0, 10)
+            },
+            recentTransactions: db.getTransactionsByAddress(address, 10),
+            network: {
+                currentEra: activeEraOpt && activeEraOpt.isSome ? activeEraOpt.unwrap().index.toNumber() : 0,
+                activeValidators: ni ? ni.validators.active : sessionValAddrs.length,
+                totalValidators: ni ? ni.validators.total : sessionValAddrs.length,
+                activeNominators: ni ? ni.nominators.active : 0,
+                totalNominators: ni ? ni.nominators.total : 0,
+                totalStakedNetwork: ni ? ni.totalBonding : 0,
+                minStake,
+                eraDurationMs,
+                bondingDurationEras: bondingDuration,
+                unbondingMs: eraDurationMs * bondingDuration
+            },
+            price: db.getLatestPrice()
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -971,10 +990,10 @@ async function syncData() {
             validatorData.push({ address: addrStr, name: name, totalStake: formatPDEX(totalStake), commission: commissionPct, realApy: currentApy, avg30DayApy: currentApy });
         }
         await syncValidatorHistory(activeEra, validators);
-        await fs.writeFile(CACHE_FILE, JSON.stringify({ validators: validatorData, totalCount: validators.length, lastSync: Date.now(), status: 'Synced' }));
+        db.replaceValidators(validatorData, { totalCount: validators.length, lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
         console.error("Validator sync error:", err);
-        await markCacheError(CACHE_FILE, CACHE_DEFAULTS.get(CACHE_FILE), err);
+        db.setSyncState('validators', { ...db.getSyncState('validators'), status: 'Error', error: err.message });
     } finally { isSyncing = false; }
 }
 
@@ -996,10 +1015,10 @@ async function syncHolders() {
             const total = h.free + h.reserved;
             holderData.push({ rank: i + 1, address: h.address, name: name, balance: total, share: (total / totalIssuance) * 100 });
         }
-        await fs.writeFile(HOLDERS_CACHE_FILE, JSON.stringify({ holders: holderData, totalCount: entries.length, lastSync: Date.now(), status: 'Synced' }));
+        db.replaceHolders(holderData, { totalCount: entries.length, lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
         console.error("Holder sync error:", err);
-        await markCacheError(HOLDERS_CACHE_FILE, CACHE_DEFAULTS.get(HOLDERS_CACHE_FILE), err);
+        db.setSyncState('holders', { ...db.getSyncState('holders'), status: 'Error', error: err.message });
     } finally { isSyncingHolders = false; }
 }
 
@@ -1007,38 +1026,31 @@ async function syncBlocks() {
     if (isSyncingBlocks || !globalApi) return;
     isSyncingBlocks = true;
     try {
-        let cacheData = { blocks: [], status: 'Syncing' };
-        cacheData = await readJsonCache(BLOCKS_CACHE_FILE, CACHE_DEFAULTS.get(BLOCKS_CACHE_FILE));
         let currentHash = await globalApi.rpc.chain.getBlockHash();
         let blocksSearched = 0;
-        const newBlocks = cacheData.blocks ? [...cacheData.blocks] : [];
+        const newBlocks = [];
 
         while (blocksSearched < 50) {
             try {
                 const derivedBlock = await globalApi.derive.chain.getBlock(currentHash);
-                if (derivedBlock) {
-                    const blockNumber = derivedBlock.block.header.number.toNumber();
-                    if (!newBlocks.find(b => b.number === blockNumber)) {
-                        const timestamp = getBlockTimestamp(derivedBlock);
-                        let authorAddr = derivedBlock.author ? derivedBlock.author.toString() : "System";
-                        newBlocks.push({ number: blockNumber, hash: derivedBlock.block.header.hash.toHex(), authorAddress: authorAddr, authorName: await getIdentity(globalApi, authorAddr), extrinsicsCount: derivedBlock.block.extrinsics.length, eventsCount: derivedBlock.events ? derivedBlock.events.length : 0, timestamp: timestamp });
-                    } else break;
-                    currentHash = derivedBlock.block.header.parentHash;
-                } else break;
+                if (!derivedBlock) break;
+                const blockNumber = derivedBlock.block.header.number.toNumber();
+                if (db.hasBlock(blockNumber)) break;
+                const timestamp = getBlockTimestamp(derivedBlock);
+                const authorAddr = derivedBlock.author ? derivedBlock.author.toString() : "System";
+                newBlocks.push({ number: blockNumber, hash: derivedBlock.block.header.hash.toHex(), authorAddress: authorAddr, authorName: await getIdentity(globalApi, authorAddr), extrinsicsCount: derivedBlock.block.extrinsics.length, eventsCount: derivedBlock.events ? derivedBlock.events.length : 0, timestamp: timestamp });
+                currentHash = derivedBlock.block.header.parentHash;
             } catch (e) {
                 console.warn("Block crawler stopped early:", e.message);
                 break;
             }
             blocksSearched++;
         }
-        cacheData.blocks = newBlocks.sort((a, b) => b.number - a.number).slice(0, 200);
-        cacheData.status = 'Synced';
-        cacheData.lastSync = Date.now();
-        delete cacheData.error;
-        await fs.writeFile(BLOCKS_CACHE_FILE, JSON.stringify(cacheData));
+        db.insertBlocks(newBlocks);
+        db.setSyncState('blocks', { lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
         console.error("Block sync error:", err);
-        await markCacheError(BLOCKS_CACHE_FILE, CACHE_DEFAULTS.get(BLOCKS_CACHE_FILE), err);
+        db.setSyncState('blocks', { ...db.getSyncState('blocks'), status: 'Error', error: err.message });
     } finally { isSyncingBlocks = false; }
 }
 
@@ -1046,56 +1058,44 @@ async function syncTransactions() {
     if (isSyncingTx || !globalApi) return;
     isSyncingTx = true;
     try {
-        const cacheData = await readJsonCache(TX_CACHE_FILE, CACHE_DEFAULTS.get(TX_CACHE_FILE));
+        const state = db.getSyncState('transactions');
         const latestHeader = await globalApi.rpc.chain.getHeader();
         const latestBlock = latestHeader.number.toNumber();
-        const cachedTransactions = getCachedFinancialTransactions(cacheData);
-        const latestScannedBlock = Number(cacheData.latestScannedBlock) || 0;
-        const needsInitialCrawl = latestScannedBlock === 0 || cacheData.scannerVersion !== FINANCIAL_TX_SCANNER_VERSION;
-        const previousScannedBlocks = Number(cacheData.scannedBlocks) || 0;
-        let scan = { transactions: [], scannedBlocks: 0, oldestScannedBlock: Number(cacheData.oldestScannedBlock) || 0 };
+        const latestScannedBlock = Number(state.latestScannedBlock) || 0;
+        const needsInitialCrawl = latestScannedBlock === 0 || state.scannerVersion !== FINANCIAL_TX_SCANNER_VERSION;
+        const previousScannedBlocks = Number(state.scannedBlocks) || 0;
+        let scan = { transactions: [], scannedBlocks: 0, oldestScannedBlock: Number(state.oldestScannedBlock) || 0 };
 
-        cacheData.status = 'Syncing';
-        cacheData.transactions = cachedTransactions;
-        await fs.writeFile(TX_CACHE_FILE, JSON.stringify(cacheData));
+        db.setSyncState('transactions', { ...state, status: 'Syncing' });
 
         if (needsInitialCrawl) {
             scan = await scanFinancialTransactions({
                 startBlock: latestBlock,
-                limit: TX_CACHE_LIMIT,
+                limit: Number.MAX_SAFE_INTEGER,
                 maxBlocks: TX_INITIAL_SCAN_BLOCKS,
-                onProgress: async progress => {
-                    cacheData.transactions = mergeFinancialTransactions(cachedTransactions, progress.transactions);
-                    cacheData.status = 'Syncing';
-                    cacheData.oldestScannedBlock = progress.oldestScannedBlock;
-                    cacheData.scannedBlocks = previousScannedBlocks + progress.scannedBlocks;
-                    await fs.writeFile(TX_CACHE_FILE, JSON.stringify(cacheData));
-                }
+                onProgress: progress => { db.insertTransactions(progress.transactions); }
             });
         } else if (latestBlock > latestScannedBlock) {
-            const blocksToScan = latestBlock - latestScannedBlock;
             scan = await scanFinancialTransactions({
                 startBlock: latestBlock,
                 stopBlock: latestScannedBlock + 1,
-                limit: TX_CACHE_LIMIT,
-                maxBlocks: blocksToScan
+                limit: Number.MAX_SAFE_INTEGER,
+                maxBlocks: latestBlock - latestScannedBlock
             });
         }
 
-        cacheData.transactions = mergeFinancialTransactions(cachedTransactions, scan.transactions);
-        cacheData.status = 'Synced';
-        cacheData.lastSync = Date.now();
-        cacheData.latestScannedBlock = latestBlock;
-        cacheData.oldestScannedBlock = needsInitialCrawl
-            ? scan.oldestScannedBlock
-            : (Number(cacheData.oldestScannedBlock) || latestScannedBlock);
-        cacheData.scannedBlocks = previousScannedBlocks + scan.scannedBlocks;
-        cacheData.scannerVersion = FINANCIAL_TX_SCANNER_VERSION;
-        delete cacheData.error;
-        await fs.writeFile(TX_CACHE_FILE, JSON.stringify(cacheData));
+        db.insertTransactions(scan.transactions);
+        db.setSyncState('transactions', {
+            lastSync: Date.now(),
+            status: 'Synced',
+            latestScannedBlock: latestBlock,
+            oldestScannedBlock: needsInitialCrawl ? scan.oldestScannedBlock : (Number(state.oldestScannedBlock) || latestScannedBlock),
+            scannedBlocks: previousScannedBlocks + scan.scannedBlocks,
+            scannerVersion: FINANCIAL_TX_SCANNER_VERSION
+        });
     } catch (err) {
         console.error("Transaction sync error:", err);
-        await markCacheError(TX_CACHE_FILE, CACHE_DEFAULTS.get(TX_CACHE_FILE), err);
+        db.setSyncState('transactions', { ...db.getSyncState('transactions'), status: 'Error', error: err.message });
     } finally { isSyncingTx = false; }
 }
 
@@ -1103,11 +1103,9 @@ async function syncEvents() {
     if (isSyncingEvents || !globalApi) return;
     isSyncingEvents = true;
     try {
-        let cacheData = { events: [], status: 'Syncing' };
-        cacheData = await readJsonCache(EVENTS_CACHE_FILE, CACHE_DEFAULTS.get(EVENTS_CACHE_FILE));
         let currentHash = await globalApi.rpc.chain.getBlockHash();
         let blocksSearched = 0;
-        const newEvents = cacheData.events ? cacheData.events.filter(e => e.blockHash) : [];
+        const newEvents = [];
 
         while (blocksSearched < 50) {
             try {
@@ -1120,7 +1118,6 @@ async function syncEvents() {
                 for (let eventIndex = 0; eventIndex < allEvents.length; eventIndex++) {
                     const record = allEvents[eventIndex];
                     const eventId = `${blockHash}-${eventIndex}`;
-                    if (newEvents.find(e => e.hash === eventId)) continue;
 
                     const extrinsicIndex = record.phase.isApplyExtrinsic ? record.phase.asApplyExtrinsic.toNumber() : null;
                     const extrinsic = extrinsicIndex !== null ? signedBlock.block.extrinsics[extrinsicIndex] : null;
@@ -1152,14 +1149,11 @@ async function syncEvents() {
             }
             blocksSearched++;
         }
-        cacheData.events = newEvents.sort((a, b) => b.timestamp - a.timestamp).slice(0, 500);
-        cacheData.status = 'Synced';
-        cacheData.lastSync = Date.now();
-        delete cacheData.error;
-        await fs.writeFile(EVENTS_CACHE_FILE, JSON.stringify(cacheData));
+        db.insertEvents(newEvents);
+        db.setSyncState('events', { lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
         console.error("Event sync error:", err);
-        await markCacheError(EVENTS_CACHE_FILE, CACHE_DEFAULTS.get(EVENTS_CACHE_FILE), err);
+        db.setSyncState('events', { ...db.getSyncState('events'), status: 'Error', error: err.message });
     } finally { isSyncingEvents = false; }
 }
 
@@ -1310,48 +1304,90 @@ async function scanStakingRewards({ startBlock, stopBlock, maxBlocks }) {
     return { rewards, scannedBlocks, oldestScannedBlock };
 }
 
-// Append newly discovered rewards into the per-address index, de-duplicating
-// on block+eventIndex so re-scanned blocks never double-count.
-function appendRewards(cacheData, newRewards) {
-    if (!isPlainObject(cacheData.rewards)) cacheData.rewards = {};
-    let added = 0;
-    for (const reward of newRewards) {
-        let key;
-        try { key = normalizeAddress(reward.stash); }
-        catch (e) { continue; }
-
-        if (!Array.isArray(cacheData.rewards[key])) cacheData.rewards[key] = [];
-        const list = cacheData.rewards[key];
-        const id = `${reward.block}-${reward.eventIndex}`;
-        if (list.some(entry => entry.id === id)) continue;
-
-        let validator = null;
-        if (reward.validator) {
-            try { validator = normalizeAddress(reward.validator); }
-            catch (e) { validator = reward.validator; }
-        }
-        list.push({
-            id,
-            era: reward.era,
-            amount: reward.amount,
-            validator,
-            block: reward.block,
-            blockHash: reward.blockHash,
-            eventIndex: reward.eventIndex,
-            timestamp: reward.timestamp
-        });
-        added++;
-    }
-    return added;
+// Map a scanned reward into a SQLite row with normalized addresses.
+function toRewardRow(reward) {
+    let stash = reward.stash;
+    let validator = reward.validator;
+    try { stash = normalizeAddress(reward.stash); } catch (e) { }
+    if (validator) { try { validator = normalizeAddress(validator); } catch (e) { } }
+    return {
+        id: `${reward.block}-${reward.eventIndex}`,
+        stash,
+        amount: reward.amount,
+        era: reward.era,
+        validator: validator || null,
+        block: reward.block,
+        blockHash: reward.blockHash,
+        eventIndex: reward.eventIndex,
+        timestamp: reward.timestamp
+    };
 }
 
-function countIndexedRewards(cacheData) {
-    if (!isPlainObject(cacheData.rewards)) return 0;
-    let total = 0;
-    for (const list of Object.values(cacheData.rewards)) {
-        if (Array.isArray(list)) total += list.length;
+// Compute a stash's unpaid (unclaimed) rewards on demand via the staking
+// derive and cache them in SQLite. Runs in the background, guarded per stash.
+async function recomputeUnclaimed(stash) {
+    if (computingUnclaimed.has(stash) || !globalApi) return;
+    computingUnclaimed.add(stash);
+    try {
+        if (!globalApi.derive || !globalApi.derive.staking || !globalApi.derive.staking.stakerRewards) {
+            db.replaceUnclaimed(stash, []);
+            return;
+        }
+        const pending = await globalApi.derive.staking.stakerRewards(stash, false);
+        const claimedKeys = new Set(db.getClaimedRewardKeys(stash).map(k => `${k.era}|${k.validator || ''}`));
+        const rows = [];
+        for (const entry of pending) {
+            const era = entry.era && entry.era.toNumber ? entry.era.toNumber() : Number(entry.era);
+            const validators = entry.validators || {};
+            for (const validatorId of Object.keys(validators)) {
+                const info = validators[validatorId];
+                const amount = balanceToPDEX(info.value);
+                if (!(amount > 0)) continue;
+                let validator = validatorId;
+                try { validator = normalizeAddress(validatorId); } catch (e) { }
+                // Skip anything already recorded as a claimed payout (defensive).
+                if (claimedKeys.has(`${era}|${validator}`)) continue;
+                rows.push({ era, validator, amount });
+            }
+        }
+        db.replaceUnclaimed(stash, rows);
+        console.log(`Unclaimed rewards computed for ${stash}: ${rows.length} pending entries.`);
+    } catch (err) {
+        console.warn(`Unclaimed rewards computation failed for ${stash}:`, err.message);
+    } finally {
+        computingUnclaimed.delete(stash);
     }
-    return total;
+}
+
+// Poll CoinMarketCap for the live PDEX price and append it to the local price
+// history. CMC's free tier only exposes the current quote, so the chart builds
+// up from the moment polling begins.
+async function syncPrice() {
+    if (isSyncingPrice || !CMC_API_KEY) return;
+    isSyncingPrice = true;
+    try {
+        const url = `https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=${encodeURIComponent(CMC_SYMBOL)}&convert=USD`;
+        const resp = await fetch(url, { headers: { 'X-CMC_PRO_API_KEY': CMC_API_KEY, 'Accept': 'application/json' } });
+        if (!resp.ok) throw new Error(`CoinMarketCap HTTP ${resp.status}`);
+        const json = await resp.json();
+        const entry = json && json.data && json.data[CMC_SYMBOL];
+        const quote = entry ? (Array.isArray(entry) ? entry[0] : entry) : null;
+        const usd = quote && quote.quote && quote.quote.USD;
+        if (!usd || typeof usd.price !== 'number') throw new Error('CoinMarketCap response missing price');
+        db.insertPrice({
+            timestamp: Date.now(),
+            price: usd.price,
+            marketCap: usd.market_cap ?? null,
+            volume24h: usd.volume_24h ?? null,
+            pctChange24h: usd.percent_change_24h ?? null
+        });
+        db.setSyncState('price', { lastSync: Date.now(), status: 'Synced' });
+    } catch (err) {
+        console.warn('Price sync error:', err.message);
+        db.setSyncState('price', { ...db.getSyncState('price'), lastSync: Date.now(), status: 'Error', error: err.message });
+    } finally {
+        isSyncingPrice = false;
+    }
 }
 
 // One crawl pass: index new blocks (forward) and walk a resumable chunk of
@@ -1360,74 +1396,71 @@ async function syncStakingRewards() {
     if (isSyncingStakingRewards || !globalApi) return;
     isSyncingStakingRewards = true;
     try {
-        const cacheData = await readJsonCache(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE));
+        const state = db.getSyncState('staking_rewards');
         const latestHeader = await globalApi.rpc.chain.getHeader();
         const head = latestHeader.number.toNumber();
 
-        cacheData.status = 'Syncing';
-        await fs.writeFile(STAKING_REWARDS_CACHE_FILE, JSON.stringify(cacheData));
+        let initialized = !!state.initialized;
+        let latestScannedBlock = Number(state.latestScannedBlock) || 0;
+        let oldestScannedBlock = Number(state.oldestScannedBlock) || 0;
+        let backfillCursor = Number(state.backfillCursor) || 0;
+        let backfillComplete = !!state.backfillComplete;
 
-        // First run: anchor watermarks to the current head. Everything below
-        // the head is then captured by the resumable backfill pass.
-        if (!cacheData.initialized) {
-            cacheData.initialized = true;
-            cacheData.latestScannedBlock = head;
-            cacheData.oldestScannedBlock = head;
-            cacheData.backfillCursor = head - 1;
-            cacheData.backfillComplete = (head - 1) < STAKING_REWARDS_MIN_BLOCK;
+        // First run: anchor watermarks to the current head; the resumable
+        // backfill pass then walks everything below it.
+        if (!initialized) {
+            initialized = true;
+            latestScannedBlock = head;
+            oldestScannedBlock = head;
+            backfillCursor = head - 1;
+            backfillComplete = (head - 1) < STAKING_REWARDS_MIN_BLOCK;
         }
 
         // FORWARD PASS — index blocks produced since the previous crawl.
-        const prevLatest = Number(cacheData.latestScannedBlock) || 0;
-        if (head > prevLatest) {
-            if (head - prevLatest > STAKING_REWARDS_FORWARD_MAX) {
-                console.warn(`Staking rewards: forward gap ${head - prevLatest} exceeds cap; scanning most recent ${STAKING_REWARDS_FORWARD_MAX} blocks.`);
+        if (head > latestScannedBlock) {
+            if (head - latestScannedBlock > STAKING_REWARDS_FORWARD_MAX) {
+                console.warn(`Staking rewards: forward gap ${head - latestScannedBlock} exceeds cap; scanning most recent ${STAKING_REWARDS_FORWARD_MAX} blocks.`);
             }
             const forward = await scanStakingRewards({
                 startBlock: head,
-                stopBlock: prevLatest + 1,
+                stopBlock: latestScannedBlock + 1,
                 maxBlocks: STAKING_REWARDS_FORWARD_MAX
             });
-            appendRewards(cacheData, forward.rewards);
-            cacheData.latestScannedBlock = head;
-            cacheData.lastSync = Date.now();
-            await fs.writeFile(STAKING_REWARDS_CACHE_FILE, JSON.stringify(cacheData));
+            db.insertStakingRewards(forward.rewards.map(toRewardRow));
+            latestScannedBlock = head;
+            db.setSyncState('staking_rewards', { initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete, lastSync: Date.now(), status: 'Syncing' });
         }
 
         // BACKFILL PASS — walk one resumable chunk further down the chain.
-        if (!cacheData.backfillComplete) {
-            const cursor = Number(cacheData.backfillCursor) || 0;
-            if (cursor >= STAKING_REWARDS_MIN_BLOCK) {
-                const stopBlock = Math.max(cursor - STAKING_REWARDS_BACKFILL_CHUNK + 1, STAKING_REWARDS_MIN_BLOCK);
+        if (!backfillComplete) {
+            if (backfillCursor >= STAKING_REWARDS_MIN_BLOCK) {
+                const stopBlock = Math.max(backfillCursor - STAKING_REWARDS_BACKFILL_CHUNK + 1, STAKING_REWARDS_MIN_BLOCK);
                 const backfill = await scanStakingRewards({
-                    startBlock: cursor,
+                    startBlock: backfillCursor,
                     stopBlock,
                     maxBlocks: STAKING_REWARDS_BACKFILL_CHUNK
                 });
-                appendRewards(cacheData, backfill.rewards);
-                cacheData.oldestScannedBlock = Math.min(Number(cacheData.oldestScannedBlock) || cursor, backfill.oldestScannedBlock);
-                cacheData.backfillCursor = backfill.oldestScannedBlock - 1;
-                if (cacheData.backfillCursor < STAKING_REWARDS_MIN_BLOCK) cacheData.backfillComplete = true;
+                db.insertStakingRewards(backfill.rewards.map(toRewardRow));
+                oldestScannedBlock = Math.min(oldestScannedBlock || backfillCursor, backfill.oldestScannedBlock);
+                backfillCursor = backfill.oldestScannedBlock - 1;
+                if (backfillCursor < STAKING_REWARDS_MIN_BLOCK) backfillComplete = true;
             } else {
-                cacheData.backfillComplete = true;
+                backfillComplete = true;
             }
         }
 
-        cacheData.status = 'Synced';
-        cacheData.lastSync = Date.now();
-        delete cacheData.error;
-        await fs.writeFile(STAKING_REWARDS_CACHE_FILE, JSON.stringify(cacheData));
-        console.log(`Staking rewards indexer: blocks ${cacheData.oldestScannedBlock}-${cacheData.latestScannedBlock}, ${countIndexedRewards(cacheData)} payouts indexed, backfill ${cacheData.backfillComplete ? 'complete' : 'in progress'}.`);
+        db.setSyncState('staking_rewards', { initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete, lastSync: Date.now(), status: 'Synced' });
+        console.log(`Staking rewards indexer: blocks ${oldestScannedBlock}-${latestScannedBlock}, ${db.countStakingRewards()} payouts indexed, backfill ${backfillComplete ? 'complete' : 'in progress'}.`);
     } catch (err) {
         console.error("Staking rewards sync error:", err);
-        await markCacheError(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE), err);
+        db.setSyncState('staking_rewards', { ...db.getSyncState('staking_rewards'), status: 'Error', error: err.message });
     } finally {
         isSyncingStakingRewards = false;
     }
 }
 
 async function start() {
-    await initCache();
+    db.initDb(DATA_DIR);
     const wsProvider = new WsProvider('wss://so.polkadex.ee');
     globalApi = await ApiPromise.create({ provider: wsProvider });
     console.log("Connected to Polkadex RPC");
@@ -1445,6 +1478,7 @@ async function start() {
     syncData();
     syncHolders();
     syncStakingRewards();
+    syncPrice();
 
     // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
     setInterval(() => {
@@ -1457,6 +1491,7 @@ async function start() {
     // Staking rewards indexer: continuously appends new payouts each era and
     // resumably backfills older history.
     setInterval(syncStakingRewards, THIRTY_SECONDS);
+    setInterval(syncPrice, PRICE_SYNC_INTERVAL);
 }
 
 start();

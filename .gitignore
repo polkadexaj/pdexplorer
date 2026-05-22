@@ -2,5 +2,9 @@ node_modules/
 dist/
 *_cache.json
 cache.json
+data/
+*.db
+*.db-shm
+*.db-wal
 .env
 .DS_Store
