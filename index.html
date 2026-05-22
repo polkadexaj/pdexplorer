@@ -31,7 +31,8 @@
                 <a href="#transactions" class="nav-item" data-target="transactions"><i class='bx bx-transfer'></i> Transactions</a>
                 <a href="#blocks" class="nav-item" data-target="blocks"><i class='bx bx-cube'></i> Blocks</a>
                 <a href="#events" class="nav-item" data-target="events"><i class='bx bx-calendar-event'></i> Events</a>
-                <a href="#validators" class="nav-item" data-target="validators"><i class='bx bx-check-shield'></i> Validators <span class="badge">NEW</span></a>
+                <a href="#validators" class="nav-item" data-target="validators"><i class='bx bx-check-shield'></i> Validators</a>
+                <a href="#staking-rewards" class="nav-item" data-target="staking-rewards"><i class='bx bx-coin-stack'></i> Staking Rewards <span class="badge">NEW</span></a>
             </nav>
             <div class="sidebar-footer">
                 <div class="price-ticker">
@@ -208,6 +209,25 @@
                         <button id="show-more-btn" class="glass" style="padding: 10px 20px; color: var(--text-primary); border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); border-radius: var(--radius-sm); cursor: pointer; display: none; transition: var(--transition-fast);">Show More</button>
                     </div>
                 </div>
+            </div>
+
+            <!-- Staking Rewards Page -->
+            <div class="staking-rewards-page page-section" data-page="staking-rewards" style="display: none;">
+                <div class="list-container glass">
+                    <div class="list-header">
+                        <h2>Staking Rewards</h2>
+                        <span class="staking-index-status" id="staking-index-status">Indexer: loading&hellip;</span>
+                    </div>
+                    <div class="staking-search-wrap">
+                        <p class="staking-search-hint">Enter a Polkadex wallet address to view its claimed staking reward history, then download it as CSV or JSON.</p>
+                        <div class="staking-search-bar">
+                            <input type="text" id="staking-address-input" placeholder="Polkadex address (e.g. esxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)" autocomplete="off" spellcheck="false">
+                            <button id="staking-search-btn"><i class='bx bx-search'></i> Search</button>
+                        </div>
+                        <div id="staking-rewards-error" class="staking-error" style="display: none;"></div>
+                    </div>
+                </div>
+                <div class="list-container glass" id="staking-rewards-results" style="display: none; margin-top: 20px;"></div>
             </div>
 
             <!-- Holders Page -->

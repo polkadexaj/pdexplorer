@@ -1,4 +1,5 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
+import { decodeAddress } from '@polkadot/util-crypto';
 
 // Utility to generate human readable relative time
 function timeAgo(timestamp) {
@@ -1103,6 +1104,9 @@ function routeTo(target) {
         mainTarget = 'tx-details';
         detailId = target.split('/')[1];
         detailId2 = target.split('/')[2];
+    } else if (target.startsWith('staking-rewards/')) {
+        mainTarget = 'staking-rewards';
+        detailId = target.substring('staking-rewards/'.length);
     }
 
     // Update active nav
@@ -1141,6 +1145,8 @@ function routeTo(target) {
                 fetchBlockDetails(detailId);
             } else if (mainTarget === 'tx-details') {
                 fetchTxDetails(detailId, detailId2);
+            } else if (mainTarget === 'staking-rewards') {
+                initStakingRewardsPage(detailId);
             }
         } else {
             page.style.display = 'none';
@@ -1639,6 +1645,303 @@ async function fetchValidatorDetails(address) {
     } catch (e) {
         container.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${e.message}</div>`;
     }
+}
+
+// --- Staking Rewards Page ---
+let stakingRewardsData = null;      // last fetched payload, reused for downloads
+let stakingRewardsChart = null;
+let stakingRewardsDisplayLimit = 100;
+
+function stakingEscapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+function stakingShortAddress(addr) {
+    if (!addr || addr.length < 18) return addr || '';
+    return addr.substring(0, 8) + '…' + addr.substring(addr.length - 6);
+}
+
+function stakingFormatPDEX(value) {
+    return Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+}
+
+function isValidPolkadexAddress(addr) {
+    try { decodeAddress(addr); return true; }
+    catch (e) { return false; }
+}
+
+async function loadStakingIndexStatus() {
+    const el = document.getElementById('staking-index-status');
+    if (!el) return;
+    try {
+        const res = await fetch('/api/staking-rewards-status');
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const backfill = data.backfillComplete ? 'backfill complete' : 'backfill in progress';
+        el.textContent = `Indexer: blocks ${Number(data.oldestScannedBlock || 0).toLocaleString()}–${Number(data.latestScannedBlock || 0).toLocaleString()} · ${Number(data.totalRewardsIndexed || 0).toLocaleString()} payouts · ${backfill}`;
+    } catch (e) {
+        el.textContent = 'Indexer: status unavailable';
+    }
+}
+
+function initStakingRewardsPage(address) {
+    loadStakingIndexStatus();
+    const input = document.getElementById('staking-address-input');
+    const errEl = document.getElementById('staking-rewards-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    if (address) {
+        if (input) input.value = address;
+        fetchStakingRewards(address);
+    }
+}
+
+function submitStakingSearch() {
+    const input = document.getElementById('staking-address-input');
+    const errEl = document.getElementById('staking-rewards-error');
+    if (!input) return;
+    const addr = input.value.trim();
+    if (!addr) {
+        if (errEl) { errEl.textContent = 'Please enter a Polkadex wallet address.'; errEl.style.display = 'block'; }
+        return;
+    }
+    if (!isValidPolkadexAddress(addr)) {
+        if (errEl) { errEl.textContent = 'That does not look like a valid Polkadex wallet address.'; errEl.style.display = 'block'; }
+        return;
+    }
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    // Route through the hash so the result is shareable / bookmarkable.
+    window.location.hash = 'staking-rewards/' + addr;
+}
+
+async function fetchStakingRewards(address) {
+    const resultsEl = document.getElementById('staking-rewards-results');
+    const errEl = document.getElementById('staking-rewards-error');
+    if (!resultsEl) return;
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    if (!isValidPolkadexAddress(address)) {
+        if (errEl) { errEl.textContent = 'That does not look like a valid Polkadex wallet address.'; errEl.style.display = 'block'; }
+        resultsEl.style.display = 'none';
+        return;
+    }
+
+    stakingRewardsDisplayLimit = 100;
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-secondary);">Loading staking rewards…</div>';
+
+    try {
+        const res = await fetch('/api/staking-rewards/' + encodeURIComponent(address));
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
+        stakingRewardsData = data;
+        renderStakingRewards(data);
+    } catch (e) {
+        stakingRewardsData = null;
+        resultsEl.innerHTML = `<div style="padding: 40px; text-align: center; color: var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderStakingRewards(data) {
+    const resultsEl = document.getElementById('staking-rewards-results');
+    if (!resultsEl) return;
+    const rewards = Array.isArray(data.rewards) ? data.rewards : [];
+    const summary = data.summary || {};
+    const index = data.index || {};
+    const identity = data.identity && data.identity !== 'Unknown' ? data.identity : null;
+
+    if (rewards.length === 0) {
+        const backfillNote = index.backfillComplete
+            ? 'The indexer has scanned the full available chain history.'
+            : 'The indexer is still backfilling older history — check back shortly.';
+        resultsEl.innerHTML = `
+            <div class="list-header"><h2>No staking rewards found</h2></div>
+            <div style="padding: 32px 24px; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7;">
+                No claimed staking payouts were found for
+                <span style="color: var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(data.address))}</span>
+                in the indexed block range
+                (${Number(index.oldestScannedBlock || 0).toLocaleString()}–${Number(index.latestScannedBlock || 0).toLocaleString()}).
+                <br>${backfillNote}
+            </div>`;
+        return;
+    }
+
+    const firstDate = summary.firstTimestamp ? new Date(summary.firstTimestamp).toLocaleDateString('en-US') : '—';
+    const lastDate = summary.lastTimestamp ? new Date(summary.lastTimestamp).toLocaleDateString('en-US') : '—';
+
+    const shown = rewards.slice(0, stakingRewardsDisplayLimit);
+    let rowsHtml = '';
+    shown.forEach(r => {
+        const date = r.timestamp ? new Date(r.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '—';
+        const validatorCell = r.validator
+            ? `<a href="#validator/${encodeURIComponent(r.validator)}" class="item-link" style="color: var(--brand-secondary);">${stakingShortAddress(r.validator)}</a>`
+            : '<span style="color: var(--text-muted);">—</span>';
+        rowsHtml += `
+            <tr>
+                <td>${r.era != null ? r.era : '<span style="color:var(--text-muted);">—</span>'}</td>
+                <td style="white-space: nowrap;">${date}</td>
+                <td class="staking-amount">${stakingFormatPDEX(r.amount)} PDEX</td>
+                <td>${validatorCell}</td>
+                <td><a href="#block/${r.block}" class="item-link" style="color: var(--brand-secondary);">${Number(r.block).toLocaleString()}</a></td>
+            </tr>`;
+    });
+
+    const remaining = rewards.length - shown.length;
+    const showMoreHtml = remaining > 0
+        ? `<div style="text-align:center; padding: 18px;"><button id="staking-show-more" class="staking-download-btn">Show more (${remaining.toLocaleString()} remaining)</button></div>`
+        : '';
+
+    resultsEl.innerHTML = `
+        <div class="list-header">
+            <h2>Reward history${identity ? ' — ' + stakingEscapeHtml(identity) : ''}</h2>
+            <a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color: var(--text-secondary); font-size: 0.78rem;">${stakingEscapeHtml(data.address)}</a>
+        </div>
+        <div class="staking-summary-grid">
+            <div class="staking-summary-card"><div class="label">Total Rewards</div><div class="value accent">${stakingFormatPDEX(summary.totalAmount)} PDEX</div></div>
+            <div class="staking-summary-card"><div class="label">Payouts</div><div class="value">${Number(summary.rewardCount || 0).toLocaleString()}</div></div>
+            <div class="staking-summary-card"><div class="label">Eras Rewarded</div><div class="value">${Number(summary.eraCount || 0).toLocaleString()}</div></div>
+            <div class="staking-summary-card"><div class="label">First Payout</div><div class="value">${firstDate}</div></div>
+            <div class="staking-summary-card"><div class="label">Latest Payout</div><div class="value">${lastDate}</div></div>
+        </div>
+        <div class="staking-chart-wrap"><canvas id="staking-rewards-chart"></canvas></div>
+        <div class="staking-toolbar">
+            <span style="color: var(--text-secondary); font-size: 0.82rem;">${rewards.length.toLocaleString()} payout record${rewards.length === 1 ? '' : 's'}</span>
+            <div class="staking-toolbar-actions">
+                <button class="staking-download-btn" id="staking-dl-csv"><i class='bx bx-download'></i> Download CSV</button>
+                <button class="staking-download-btn" id="staking-dl-json"><i class='bx bx-download'></i> Download JSON</button>
+            </div>
+        </div>
+        <div class="table-responsive">
+            <table class="staking-rewards-table">
+                <thead>
+                    <tr><th>Era</th><th>Date (UTC)</th><th>Amount</th><th>Validator</th><th>Block</th></tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+            </table>
+        </div>
+        ${showMoreHtml}`;
+
+    const csvBtn = document.getElementById('staking-dl-csv');
+    if (csvBtn) csvBtn.addEventListener('click', downloadStakingRewardsCSV);
+    const jsonBtn = document.getElementById('staking-dl-json');
+    if (jsonBtn) jsonBtn.addEventListener('click', downloadStakingRewardsJSON);
+    const moreBtn = document.getElementById('staking-show-more');
+    if (moreBtn) moreBtn.addEventListener('click', () => {
+        stakingRewardsDisplayLimit += 100;
+        renderStakingRewards(stakingRewardsData);
+    });
+
+    renderStakingRewardsChart(rewards);
+}
+
+function renderStakingRewardsChart(rewards) {
+    const canvas = document.getElementById('staking-rewards-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (stakingRewardsChart) { stakingRewardsChart.destroy(); stakingRewardsChart = null; }
+
+    // Aggregate reward amounts per era; payouts with an unknown era are pooled.
+    const byEra = new Map();
+    let unknownTotal = 0;
+    let hasUnknown = false;
+    rewards.forEach(r => {
+        const amt = Number(r.amount) || 0;
+        if (r.era == null) { unknownTotal += amt; hasUnknown = true; }
+        else byEra.set(r.era, (byEra.get(r.era) || 0) + amt);
+    });
+    const eras = [...byEra.keys()].sort((a, b) => a - b);
+    const labels = eras.map(e => 'Era ' + e);
+    const values = eras.map(e => byEra.get(e));
+    if (hasUnknown) { labels.push('Unknown'); values.push(unknownTotal); }
+    if (labels.length === 0) return;
+
+    stakingRewardsChart = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Rewards (PDEX)',
+                data: values,
+                backgroundColor: 'rgba(0, 230, 118, 0.55)',
+                borderColor: '#00E676',
+                borderWidth: 1,
+                borderRadius: 3
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => ' ' + Number(ctx.parsed.y).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' PDEX'
+                    }
+                }
+            },
+            scales: {
+                x: { ticks: { maxTicksLimit: 12, color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                y: { ticks: { color: '#888' }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+            }
+        }
+    });
+}
+
+function stakingCsvCell(value) {
+    const s = String(value == null ? '' : value);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function downloadStakingBlob(filename, content, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadStakingRewardsCSV() {
+    if (!stakingRewardsData) return;
+    const rows = stakingRewardsData.rewards || [];
+    const lines = [['Era', 'Date (UTC)', 'Amount (PDEX)', 'Validator', 'Block', 'Block Hash'].join(',')];
+    rows.forEach(r => {
+        const date = r.timestamp ? new Date(r.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '';
+        lines.push([
+            r.era != null ? r.era : '',
+            date,
+            Number(r.amount || 0).toFixed(6),
+            r.validator || '',
+            r.block != null ? r.block : '',
+            r.blockHash || ''
+        ].map(stakingCsvCell).join(','));
+    });
+    downloadStakingBlob(`staking-rewards-${stakingRewardsData.address || 'address'}.csv`, lines.join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+function downloadStakingRewardsJSON() {
+    if (!stakingRewardsData) return;
+    const payload = {
+        address: stakingRewardsData.address,
+        identity: stakingRewardsData.identity,
+        generatedAt: new Date().toISOString(),
+        summary: stakingRewardsData.summary,
+        index: stakingRewardsData.index,
+        rewards: stakingRewardsData.rewards
+    };
+    downloadStakingBlob(`staking-rewards-${stakingRewardsData.address || 'address'}.json`, JSON.stringify(payload, null, 2), 'application/json');
+}
+
+const stakingSearchBtn = document.getElementById('staking-search-btn');
+if (stakingSearchBtn) stakingSearchBtn.addEventListener('click', submitStakingSearch);
+const stakingAddressInput = document.getElementById('staking-address-input');
+if (stakingAddressInput) {
+    stakingAddressInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitStakingSearch();
+    });
 }
 
 setInterval(() => {

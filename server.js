@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { ApiPromise, WsProvider } from '@polkadot/api';
+import { decodeAddress, encodeAddress } from '@polkadot/util-crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -19,6 +20,7 @@ const VALIDATOR_HISTORY_CACHE_FILE = path.join(DATA_DIR, 'validator_history_cach
 const ACCOUNT_CACHE_FILE = path.join(DATA_DIR, 'account_history_cache.json');
 const VALIDATOR_TRIGGERS_CACHE_FILE = path.join(DATA_DIR, 'validator_triggers_cache.json');
 const NETWORK_INFO_CACHE_FILE = path.join(DATA_DIR, 'network_info_cache.json');
+const STAKING_REWARDS_CACHE_FILE = path.join(DATA_DIR, 'staking_rewards_cache.json');
 
 const CACHE_DEFAULTS = new Map([
     [CACHE_FILE, { validators: [], lastSync: 0, status: 'Initializing' }],
@@ -29,10 +31,21 @@ const CACHE_DEFAULTS = new Map([
     [VALIDATOR_HISTORY_CACHE_FILE, {}],
     [ACCOUNT_CACHE_FILE, { accounts: {} }],
     [VALIDATOR_TRIGGERS_CACHE_FILE, {}],
-    [NETWORK_INFO_CACHE_FILE, { networkInfo: null, lastSync: 0, status: 'Initializing' }]
+    [NETWORK_INFO_CACHE_FILE, { networkInfo: null, lastSync: 0, status: 'Initializing' }],
+    [STAKING_REWARDS_CACHE_FILE, {
+        rewards: {},
+        latestScannedBlock: 0,
+        oldestScannedBlock: 0,
+        backfillCursor: 0,
+        backfillComplete: false,
+        initialized: false,
+        lastSync: 0,
+        status: 'Initializing'
+    }]
 ]);
 const FIVE_MINUTES = 5 * 60 * 1000;
 const THIRTY_MINUTES = 30 * 60 * 1000;
+const THIRTY_SECONDS = 30 * 1000;
 const RECENT_SYNC_INTERVAL = 12 * 1000;
 const TX_CACHE_LIMIT = readPositiveInteger(process.env.TX_CACHE_LIMIT, 500);
 const TX_INITIAL_SCAN_BLOCKS = readPositiveInteger(process.env.TX_INITIAL_SCAN_BLOCKS, 20000);
@@ -40,6 +53,12 @@ const TX_OLDER_SCAN_BLOCKS = readPositiveInteger(process.env.TX_OLDER_SCAN_BLOCK
 const TX_SCAN_BATCH_SIZE = readPositiveInteger(process.env.TX_SCAN_BATCH_SIZE, 25);
 const FINANCIAL_TX_SCANNER_VERSION = 2;
 const VALIDATOR_HISTORY_ERAS = readPositiveInteger(process.env.VALIDATOR_HISTORY_ERAS, 30);
+// Staking rewards indexer tuning. The crawler scans blocks for staking.Rewarded
+// events (claimed payouts) and appends them to a local per-address index.
+const STAKING_REWARDS_SCAN_BATCH = readPositiveInteger(process.env.STAKING_REWARDS_SCAN_BATCH, 25);
+const STAKING_REWARDS_BACKFILL_CHUNK = readPositiveInteger(process.env.STAKING_REWARDS_BACKFILL_CHUNK, 500);
+const STAKING_REWARDS_FORWARD_MAX = readPositiveInteger(process.env.STAKING_REWARDS_FORWARD_MAX, 20000);
+const STAKING_REWARDS_MIN_BLOCK = readPositiveInteger(process.env.STAKING_REWARDS_MIN_BLOCK, 1);
 const DISPLAY_NAME_OVERRIDES = new Map([
     ['esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew', 'Polkadex Treasury'],
     ['esm4teFDTrvy4VJ8msKTQmAywumeinGjzsrFzmTEB5FBiiekE', 'Gate.IO']
@@ -50,8 +69,10 @@ let isSyncingHolders = false;
 let isSyncingTx = false;
 let isSyncingBlocks = false;
 let isSyncingEvents = false;
+let isSyncingStakingRewards = false;
 let isCrawlingAccount = {};
 let globalApi = null;
+let chainSS58 = 88; // Polkadex SS58 prefix; refreshed from the chain registry on connect.
 const identityCache = new Map();
 
 function readPositiveInteger(value, fallback) {
@@ -108,6 +129,24 @@ async function markCacheError(file, defaultData, err) {
 }
 
 function formatPDEX(balance) { return Number(balance) / 10 ** 12; }
+
+// Convert a chain Balance codec to a PDEX number safely for large u128 values.
+function balanceToPDEX(balance) {
+    try { return Number(BigInt(balance.toString())) / 10 ** 12; }
+    catch (e) { return Number(balance) / 10 ** 12; }
+}
+
+// True when the string decodes as a valid SS58 address.
+function isValidAddress(address) {
+    try { decodeAddress(address); return true; }
+    catch (e) { return false; }
+}
+
+// Canonicalise any SS58/hex address to the Polkadex-prefixed form so that
+// indexed keys and lookups always match regardless of the input format.
+function normalizeAddress(address) {
+    return encodeAddress(decodeAddress(address), chainSS58);
+}
 
 function getCommissionPercent(prefs) {
     if (!prefs || !prefs.commission) return 0;
@@ -839,6 +878,75 @@ app.get('/api/account/:address', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- STAKING REWARDS ENDPOINTS ---
+app.get('/api/staking-rewards-status', async (req, res) => {
+    try {
+        const cacheData = await readJsonCache(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE));
+        res.json({
+            latestScannedBlock: cacheData.latestScannedBlock || 0,
+            oldestScannedBlock: cacheData.oldestScannedBlock || 0,
+            backfillComplete: !!cacheData.backfillComplete,
+            addressesIndexed: isPlainObject(cacheData.rewards) ? Object.keys(cacheData.rewards).length : 0,
+            totalRewardsIndexed: countIndexedRewards(cacheData),
+            lastSync: cacheData.lastSync || 0,
+            status: cacheData.status || 'Initializing'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/staking-rewards/:address', async (req, res) => {
+    const raw = (req.params.address || '').trim();
+    if (!isValidAddress(raw)) {
+        return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
+    }
+    let address;
+    try { address = normalizeAddress(raw); }
+    catch (e) { return res.status(400).json({ error: 'Invalid Polkadex wallet address.' }); }
+
+    try {
+        const cacheData = await readJsonCache(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE));
+        const indexed = (isPlainObject(cacheData.rewards) && Array.isArray(cacheData.rewards[address]))
+            ? cacheData.rewards[address]
+            : [];
+        const rewards = [...indexed].sort((a, b) => (b.block - a.block) || (b.eventIndex - a.eventIndex));
+
+        let identity = 'Unknown';
+        try { identity = await getIdentity(globalApi, address); } catch (e) { }
+
+        const totalAmount = rewards.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+        const eras = new Set(rewards.filter(r => r.era !== null && r.era !== undefined).map(r => r.era));
+        const newest = rewards.length ? rewards[0] : null;
+        const oldest = rewards.length ? rewards[rewards.length - 1] : null;
+
+        res.json({
+            address,
+            identity,
+            rewards,
+            summary: {
+                totalAmount,
+                rewardCount: rewards.length,
+                eraCount: eras.size,
+                firstBlock: oldest ? oldest.block : null,
+                lastBlock: newest ? newest.block : null,
+                firstTimestamp: oldest ? oldest.timestamp : null,
+                lastTimestamp: newest ? newest.timestamp : null
+            },
+            index: {
+                latestScannedBlock: cacheData.latestScannedBlock || 0,
+                oldestScannedBlock: cacheData.oldestScannedBlock || 0,
+                backfillComplete: !!cacheData.backfillComplete,
+                lastSync: cacheData.lastSync || 0,
+                status: cacheData.status || 'Initializing'
+            },
+            status: cacheData.status || 'Initializing'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // --- BACKGROUND CRAWLERS ---
 async function syncData() {
     if (isSyncing || !globalApi) return;
@@ -1055,11 +1163,277 @@ async function syncEvents() {
     } finally { isSyncingEvents = false; }
 }
 
+// --- STAKING REWARDS INDEXER ---
+// Indexes claimed staking payouts by scanning blocks for staking.Rewarded
+// (and legacy staking.Reward) events. Each crawl appends newly discovered
+// rewards to a per-address local index, building a full history over time.
+
+// Parse a staking reward event into { stash, amount } or null.
+function parseRewardedEvent(record) {
+    const event = record.event;
+    if (event.section !== 'staking') return null;
+    if (event.method !== 'Rewarded' && event.method !== 'Reward') return null;
+
+    const data = event.data;
+    const names = data.names || null;
+    let stash = null;
+    let amount = null;
+
+    if (names && names.length === data.length) {
+        for (let i = 0; i < names.length; i++) {
+            const name = names[i];
+            if (stash === null && (name === 'stash' || name === 'account' || name === 'who' || name === 'validatorStash')) {
+                stash = data[i].toString();
+            }
+            if (name === 'amount' || name === 'value') amount = data[i];
+        }
+    }
+    // Positional fallback for runtimes that emit unnamed event fields.
+    if (stash === null && data.length >= 1) stash = data[0].toString();
+    if (amount === null && data.length >= 2) amount = data[data.length - 1];
+    if (stash === null || amount === null) return null;
+
+    return { stash, amount: balanceToPDEX(amount) };
+}
+
+// Best-effort extraction of { era, validator } from a call, following
+// utility.batch* and proxy.proxy wrappers around staking.payoutStakers.
+function findPayoutInfo(call, depth = 0) {
+    if (!call || depth > 4) return { era: null, validator: null };
+    const section = call.section;
+    const method = call.method;
+
+    if (section === 'staking' && (method === 'payoutStakers' || method === 'payoutStakersByPage')) {
+        const args = call.args || [];
+        const validator = args[0] != null ? args[0].toString() : null;
+        let era = null;
+        if (args[1] != null) {
+            const parsed = Number(args[1].toString());
+            if (Number.isFinite(parsed)) era = parsed;
+        }
+        return { era, validator };
+    }
+    if (section === 'utility' && ['batch', 'batchAll', 'forceBatch'].includes(method)) {
+        const inner = call.args && call.args[0];
+        if (inner && inner.length) {
+            for (const sub of inner) {
+                const result = findPayoutInfo(sub, depth + 1);
+                // A batch can pay several validators in one era; only trust the
+                // validator field when the batch holds a single call.
+                if (result.era != null) {
+                    return { era: result.era, validator: inner.length === 1 ? result.validator : null };
+                }
+            }
+        }
+        return { era: null, validator: null };
+    }
+    if (section === 'proxy' && method === 'proxy' && call.args && call.args.length >= 3) {
+        return findPayoutInfo(call.args[2], depth + 1);
+    }
+    return { era: null, validator: null };
+}
+
+function extractPayoutInfo(extrinsic) {
+    if (!extrinsic || !extrinsic.method) return { era: null, validator: null };
+    try { return findPayoutInfo(extrinsic.method); }
+    catch (e) { return { era: null, validator: null }; }
+}
+
+// Scan a single block; returns an array of reward records (usually empty).
+async function scanBlockForRewards(blockNumber) {
+    try {
+        const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+        const events = await globalApi.query.system.events.at(blockHash);
+
+        const hits = [];
+        events.forEach((record, eventIndex) => {
+            const parsed = parseRewardedEvent(record);
+            if (parsed) hits.push({ record, parsed, eventIndex });
+        });
+        if (hits.length === 0) return [];
+
+        // Only fetch the full block (for era/validator context) when the block
+        // actually contains payouts — most blocks do not.
+        const [signedBlock, timestamp] = await Promise.all([
+            globalApi.rpc.chain.getBlock(blockHash),
+            getBlockTimestampAt(blockHash)
+        ]);
+        const blockHashHex = blockHash.toHex();
+
+        return hits.map(({ record, parsed, eventIndex }) => {
+            let era = null;
+            let validator = null;
+            if (record.phase.isApplyExtrinsic) {
+                const exIndex = record.phase.asApplyExtrinsic.toNumber();
+                const info = extractPayoutInfo(signedBlock.block.extrinsics[exIndex]);
+                era = info.era;
+                validator = info.validator;
+            }
+            return {
+                stash: parsed.stash,
+                amount: parsed.amount,
+                era,
+                validator,
+                block: blockNumber,
+                blockHash: blockHashHex,
+                eventIndex,
+                timestamp
+            };
+        });
+    } catch (err) {
+        console.warn(`Staking rewards scan skipped block ${blockNumber}:`, err.message);
+        return [];
+    }
+}
+
+// Scan a descending block range in concurrent batches.
+async function scanStakingRewards({ startBlock, stopBlock, maxBlocks }) {
+    const rewards = [];
+    let scannedBlocks = 0;
+    let oldestScannedBlock = startBlock;
+
+    for (let nextBlock = startBlock; nextBlock >= stopBlock && scannedBlocks < maxBlocks;) {
+        const blockNumbers = [];
+        while (nextBlock >= stopBlock && blockNumbers.length < STAKING_REWARDS_SCAN_BATCH && scannedBlocks + blockNumbers.length < maxBlocks) {
+            blockNumbers.push(nextBlock);
+            nextBlock--;
+        }
+        if (blockNumbers.length === 0) break;
+
+        const batchResults = await Promise.all(blockNumbers.map(scanBlockForRewards));
+        scannedBlocks += blockNumbers.length;
+        oldestScannedBlock = blockNumbers[blockNumbers.length - 1];
+        for (const blockRewards of batchResults) {
+            for (const reward of blockRewards) rewards.push(reward);
+        }
+    }
+    return { rewards, scannedBlocks, oldestScannedBlock };
+}
+
+// Append newly discovered rewards into the per-address index, de-duplicating
+// on block+eventIndex so re-scanned blocks never double-count.
+function appendRewards(cacheData, newRewards) {
+    if (!isPlainObject(cacheData.rewards)) cacheData.rewards = {};
+    let added = 0;
+    for (const reward of newRewards) {
+        let key;
+        try { key = normalizeAddress(reward.stash); }
+        catch (e) { continue; }
+
+        if (!Array.isArray(cacheData.rewards[key])) cacheData.rewards[key] = [];
+        const list = cacheData.rewards[key];
+        const id = `${reward.block}-${reward.eventIndex}`;
+        if (list.some(entry => entry.id === id)) continue;
+
+        let validator = null;
+        if (reward.validator) {
+            try { validator = normalizeAddress(reward.validator); }
+            catch (e) { validator = reward.validator; }
+        }
+        list.push({
+            id,
+            era: reward.era,
+            amount: reward.amount,
+            validator,
+            block: reward.block,
+            blockHash: reward.blockHash,
+            eventIndex: reward.eventIndex,
+            timestamp: reward.timestamp
+        });
+        added++;
+    }
+    return added;
+}
+
+function countIndexedRewards(cacheData) {
+    if (!isPlainObject(cacheData.rewards)) return 0;
+    let total = 0;
+    for (const list of Object.values(cacheData.rewards)) {
+        if (Array.isArray(list)) total += list.length;
+    }
+    return total;
+}
+
+// One crawl pass: index new blocks (forward) and walk a resumable chunk of
+// older history (backfill). Runs once per interval and appends every time.
+async function syncStakingRewards() {
+    if (isSyncingStakingRewards || !globalApi) return;
+    isSyncingStakingRewards = true;
+    try {
+        const cacheData = await readJsonCache(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE));
+        const latestHeader = await globalApi.rpc.chain.getHeader();
+        const head = latestHeader.number.toNumber();
+
+        cacheData.status = 'Syncing';
+        await fs.writeFile(STAKING_REWARDS_CACHE_FILE, JSON.stringify(cacheData));
+
+        // First run: anchor watermarks to the current head. Everything below
+        // the head is then captured by the resumable backfill pass.
+        if (!cacheData.initialized) {
+            cacheData.initialized = true;
+            cacheData.latestScannedBlock = head;
+            cacheData.oldestScannedBlock = head;
+            cacheData.backfillCursor = head - 1;
+            cacheData.backfillComplete = (head - 1) < STAKING_REWARDS_MIN_BLOCK;
+        }
+
+        // FORWARD PASS — index blocks produced since the previous crawl.
+        const prevLatest = Number(cacheData.latestScannedBlock) || 0;
+        if (head > prevLatest) {
+            if (head - prevLatest > STAKING_REWARDS_FORWARD_MAX) {
+                console.warn(`Staking rewards: forward gap ${head - prevLatest} exceeds cap; scanning most recent ${STAKING_REWARDS_FORWARD_MAX} blocks.`);
+            }
+            const forward = await scanStakingRewards({
+                startBlock: head,
+                stopBlock: prevLatest + 1,
+                maxBlocks: STAKING_REWARDS_FORWARD_MAX
+            });
+            appendRewards(cacheData, forward.rewards);
+            cacheData.latestScannedBlock = head;
+            cacheData.lastSync = Date.now();
+            await fs.writeFile(STAKING_REWARDS_CACHE_FILE, JSON.stringify(cacheData));
+        }
+
+        // BACKFILL PASS — walk one resumable chunk further down the chain.
+        if (!cacheData.backfillComplete) {
+            const cursor = Number(cacheData.backfillCursor) || 0;
+            if (cursor >= STAKING_REWARDS_MIN_BLOCK) {
+                const stopBlock = Math.max(cursor - STAKING_REWARDS_BACKFILL_CHUNK + 1, STAKING_REWARDS_MIN_BLOCK);
+                const backfill = await scanStakingRewards({
+                    startBlock: cursor,
+                    stopBlock,
+                    maxBlocks: STAKING_REWARDS_BACKFILL_CHUNK
+                });
+                appendRewards(cacheData, backfill.rewards);
+                cacheData.oldestScannedBlock = Math.min(Number(cacheData.oldestScannedBlock) || cursor, backfill.oldestScannedBlock);
+                cacheData.backfillCursor = backfill.oldestScannedBlock - 1;
+                if (cacheData.backfillCursor < STAKING_REWARDS_MIN_BLOCK) cacheData.backfillComplete = true;
+            } else {
+                cacheData.backfillComplete = true;
+            }
+        }
+
+        cacheData.status = 'Synced';
+        cacheData.lastSync = Date.now();
+        delete cacheData.error;
+        await fs.writeFile(STAKING_REWARDS_CACHE_FILE, JSON.stringify(cacheData));
+        console.log(`Staking rewards indexer: blocks ${cacheData.oldestScannedBlock}-${cacheData.latestScannedBlock}, ${countIndexedRewards(cacheData)} payouts indexed, backfill ${cacheData.backfillComplete ? 'complete' : 'in progress'}.`);
+    } catch (err) {
+        console.error("Staking rewards sync error:", err);
+        await markCacheError(STAKING_REWARDS_CACHE_FILE, CACHE_DEFAULTS.get(STAKING_REWARDS_CACHE_FILE), err);
+    } finally {
+        isSyncingStakingRewards = false;
+    }
+}
+
 async function start() {
     await initCache();
     const wsProvider = new WsProvider('wss://so.polkadex.ee');
     globalApi = await ApiPromise.create({ provider: wsProvider });
     console.log("Connected to Polkadex RPC");
+    if (globalApi.registry && globalApi.registry.chainSS58 != null) {
+        chainSS58 = globalApi.registry.chainSS58;
+    }
 
     app.listen(PORT, () => {
         console.log(`Backend indexer listening on port ${PORT}`);
@@ -1070,6 +1444,7 @@ async function start() {
     syncEvents();
     syncData();
     syncHolders();
+    syncStakingRewards();
 
     // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
     setInterval(() => {
@@ -1079,6 +1454,9 @@ async function start() {
     }, RECENT_SYNC_INTERVAL);
     setInterval(syncData, FIVE_MINUTES);
     setInterval(syncHolders, THIRTY_MINUTES);
+    // Staking rewards indexer: continuously appends new payouts each era and
+    // resumably backfills older history.
+    setInterval(syncStakingRewards, THIRTY_SECONDS);
 }
 
 start();
