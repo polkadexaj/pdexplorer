@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS price_history (
   volume_24h REAL,
   pct_change_24h REAL
 );
+CREATE TABLE IF NOT EXISTS democracy_referenda (
+  ref_index INTEGER PRIMARY KEY,
+  status TEXT,
+  end_block INTEGER,
+  ayes REAL,
+  nays REAL,
+  turnout REAL,
+  tally_known INTEGER DEFAULT 0,
+  proposal TEXT,
+  threshold TEXT,
+  updated_at INTEGER
+);
 `;
 
 export function initDb(dataDir) {
@@ -342,6 +354,18 @@ export function getLatestPrice() {
 }
 export function countPricePoints() {
     return db.prepare('SELECT COUNT(*) AS c FROM price_history').get().c;
+}
+
+// --- democracy referenda ---
+export function upsertDemocracyReferendum(r) {
+    db.prepare('INSERT OR REPLACE INTO democracy_referenda(ref_index,status,end_block,ayes,nays,turnout,tally_known,proposal,threshold,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(r.refIndex, r.status ?? null, r.endBlock ?? null, r.ayes ?? null, r.nays ?? null, r.turnout ?? null, r.tallyKnown ? 1 : 0, r.proposal ?? null, r.threshold ?? null, Date.now());
+}
+export function getDemocracyReferenda() {
+    return db.prepare('SELECT ref_index AS refIndex, status, end_block AS endBlock, ayes, nays, turnout, tally_known AS tallyKnown, proposal, threshold FROM democracy_referenda ORDER BY ref_index DESC').all();
+}
+export function countDemocracyReferenda() {
+    return db.prepare('SELECT COUNT(*) AS c FROM democracy_referenda').get().c;
 }
 
 // --- one-time migration of legacy JSON caches ---

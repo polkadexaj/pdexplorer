@@ -1154,6 +1154,8 @@ function routeTo(target) {
                 initWalletPage(detailId);
             } else if (mainTarget === 'donate') {
                 initDonatePage();
+            } else if (mainTarget === 'council') {
+                fetchCouncilData();
             }
         } else {
             page.style.display = 'none';
@@ -2004,9 +2006,10 @@ function setStoredWallet(addr) {
 }
 function refreshConnectWalletButton() {
     const label = document.getElementById('connect-wallet-label');
-    if (!label) return;
+    const disconnectBtn = document.getElementById('disconnect-wallet-btn');
     const stored = getStoredWallet();
-    label.textContent = stored ? stakingShortAddress(stored) : 'Connect Wallet';
+    if (label) label.textContent = stored ? stakingShortAddress(stored) : 'Connect Wallet';
+    if (disconnectBtn) disconnectBtn.style.display = stored ? 'inline-flex' : 'none';
 }
 
 // Enumerate accounts from installed Substrate wallet extensions (read-only).
@@ -2041,7 +2044,16 @@ function selectWallet(address) {
 function disconnectWallet() {
     setStoredWallet('');
     refreshConnectWalletButton();
-    window.location.hash = 'wallet';
+    // If the user is currently on a wallet page, return them to the connect panel.
+    const hash = window.location.hash.replace(/^#/, '');
+    if (hash.startsWith('wallet')) {
+        if (hash === 'wallet') {
+            const root = document.getElementById('wallet-dashboard');
+            if (root) renderWalletConnectPanel(root);
+        } else {
+            window.location.hash = 'wallet';
+        }
+    }
 }
 
 function initWalletPage(address) {
@@ -2435,11 +2447,234 @@ if (stakingPasteBtn) {
 }
 const connectWalletBtn = document.getElementById('connect-wallet-btn');
 if (connectWalletBtn) connectWalletBtn.addEventListener('click', connectWallet);
+const disconnectWalletBtn = document.getElementById('disconnect-wallet-btn');
+if (disconnectWalletBtn) disconnectWalletBtn.addEventListener('click', disconnectWallet);
 refreshConnectWalletButton();
 
 setInterval(() => {
     renderBlocks();
     if (transactions.length > 0) renderTransactions();
 }, 10000);
+
+// --- Council Module Logic ---
+let councilPalletName = 'elections'; // overridden by the /api/council response
+
+async function fetchCouncilData() {
+    try {
+        const response = await fetch('/api/council');
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        if (data.pallet) councilPalletName = data.pallet;
+
+        const members = Array.isArray(data.members) ? data.members : [];
+        const runnersUp = Array.isArray(data.runnersUp) ? data.runnersUp : [];
+        const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+        const termDuration = Number(data.termDuration) || 0;
+        const blocksRemaining = Number(data.blocksRemaining) || 0;
+
+        document.getElementById('council-seats-count').innerText = `${members.length}/${data.desiredMembers || 0}`;
+        document.getElementById('council-runnersup-count').innerText = runnersUp.length;
+        document.getElementById('council-candidates-count').innerText = candidates.length;
+
+        // Term progress (guarded against a zero/missing term duration).
+        const pct = termDuration > 0
+            ? Math.min(100, Math.max(0, Math.floor(((termDuration - blocksRemaining) / termDuration) * 100)))
+            : 0;
+        document.getElementById('council-progress-pct').innerText = `${pct}%`;
+        document.getElementById('council-progress-arc').style.strokeDasharray = `${pct}, 100`;
+
+        // Polkadex block time is ~12s
+        const remainingSeconds = blocksRemaining * 12;
+        const days = Math.floor(remainingSeconds / (24 * 3600));
+        const hours = Math.floor((remainingSeconds % (24 * 3600)) / 3600);
+        document.getElementById('council-term-remaining').innerText = `${days} days ${hours} hrs`;
+
+        const renderList = (list, elementId) => {
+            const el = document.getElementById(elementId);
+            if (!el) return;
+            if (!list || list.length === 0) {
+                el.innerHTML = '<tr><td colspan="2" style="text-align:center; padding:20px;">No accounts found</td></tr>';
+                return;
+            }
+            el.innerHTML = list.map(item => {
+                const addr = stakingEscapeHtml(item.address);
+                return `
+                <tr style="background: rgba(255,255,255,0.02);">
+                    <td>
+                        <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">${stakingEscapeHtml(item.name || 'Unknown')}</div>
+                        <div class="address-cell" style="font-size: 13px;">${addr} <span onclick="copyToClipboard(this, '${addr}')" style="cursor: pointer; color: var(--brand-secondary); margin-left: 8px;">copy</span></div>
+                    </td>
+                    <td style="text-align: right; font-weight: 600;">
+                        ${Number(item.stake || 0).toLocaleString('en-US', { maximumFractionDigits: 4 })} PDEX
+                    </td>
+                </tr>`;
+            }).join('');
+        };
+
+        renderList(members, 'council-members-list');
+        renderList(runnersUp, 'council-runnersup-list');
+        renderList(candidates, 'council-candidates-list');
+    } catch (err) {
+        console.error('Failed to fetch council data', err);
+        const failMsg = '<tr><td colspan="2" style="text-align:center; padding:20px; color: var(--error);">Failed to load council data.</td></tr>';
+        ['council-members-list', 'council-runnersup-list', 'council-candidates-list'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.innerHTML = failMsg;
+        });
+    }
+}
+
+// Tab switching
+const councilTabs = document.querySelectorAll('.council-page .account-tab');
+councilTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+        councilTabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        const targetId = tab.getAttribute('data-tab');
+        document.querySelectorAll('.council-page .account-tab-content').forEach(c => {
+            c.classList.remove('active');
+            c.style.display = 'none';
+        });
+        const activeContent = document.getElementById(targetId);
+        if (activeContent) {
+            activeContent.classList.add('active');
+            activeContent.style.display = 'block';
+        }
+    });
+});
+
+// Modals
+const candidacyModal = document.getElementById('council-candidacy-modal');
+const voteModal = document.getElementById('council-vote-modal');
+
+if (document.getElementById('council-submit-candidacy-btn')) {
+    document.getElementById('council-submit-candidacy-btn').addEventListener('click', () => {
+        candidacyModal.style.display = 'flex';
+        checkWalletForCouncil('candidacy');
+    });
+}
+if (document.getElementById('close-candidacy-modal')) {
+    document.getElementById('close-candidacy-modal').addEventListener('click', () => {
+        candidacyModal.style.display = 'none';
+    });
+}
+
+if (document.getElementById('council-vote-btn')) {
+    document.getElementById('council-vote-btn').addEventListener('click', () => {
+        voteModal.style.display = 'flex';
+        checkWalletForCouncil('vote');
+    });
+}
+if (document.getElementById('close-vote-modal')) {
+    document.getElementById('close-vote-modal').addEventListener('click', () => {
+        voteModal.style.display = 'none';
+    });
+}
+
+function checkWalletForCouncil(modalType) {
+    const address = getStoredWallet();
+    const activeDivId = modalType === 'candidacy' ? 'candidacy-active-wallet' : '';
+    const warningId = modalType === 'candidacy' ? 'candidacy-modal-wallet-warning' : 'vote-modal-wallet-warning';
+    
+    if (!address) {
+        document.getElementById(warningId).style.display = 'block';
+        if (activeDivId) document.getElementById(activeDivId).innerText = '--';
+        return;
+    }
+    
+    document.getElementById(warningId).style.display = 'none';
+    if (activeDivId) document.getElementById(activeDivId).innerText = address;
+}
+
+async function submitCouncilCandidacy() {
+    const address = getStoredWallet();
+    if (!address) return alert('Please connect your wallet first');
+    
+    try {
+        const injected = await getInjectedAccounts();
+        if (!injected || injected.length === 0) return alert('No wallet extension found. Please install Polkadot.js or Talisman.');
+        
+        const account = injected.find(a => a.address === address);
+        if (!account) return alert('Connected account not found in wallet extension. Please reconnect.');
+        
+        const provider = window.injectedWeb3[account.source];
+        const ext = await provider.enable('Polkadex Explorer');
+        
+        document.getElementById('submit-candidacy-tx-btn').innerText = 'Signing...';
+        
+        const response = await fetch('/api/council');
+        const data = await response.json();
+        const candidateCount = (data.candidates || []).length;
+
+        const unsub = await globalApi.tx[councilPalletName].submitCandidacy(candidateCount)
+            .signAndSend(address, { signer: ext.signer }, ({ status }) => {
+                if (status.isInBlock) {
+                    alert(`Transaction included at blockHash ${status.asInBlock}`);
+                    candidacyModal.style.display = 'none';
+                    unsub();
+                    document.getElementById('submit-candidacy-tx-btn').innerText = 'Sign & Submit Candidacy';
+                }
+            });
+            
+    } catch (err) {
+        console.error(err);
+        alert('Transaction failed: ' + err.message);
+        document.getElementById('submit-candidacy-tx-btn').innerText = 'Sign & Submit Candidacy';
+    }
+}
+
+if (document.getElementById('submit-candidacy-tx-btn')) {
+    document.getElementById('submit-candidacy-tx-btn').addEventListener('click', submitCouncilCandidacy);
+}
+
+async function submitCouncilVote() {
+    const address = getStoredWallet();
+    if (!address) return alert('Please connect your wallet first');
+    
+    const candidatesInput = document.getElementById('vote-candidates-input').value;
+    const stakeInput = document.getElementById('vote-stake-input').value;
+    
+    if (!candidatesInput || !stakeInput) return alert('Please fill in all fields');
+    
+    const candidates = candidatesInput.split(',').map(a => a.trim()).filter(a => a);
+    if (candidates.length > 16) return alert('You can vote for a maximum of 16 candidates');
+    if (candidates.length === 0) return alert('Please provide at least one candidate address');
+    
+    const stakeAmount = parseFloat(stakeInput);
+    if (isNaN(stakeAmount) || stakeAmount <= 0) return alert('Invalid stake amount');
+    const stakePlanck = BigInt(Math.floor(stakeAmount * (10 ** 12)));
+    
+    try {
+        const injected = await getInjectedAccounts();
+        if (!injected || injected.length === 0) return alert('No wallet extension found.');
+        
+        const account = injected.find(a => a.address === address);
+        if (!account) return alert('Connected account not found in wallet extension.');
+        
+        const provider = window.injectedWeb3[account.source];
+        const ext = await provider.enable('Polkadex Explorer');
+        
+        document.getElementById('submit-vote-tx-btn').innerText = 'Signing...';
+        
+        const unsub = await globalApi.tx[councilPalletName].vote(candidates, stakePlanck.toString())
+            .signAndSend(address, { signer: ext.signer }, ({ status }) => {
+                if (status.isInBlock) {
+                    alert(`Transaction included at blockHash ${status.asInBlock}`);
+                    voteModal.style.display = 'none';
+                    unsub();
+                    document.getElementById('submit-vote-tx-btn').innerText = 'Sign & Submit Vote';
+                }
+            });
+            
+    } catch (err) {
+        console.error(err);
+        alert('Transaction failed: ' + err.message);
+        document.getElementById('submit-vote-tx-btn').innerText = 'Sign & Submit Vote';
+    }
+}
+
+if (document.getElementById('submit-vote-tx-btn')) {
+    document.getElementById('submit-vote-tx-btn').addEventListener('click', submitCouncilVote);
+}
 
 init();

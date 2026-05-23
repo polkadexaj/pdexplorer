@@ -44,6 +44,7 @@ let isSyncingBlocks = false;
 let isSyncingEvents = false;
 let isSyncingStakingRewards = false;
 let isSyncingPrice = false;
+let isSyncingCouncil = false;
 const computingUnclaimed = new Set();
 let isCrawlingAccount = {};
 let globalApi = null;
@@ -861,6 +862,16 @@ app.get('/api/price-history', (req, res) => {
 });
 
 // --- WALLET DASHBOARD ENDPOINT ---
+app.get('/api/council', (req, res) => {
+    try {
+        const data = db.getKv('council') || { members: [], runnersUp: [], candidates: [], blocksRemaining: 0, termDuration: 0, desiredMembers: 0, desiredRunnersUp: 0 };
+        res.json(data);
+    } catch (err) {
+        console.error('API Error /api/council:', err);
+        res.status(500).json({ error: 'Failed to fetch council data' });
+    }
+});
+
 app.get('/api/wallet/:address', async (req, res) => {
     const raw = (req.params.address || '').trim();
     if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
@@ -967,9 +978,84 @@ app.get('/api/wallet/:address', async (req, res) => {
 });
 
 // --- BACKGROUND CRAWLERS ---
+async function syncCouncil() {
+    if (!globalApi || isSyncingCouncil) return;
+    isSyncingCouncil = true;
+    try {
+        // The elections-phragmen pallet is registered under different names
+        // across runtimes (elections / phragmenElection / electionsPhragmen).
+        const electionsModule = ['elections', 'phragmenElection', 'electionsPhragmen']
+            .find(name => globalApi.query[name] && globalApi.consts[name]);
+        if (!electionsModule) {
+            console.warn('Council sync: no elections pallet found on this runtime.');
+            db.setSyncState('council', { lastSync: Date.now(), status: 'Unavailable' });
+            return;
+        }
+        const electionsQuery = globalApi.query[electionsModule];
+        const electionsConsts = globalApi.consts[electionsModule];
+
+        const [membersData, runnersUpData, candidatesData, currentBlockObj] = await Promise.all([
+            electionsQuery.members(),
+            electionsQuery.runnersUp(),
+            electionsQuery.candidates(),
+            globalApi.query.system.number()
+        ]);
+
+        const currentBlock = currentBlockObj.toNumber();
+        const termDuration = electionsConsts.termDuration ? electionsConsts.termDuration.toNumber() : 0;
+        const desiredMembers = electionsConsts.desiredMembers ? electionsConsts.desiredMembers.toNumber() : 0;
+        const desiredRunnersUp = electionsConsts.desiredRunnersUp ? electionsConsts.desiredRunnersUp.toNumber() : 0;
+        const progress = termDuration > 0 ? currentBlock % termDuration : 0;
+        const blocksRemaining = termDuration > 0 ? termDuration - progress : 0;
+        
+        const processAccountList = async (list) => {
+            const arr = [];
+            const items = list.toJSON() || [];
+            for (const item of items) {
+                let address = item;
+                let stake = 0;
+                if (Array.isArray(item)) {
+                    address = item[0];
+                    stake = balanceToPDEX(item[1]);
+                } else if (item && item.who) {
+                    address = item.who;
+                    stake = balanceToPDEX(item.stake);
+                }
+                const name = await getIdentity(globalApi, address);
+                arr.push({ address, name, stake });
+            }
+            return arr;
+        };
+        
+        const members = await processAccountList(membersData);
+        const runnersUp = await processAccountList(runnersUpData);
+        const candidates = await processAccountList(candidatesData);
+        
+        const councilData = {
+            members,
+            runnersUp,
+            candidates,
+            currentBlock,
+            termDuration,
+            blocksRemaining,
+            desiredMembers,
+            desiredRunnersUp,
+            pallet: electionsModule,
+            lastSync: Date.now()
+        };
+        
+        db.setKv('council', councilData);
+        db.setSyncState('council', { lastSync: Date.now(), status: 'Synced' });
+    } catch (err) {
+        console.error('Council sync error:', err);
+    } finally {
+        isSyncingCouncil = false;
+    }
+}
+
 async function syncData() {
     if (isSyncing || !globalApi) return;
-    isSyncing = true;
+    isSyncing || (isSyncing = true);
     try {
         console.log("Starting validator indexer sync...");
         const activeEraOption = await globalApi.query.staking.activeEra();
@@ -1479,6 +1565,7 @@ async function start() {
     syncHolders();
     syncStakingRewards();
     syncPrice();
+    syncCouncil();
 
     // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
     setInterval(() => {
@@ -1486,8 +1573,9 @@ async function start() {
         syncTransactions();
         syncEvents();
     }, RECENT_SYNC_INTERVAL);
-    setInterval(syncData, FIVE_MINUTES);
     setInterval(syncHolders, THIRTY_MINUTES);
+    setInterval(syncCouncil, FIVE_MINUTES);
+    setInterval(syncTransactions, THIRTY_SECONDS);
     // Staking rewards indexer: continuously appends new payouts each era and
     // resumably backfills older history.
     setInterval(syncStakingRewards, THIRTY_SECONDS);

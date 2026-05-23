@@ -35,6 +35,12 @@
                 <a href="#validators" class="nav-item" data-target="validators"><i class='bx bx-check-shield'></i> Validators</a>
                 <a href="#staking-rewards" class="nav-item" data-target="staking-rewards"><i class='bx bx-coin-stack'></i> Staking Rewards <span class="badge">NEW</span></a>
                 
+                <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Governance</div>
+                <a href="#democracy" class="nav-item" data-target="democracy"><i class='bx bx-book-content'></i> Democracy</a>
+                <a href="#council" class="nav-item" data-target="council"><i class='bx bx-group'></i> Council</a>
+                <a href="#treasury" class="nav-item" data-target="treasury"><i class='bx bx-wallet'></i> Treasury</a>
+                <a href="#discussions" class="nav-item" data-target="discussions"><i class='bx bx-chat'></i> Discussions</a>
+                
                 <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Community Projects</div>
                 <a href="https://buypdex.com" target="_blank" rel="noopener" class="nav-item"><i class='bx bx-shopping-bag'></i> Buy PDEX</a>
             </nav>
@@ -71,10 +77,15 @@
                     <i class='bx bx-heart'></i>
                     <span>Donate</span>
                 </a>
-                <button id="connect-wallet-btn" class="connect-wallet-btn" title="Connect a Substrate wallet in read-only mode">
-                    <i class='bx bx-wallet'></i>
-                    <span id="connect-wallet-label">Connect Wallet</span>
-                </button>
+                <div class="wallet-btn-group">
+                    <button id="connect-wallet-btn" class="connect-wallet-btn" title="Connect a Substrate wallet in read-only mode">
+                        <i class='bx bx-wallet'></i>
+                        <span id="connect-wallet-label">Connect Wallet</span>
+                    </button>
+                    <button id="disconnect-wallet-btn" class="disconnect-wallet-btn" title="Disconnect wallet" style="display: none;">
+                        <i class='bx bx-x'></i>
+                    </button>
+                </div>
             </header>
 
             <!-- Dashboard Content -->
@@ -246,6 +257,192 @@
                     </div>
                 </div>
                 <div class="list-container glass" id="staking-rewards-results" style="display: none; margin-top: 20px;"></div>
+            </div>
+
+            <!-- Democracy Page -->
+            <div class="democracy-page page-section" data-page="democracy" style="display: none;">
+                <div class="list-container glass">
+                    <div class="list-header">
+                        <h2>Democracy</h2>
+                    </div>
+                    <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
+                        <i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
+                        <h3>Coming Soon</h3>
+                        <p>The Democracy module is currently under development.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Council Page -->
+            <div class="council-page page-section" data-page="council" style="display: none;">
+                <div class="list-container glass">
+                    <div class="list-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0; border-bottom: none;">
+                        <h2>Council</h2>
+                        <div style="display: flex; gap: 10px;">
+                            <button id="council-submit-candidacy-btn" class="glass" style="padding: 8px 16px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); color: var(--text-primary); cursor: pointer; border-radius: var(--radius-sm); transition: var(--transition-fast);">Submit Candidacy</button>
+                            <button id="council-vote-btn" class="glass" style="padding: 8px 16px; border: 1px solid var(--brand-primary); background: rgba(229, 39, 137, 0.1); color: var(--brand-primary); cursor: pointer; border-radius: var(--radius-sm); transition: var(--transition-fast); font-weight: 600;">Vote</button>
+                        </div>
+                    </div>
+                    
+                    <div class="account-tabs" style="margin: 0 24px;">
+                        <button class="account-tab active" data-tab="council-members">Members</button>
+                        <button class="account-tab" data-tab="council-motions">Motions</button>
+                    </div>
+                    
+                    <!-- Council Members Tab -->
+                    <div id="council-members" class="account-tab-content active" style="padding: 24px;">
+                        <!-- Summary Stats -->
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 30px;">
+                            <div class="glass" style="flex: 1; padding: 20px; border-radius: var(--radius-md); text-align: center; border: 1px solid var(--border-color);">
+                                <div style="font-size: 12px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 8px; font-weight: 600; letter-spacing: 0.5px;">Seats</div>
+                                <div id="council-seats-count" style="font-size: 28px; font-weight: 700; color: var(--text-primary);">--/--</div>
+                            </div>
+                            <div class="glass" style="flex: 1; padding: 20px; border-radius: var(--radius-md); text-align: center; border: 1px solid var(--border-color);">
+                                <div style="font-size: 12px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 8px; font-weight: 600; letter-spacing: 0.5px;">Runners Up</div>
+                                <div id="council-runnersup-count" style="font-size: 28px; font-weight: 700; color: var(--text-primary);">--</div>
+                            </div>
+                            <div class="glass" style="flex: 1; padding: 20px; border-radius: var(--radius-md); text-align: center; border: 1px solid var(--border-color);">
+                                <div style="font-size: 12px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 8px; font-weight: 600; letter-spacing: 0.5px;">Candidates</div>
+                                <div id="council-candidates-count" style="font-size: 28px; font-weight: 700; color: var(--text-primary);">--</div>
+                            </div>
+                            <!-- Term Progress Animation -->
+                            <div class="glass" style="flex: 1; padding: 20px; border-radius: var(--radius-md); text-align: center; border: 1px solid var(--border-color); display: flex; align-items: center; justify-content: center; gap: 15px;">
+                                <div class="progress-circle" id="council-term-progress">
+                                    <svg viewBox="0 0 36 36">
+                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                        <path class="circle" id="council-progress-arc" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                    </svg>
+                                    <div class="progress-text" id="council-progress-pct" style="font-size: 11px;">--%</div>
+                                </div>
+                                <div style="text-align: left;">
+                                    <div style="font-size: 12px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">Term Progress</div>
+                                    <div id="council-term-remaining" style="font-size: 16px; font-weight: 600; color: var(--text-primary);">-- days -- hrs</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Members Table -->
+                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">Members</h3>
+                        <div class="table-responsive" style="margin-bottom: 30px;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Account</th>
+                                        <th style="text-align: right;">Backing Stake</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="council-members-list">
+                                    <tr><td colspan="2" style="text-align:center; padding: 20px;">Fetching council members...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Runners Up Table -->
+                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">Runners Up</h3>
+                        <div class="table-responsive" style="margin-bottom: 30px;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Account</th>
+                                        <th style="text-align: right;">Backing Stake</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="council-runnersup-list">
+                                    <tr><td colspan="2" style="text-align:center; padding: 20px;">Fetching runners up...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Candidates Table -->
+                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">Candidates</h3>
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Account</th>
+                                        <th style="text-align: right;">Backing Stake</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="council-candidates-list">
+                                    <tr><td colspan="2" style="text-align:center; padding: 20px;">Fetching candidates...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Council Motions Tab -->
+                    <div id="council-motions" class="account-tab-content" style="padding: 24px;">
+                        <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
+                            <i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
+                            <h3>Coming Soon</h3>
+                            <p>The Council Motions module is currently under development.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Modals (Hidden by default) -->
+            <div id="council-candidacy-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px);">
+                <div class="glass" style="width: 100%; max-width: 500px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
+                    <button id="close-candidacy-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 20px; font-size: 1.3rem;">Submit Candidacy</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 20px; font-size: 0.9rem;">Submit your candidacy for the Polkadex Council. This action requires a connected wallet extension.</p>
+                    <div id="candidacy-modal-wallet-warning" style="color: var(--error); margin-bottom: 15px; font-size: 0.9rem; display: none;">Please connect your wallet first.</div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Active Wallet</label>
+                        <div id="candidacy-active-wallet" style="padding: 12px 16px; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm); border: 1px solid rgba(255,255,255,0.05); font-family: monospace;">--</div>
+                    </div>
+                    <button id="submit-candidacy-tx-btn" class="glass" style="width: 100%; padding: 12px; background: var(--brand-primary); color: white; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; transition: var(--transition-fast);">Sign & Submit Candidacy</button>
+                </div>
+            </div>
+
+            <div id="council-vote-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px);">
+                <div class="glass" style="width: 100%; max-width: 500px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
+                    <button id="close-vote-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 20px; font-size: 1.3rem;">Vote for Council</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 20px; font-size: 0.9rem;">Vote for up to 16 candidates. Separate multiple Polkadex addresses with commas.</p>
+                    <div id="vote-modal-wallet-warning" style="color: var(--error); margin-bottom: 15px; font-size: 0.9rem; display: none;">Please connect your wallet first.</div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Candidate Addresses (comma separated)</label>
+                        <input type="text" id="vote-candidates-input" placeholder="esxxx..., esyyy..." style="width: 100%; padding: 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm);">
+                    </div>
+                    
+                    <div style="margin-bottom: 25px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Backing Stake (PDEX)</label>
+                        <input type="number" id="vote-stake-input" placeholder="100.0" step="0.1" style="width: 100%; padding: 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm);">
+                    </div>
+                    
+                    <button id="submit-vote-tx-btn" class="glass" style="width: 100%; padding: 12px; background: var(--brand-primary); color: white; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; transition: var(--transition-fast);">Sign & Submit Vote</button>
+                </div>
+            </div>
+
+            <!-- Treasury Page -->
+            <div class="treasury-page page-section" data-page="treasury" style="display: none;">
+                <div class="list-container glass">
+                    <div class="list-header">
+                        <h2>Treasury</h2>
+                    </div>
+                    <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
+                        <i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
+                        <h3>Coming Soon</h3>
+                        <p>The Treasury module is currently under development.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Discussions Page -->
+            <div class="discussions-page page-section" data-page="discussions" style="display: none;">
+                <div class="list-container glass">
+                    <div class="list-header">
+                        <h2>Discussions</h2>
+                    </div>
+                    <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
+                        <i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
+                        <h3>Coming Soon</h3>
+                        <p>The Discussions module is currently under development.</p>
+                    </div>
+                </div>
             </div>
 
             <!-- Wallet Dashboard Page -->
