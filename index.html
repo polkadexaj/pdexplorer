@@ -228,7 +228,13 @@
                     <div class="staking-search-wrap">
                         <p class="staking-search-hint">Enter a Polkadex wallet address to view its claimed staking reward history, then download it as CSV or JSON.</p>
                         <div class="staking-search-bar">
-                            <input type="text" id="staking-address-input" placeholder="Polkadex address (e.g. esxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)" autocomplete="off" spellcheck="false">
+                            <div style="flex: 1 1 320px; position: relative; display: flex; align-items: center;">
+                                <input type="text" id="staking-address-input" placeholder="Polkadex address (e.g. esxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)" autocomplete="off" spellcheck="false" style="width: 100%; padding-right: 70px;">
+                                <div style="position: absolute; right: 10px; display: flex; gap: 5px;">
+                                    <button id="staking-clear-btn" style="background: none; border: none; padding: 5px; color: var(--text-secondary); display: none; min-width: auto; height: auto;" title="Clear"><i class='bx bx-x' style="font-size: 20px;"></i></button>
+                                    <button id="staking-paste-btn" style="background: none; border: none; padding: 5px; color: var(--text-secondary); min-width: auto; height: auto;" title="Paste"><i class='bx bx-paste' style="font-size: 18px;"></i></button>
+                                </div>
+                            </div>
                             <button id="staking-search-btn"><i class='bx bx-search'></i> Search</button>
                         </div>
                         <div id="staking-rewards-error" class="staking-error" style="display: none;"></div>

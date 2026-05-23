@@ -1302,7 +1302,7 @@ async function fetchAccountDetails(address) {
                 <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;">
                     <tr style="background: rgba(255,255,255,0.05);">
                         <td style="padding: 12px 20px; font-weight: 600; width: 250px;">account</td>
-                        <td style="padding: 12px 20px;" class="address-cell">${data.account}</td>
+                        <td style="padding: 12px 20px;" class="address-cell">${data.account} <span onclick="copyToClipboard(this, '${data.account}')" style="cursor: pointer; color: var(--brand-secondary); font-size: 13px; margin-left: 10px;">copy</span></td>
                     </tr>
                     <tr>
                         <td style="padding: 12px 20px; font-weight: 600;">display</td>
@@ -2285,9 +2285,43 @@ function renderWalletPriceChart(history) {
 const stakingSearchBtn = document.getElementById('staking-search-btn');
 if (stakingSearchBtn) stakingSearchBtn.addEventListener('click', submitStakingSearch);
 const stakingAddressInput = document.getElementById('staking-address-input');
+const stakingClearBtn = document.getElementById('staking-clear-btn');
+const stakingPasteBtn = document.getElementById('staking-paste-btn');
+
 if (stakingAddressInput) {
     stakingAddressInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') submitStakingSearch();
+    });
+    stakingAddressInput.addEventListener('input', () => {
+        if (stakingClearBtn) {
+            stakingClearBtn.style.display = stakingAddressInput.value.length > 0 ? 'inline-block' : 'none';
+        }
+    });
+}
+
+if (stakingClearBtn) {
+    stakingClearBtn.addEventListener('click', () => {
+        if (stakingAddressInput) {
+            stakingAddressInput.value = '';
+            stakingClearBtn.style.display = 'none';
+            stakingAddressInput.focus();
+        }
+    });
+}
+
+if (stakingPasteBtn) {
+    stakingPasteBtn.addEventListener('click', async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (stakingAddressInput) {
+                stakingAddressInput.value = text.trim();
+                if (stakingClearBtn) stakingClearBtn.style.display = 'inline-block';
+                stakingAddressInput.focus();
+            }
+        } catch (err) {
+            console.error('Failed to read clipboard contents: ', err);
+            alert('Failed to access clipboard. Please paste manually.');
+        }
     });
 }
 const connectWalletBtn = document.getElementById('connect-wallet-btn');
