@@ -1152,6 +1152,8 @@ function routeTo(target) {
                 initStakingRewardsPage(detailId);
             } else if (mainTarget === 'wallet') {
                 initWalletPage(detailId);
+            } else if (mainTarget === 'donate') {
+                initDonatePage();
             }
         } else {
             page.style.display = 'none';
@@ -2279,6 +2281,113 @@ function renderWalletPriceChart(history) {
             }
         }
     });
+}
+
+// --- Donate Page ---
+const DONATION_ADDRESSES = [
+    { category: 'Coins', asset: 'BTC', network: 'Bitcoin', address: 'bc1qlugkf7vv94yrr4vm54xrjx2zwj9q0cs76pz200', uri: 'bitcoin:' },
+    { category: 'Coins', asset: 'ETH', network: 'Ethereum', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a', uri: 'ethereum:' },
+    { category: 'Coins', asset: 'SOL', network: 'Solana', address: 'H4LTvHcqhP9bqXpEkM1JFBvnh9f8HAfMe66r6pBWD7E7', uri: 'solana:' },
+    { category: 'Coins', asset: 'BNB', network: 'BNB Smart Chain', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Coins', asset: 'TRX', network: 'Tron', address: 'TEnrQfBoVpT8q5cscRAYTzA2bqA9b5qWwA', uri: 'tron:' },
+    { category: 'Coins', asset: 'DOT', network: 'Polkadot', address: '13wPMFBWzDyNY3DJutMN7b6PJai5PRmW9aTSuS4oDMqnzumL' },
+    { category: 'Coins', asset: 'POL', network: 'Polygon', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Coins', asset: 'ETH', network: 'Arbitrum', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Coins', asset: 'ADA', network: 'Cardano', address: 'addr1q9szq9mef3wlvdgu95lqgqcvjjeuv998u4nfpeuf4cmlsx9vl55478r077m3v6677thhy6zjdc6hrmaum9nx4l49wtrsn5wq7q' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Tron', address: 'TEnrQfBoVpT8q5cscRAYTzA2bqA9b5qWwA' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Ethereum', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Solana', address: 'H4LTvHcqhP9bqXpEkM1JFBvnh9f8HAfMe66r6pBWD7E7' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'BNB Smart Chain', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Base', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Arbitrum', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Polygon', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDC', network: 'Ethereum', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDC', network: 'Solana', address: 'H4LTvHcqhP9bqXpEkM1JFBvnh9f8HAfMe66r6pBWD7E7' },
+    { category: 'Stablecoins', asset: 'USDC', network: 'Base', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDC', network: 'BNB Smart Chain', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDC', network: 'Polygon', address: '0x12c29206E2c2a9a2EC58cA9F52b1ACF7C36dec8a' },
+    { category: 'Stablecoins', asset: 'USDT', network: 'Crypto.org', address: 'cro1sz7rjpwmfyqdsyvhpnpe5ttlczgwn62kzxeuum' }
+];
+let donatePageRendered = false;
+
+function initDonatePage() {
+    const root = document.getElementById('donate-content');
+    if (!root || donatePageRendered) return;
+
+    const donateCard = d => {
+        const addr = stakingEscapeHtml(d.address);
+        const openLink = d.uri
+            ? `<a class="donate-open" href="${d.uri}${addr}"><i class='bx bx-wallet'></i> Open in wallet</a>`
+            : '';
+        return `
+        <div class="donate-card">
+            <div class="donate-card-head">
+                <span class="donate-asset">${stakingEscapeHtml(d.asset)}</span>
+                <span class="donate-network">${stakingEscapeHtml(d.network)}</span>
+            </div>
+            <div class="donate-qr" data-address="${addr}"></div>
+            <div class="donate-address" title="${addr}">${addr}</div>
+            <div class="donate-actions">
+                <button class="donate-copy" data-address="${addr}"><i class='bx bx-copy'></i> Copy address</button>
+                ${openLink}
+            </div>
+        </div>`;
+    };
+
+    const coins = DONATION_ADDRESSES.filter(d => d.category === 'Coins');
+    const stables = DONATION_ADDRESSES.filter(d => d.category === 'Stablecoins');
+
+    root.innerHTML = `
+        <div class="list-container glass donate-hero">
+            <h1>Support the Polkadex Explorer</h1>
+            <p>This explorer is a free, community-run window into the Polkadex network — no ads, no trackers, no paywalls. Behind the scenes, though, archive RPC nodes, servers, price feeds and continuous development all cost real money and time to keep running.</p>
+            <p>If it has ever helped you check a transaction, track a validator or understand your staking rewards, please consider chipping in. A contribution of any size — in any coin, on any network — keeps the data flowing, the project independent, and the explorer free and open for the whole community. Thank you for your support; it means a great deal.</p>
+            <p class="donate-note">To donate, scan a QR code with your wallet app or copy the address for the coin and network you use. Pick whichever of the 20+ supported networks below is easiest for you.</p>
+        </div>
+        <div class="donate-section-title">Coins</div>
+        <div class="donate-grid">${coins.map(donateCard).join('')}</div>
+        <div class="donate-section-title">Stablecoins &mdash; USDT &amp; USDC</div>
+        <div class="donate-grid">${stables.map(donateCard).join('')}</div>
+        <div class="donate-disclaimer"><i class='bx bx-info-circle'></i> Always double-check the asset, address and network before sending. Funds sent to the wrong network may be unrecoverable.</div>`;
+
+    // Render a QR code for every address.
+    root.querySelectorAll('.donate-qr').forEach(el => {
+        const addr = el.getAttribute('data-address');
+        if (typeof QRCode !== 'undefined') {
+            try {
+                new QRCode(el, {
+                    text: addr,
+                    width: 116,
+                    height: 116,
+                    colorDark: '#0d0d12',
+                    colorLight: '#ffffff',
+                    correctLevel: QRCode.CorrectLevel.M
+                });
+            } catch (e) {
+                el.innerHTML = '<span class="donate-qr-fallback">QR unavailable</span>';
+            }
+        } else {
+            el.innerHTML = '<span class="donate-qr-fallback">QR unavailable</span>';
+        }
+    });
+
+    // Copy-to-clipboard buttons.
+    root.querySelectorAll('.donate-copy').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const addr = btn.getAttribute('data-address');
+            const done = () => {
+                const original = btn.innerHTML;
+                btn.innerHTML = "<i class='bx bx-check'></i> Copied!";
+                btn.classList.add('copied');
+                setTimeout(() => { btn.innerHTML = original; btn.classList.remove('copied'); }, 1600);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(addr).then(done).catch(() => { });
+            }
+        });
+    });
+
+    donatePageRendered = true;
 }
 
 // --- Event wiring: staking rewards + wallet connect ---

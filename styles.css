@@ -1105,3 +1105,166 @@ h1, h2, h3 { font-weight: 600; }
 }
 .wallet-account-name { font-size: 0.88rem; font-weight: 600; }
 .wallet-account-addr { font-size: 0.78rem; color: var(--text-secondary); }
+
+/* --- Donate button + page --- */
+.donate-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: rgba(0, 230, 118, 0.08);
+    color: var(--brand-secondary);
+    border: 1px solid var(--brand-secondary);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: inherit;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background var(--transition-fast), transform var(--transition-fast);
+}
+.donate-btn:hover { background: rgba(0, 230, 118, 0.18); }
+.donate-btn:active { transform: scale(0.98); }
+.donate-btn i { font-size: 1.05rem; }
+
+#donate-content {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+.donate-hero {
+    padding: 30px 32px;
+}
+.donate-hero h1 {
+    font-size: 1.55rem;
+    margin-bottom: 14px;
+}
+.donate-hero p {
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    line-height: 1.75;
+    max-width: 760px;
+    margin-bottom: 12px;
+}
+.donate-hero .donate-note {
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    margin-top: 6px;
+    margin-bottom: 0;
+}
+.donate-section-title {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
+    padding: 4px 2px;
+}
+.donate-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(238px, 1fr));
+    gap: 16px;
+}
+.donate-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 20px 18px;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    transition: border-color var(--transition-fast);
+}
+.donate-card:hover { border-color: var(--border-hover); }
+.donate-card-head {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+.donate-asset {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.donate-network {
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+}
+.donate-qr {
+    width: 132px;
+    height: 132px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 8px;
+}
+.donate-qr img, .donate-qr canvas { display: block; }
+.donate-qr-fallback {
+    font-size: 0.7rem;
+    color: #888;
+    text-align: center;
+}
+.donate-address {
+    width: 100%;
+    font-family: 'Courier New', monospace;
+    font-size: 0.66rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    word-break: break-all;
+    text-align: center;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+}
+.donate-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+}
+.donate-copy, .donate-open {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.donate-copy {
+    background: var(--brand-primary);
+    color: #fff;
+    border: 1px solid var(--brand-primary);
+}
+.donate-copy:hover { background: #c80069; }
+.donate-copy.copied {
+    background: rgba(0, 230, 118, 0.16);
+    border-color: var(--brand-secondary);
+    color: var(--brand-secondary);
+}
+.donate-open {
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+.donate-open:hover { border-color: var(--border-hover); }
+.donate-disclaimer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-align: center;
+    padding: 8px 12px 4px;
+}
