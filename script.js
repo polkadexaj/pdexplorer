@@ -2133,10 +2133,69 @@ async function renderWalletConnectPanel(root) {
     });
 }
 
+// Animated, stepped loading state shown while the wallet dashboard is fetched.
+// Returns a cleanup function that stops the message-cycling timer.
+function renderWalletLoading(root, address) {
+    const steps = [
+        { icon: 'bx-link-alt', label: 'Verify address', msg: 'Verifying your address on the Polkadex chain…' },
+        { icon: 'bx-coin-stack', label: 'Balances & staking', msg: 'Fetching your balances and staking positions…' },
+        { icon: 'bx-gift', label: 'Reward history', msg: 'Reading your on-chain reward history…' },
+        { icon: 'bx-bar-chart-alt-2', label: 'Build dashboard', msg: 'Almost there — assembling your dashboard…' }
+    ];
+    const stepPill = (s, i, state) => {
+        const icon = state === 'done' ? 'bx-check'
+            : state === 'active' ? 'bx-loader-alt spin'
+            : s.icon;
+        return `<div class="wallet-step ${state}" data-step="${i}"><i class='bx ${icon}'></i>${s.label}</div>`;
+    };
+    root.innerHTML = `
+        <div class="wallet-loading">
+            <div class="list-container glass">
+                <div class="wallet-loading-banner">
+                    <div class="wallet-spinner"><i class='bx bx-wallet'></i></div>
+                    <div class="wallet-loading-text">
+                        <div class="wallet-loading-title">Loading your wallet dashboard</div>
+                        <div class="wallet-loading-msg" id="wallet-loading-msg">${steps[0].msg}</div>
+                        <div class="wallet-loading-steps" id="wallet-loading-steps">
+                            ${steps.map((s, i) => stepPill(s, i, i === 0 ? 'active' : 'pending')).join('')}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="list-container glass">
+                <div class="list-header"><h2><i class='bx bx-wallet'></i> ${stakingEscapeHtml(stakingShortAddress(address))}</h2></div>
+                <div class="wallet-skel-summary">
+                    ${[0, 1, 2, 3].map(() => '<div class="wallet-skel-card"><div class="skel line-sm"></div><div class="skel line-lg"></div></div>').join('')}
+                </div>
+            </div>
+            <div class="wallet-grid">
+                ${[0, 1].map(() => `<div class="list-container glass"><div class="wallet-skel-rows">${[0, 1, 2, 3, 4].map(() => '<div class="skel wallet-skel-row"></div>').join('')}</div></div>`).join('')}
+            </div>
+        </div>`;
+    let idx = 0;
+    const msgEl = document.getElementById('wallet-loading-msg');
+    const stepsEl = document.getElementById('wallet-loading-steps');
+    const timer = setInterval(() => {
+        if (idx >= steps.length - 1) return; // hold on the final step until data arrives
+        const prev = stepsEl && stepsEl.querySelector(`[data-step="${idx}"]`);
+        if (prev) { prev.className = 'wallet-step done'; prev.innerHTML = `<i class='bx bx-check'></i>${steps[idx].label}`; }
+        idx++;
+        const cur = stepsEl && stepsEl.querySelector(`[data-step="${idx}"]`);
+        if (cur) { cur.className = 'wallet-step active'; cur.innerHTML = `<i class='bx bx-loader-alt spin'></i>${steps[idx].label}`; }
+        if (msgEl) {
+            msgEl.textContent = steps[idx].msg;
+            msgEl.classList.remove('swap');
+            void msgEl.offsetWidth; // restart the fade animation
+            msgEl.classList.add('swap');
+        }
+    }, 1500);
+    return () => clearInterval(timer);
+}
+
 async function fetchWalletDashboard(address) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
-    root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading wallet dashboard…</div>';
+    const stopLoading = renderWalletLoading(root, address);
     try {
         const [walletRes, priceRes] = await Promise.all([
             fetch('/api/wallet/' + encodeURIComponent(address)),
@@ -2146,8 +2205,10 @@ async function fetchWalletDashboard(address) {
         if (!walletRes.ok || data.error) throw new Error(data.error || ('Request failed (' + walletRes.status + ')'));
         let price = { history: [], configured: false };
         if (priceRes) { try { price = await priceRes.json(); } catch (e) { } }
+        stopLoading();
         renderWalletDashboard(data, price);
     } catch (e) {
+        stopLoading();
         root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
     }
 }
@@ -2886,6 +2947,7 @@ setInterval(() => {
 
 // --- Council Module Logic ---
 let councilPalletName = 'elections'; // overridden by the /api/council response
+let councilData = null;
 
 async function fetchCouncilData() {
     try {
@@ -2893,6 +2955,7 @@ async function fetchCouncilData() {
         const data = await response.json();
         if (data.error) throw new Error(data.error);
         if (data.pallet) councilPalletName = data.pallet;
+        councilData = data;
 
         const members = Array.isArray(data.members) ? data.members : [];
         const runnersUp = Array.isArray(data.runnersUp) ? data.runnersUp : [];
@@ -2942,6 +3005,7 @@ async function fetchCouncilData() {
         renderList(members, 'council-members-list');
         renderList(runnersUp, 'council-runnersup-list');
         renderList(candidates, 'council-candidates-list');
+        renderCouncilMotions(data);
     } catch (err) {
         console.error('Failed to fetch council data', err);
         const failMsg = '<tr><td colspan="2" style="text-align:center; padding:20px; color: var(--error);">Failed to load council data.</td></tr>';
@@ -2949,7 +3013,140 @@ async function fetchCouncilData() {
             const el = document.getElementById(id);
             if (el) el.innerHTML = failMsg;
         });
+        const motionsEl = document.getElementById('council-motions-content');
+        if (motionsEl) motionsEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--error);">Failed to load council motions.</div>';
     }
+}
+
+// --- Council Motions: rendering + on-chain actions ---
+function councilMotionStatus(m, currentBlock) {
+    const ayes = (m.ayes || []).length;
+    const nays = (m.nays || []).length;
+    const threshold = Number(m.threshold) || 0;
+    if (threshold && ayes >= threshold) return { key: 'approved', label: 'Threshold met', badge: 'claimed', closeable: true };
+    if (threshold && nays >= threshold) return { key: 'rejected', label: 'Rejected', badge: 'unclaimed', closeable: true };
+    if (m.end && currentBlock && currentBlock >= m.end) return { key: 'expired', label: 'Voting ended', badge: 'neutral', closeable: true };
+    return { key: 'voting', label: 'Voting open', badge: 'neutral', closeable: false };
+}
+
+function renderCouncilMotions(data) {
+    const root = document.getElementById('council-motions-content');
+    if (!root) return;
+    const motions = Array.isArray(data.motions) ? data.motions : [];
+    const members = Array.isArray(data.members) ? data.members : [];
+    const currentBlock = Number(data.currentBlock) || 0;
+    const stored = getStoredWallet();
+    const isCouncilMember = !!stored && members.some(m => m.address === stored);
+
+    if (!data.collectivePallet) {
+        root.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted);">Council motions are not available on this runtime.</div>';
+        return;
+    }
+
+    const summary = `
+        <div class="staking-summary-grid" style="margin-bottom:20px;">
+            <div class="staking-summary-card"><div class="label">Active Motions</div><div class="value accent">${stakingFormatNumber(motions.length)}</div></div>
+            <div class="staking-summary-card"><div class="label">Council Seats</div><div class="value">${stakingFormatNumber(members.length)}</div></div>
+            <div class="staking-summary-card"><div class="label">Your Role</div><div class="value" style="font-size:1rem;">${isCouncilMember ? 'Council member' : (stored ? 'Observer' : 'Not connected')}</div></div>
+        </div>`;
+
+    if (!motions.length) {
+        root.innerHTML = summary + '<div style="padding:32px;text-align:center;color:var(--text-muted);">No motions are currently open before the council.</div>';
+        return;
+    }
+
+    const roleNote = isCouncilMember
+        ? '<div style="margin-bottom:16px;color:var(--text-secondary);font-size:0.82rem;">You are a council member — you can vote on and close the motions below.</div>'
+        : `<div style="margin-bottom:16px;color:var(--text-muted);font-size:0.82rem;">${stored ? 'Voting and closing motions is restricted to council members.' : 'Connect a council member wallet to vote on or close motions.'}</div>`;
+
+    const cards = motions.map(m => {
+        const st = councilMotionStatus(m, currentBlock);
+        const ayes = (m.ayes || []).length;
+        const nays = (m.nays || []).length;
+        const threshold = Number(m.threshold) || 0;
+        const ayePct = threshold ? Math.min(100, Math.round(ayes / threshold * 100)) : 0;
+        const nayPct = threshold ? Math.min(100, Math.round(nays / threshold * 100)) : 0;
+        const votedAye = !!stored && (m.ayes || []).includes(stored);
+        const votedNay = !!stored && (m.nays || []).includes(stored);
+        const idxLabel = (m.index === null || m.index === undefined) ? '—' : ('#' + m.index);
+
+        const argsHtml = (m.args && m.args.length)
+            ? `<details class="motion-details"><summary>Call arguments (${m.args.length})</summary>
+                 <div class="motion-args">${m.args.map(a => `<div><span>${stakingEscapeHtml(a.name)}</span><code>${stakingEscapeHtml(String(a.value).slice(0, 220))}${String(a.value).length > 220 ? '…' : ''}</code></div>`).join('')}</div>
+               </details>`
+            : '';
+
+        const voterList = (label, addrs) => {
+            if (!addrs || !addrs.length) return '';
+            return `<details class="motion-details"><summary>${label} (${addrs.length})</summary>
+                <div class="motion-voters">${addrs.map(a => `<a href="#account/${encodeURIComponent(a)}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(a)}</a>`).join('')}</div>
+            </details>`;
+        };
+
+        let actions = '';
+        if (isCouncilMember) {
+            actions = `<div class="motion-actions">
+                <button class="motion-btn aye motion-aye-btn" data-hash="${m.hash}" data-index="${m.index}" ${votedAye ? 'disabled' : ''}>${votedAye ? 'Voted Aye' : 'Vote Aye'}</button>
+                <button class="motion-btn nay motion-nay-btn" data-hash="${m.hash}" data-index="${m.index}" ${votedNay ? 'disabled' : ''}>${votedNay ? 'Voted Nay' : 'Vote Nay'}</button>
+                <button class="motion-btn close motion-close-btn" data-hash="${m.hash}" data-index="${m.index}" ${st.closeable ? '' : 'disabled'} title="${st.closeable ? 'Finalize this motion' : 'Available once the vote is decided or has ended'}">Close motion</button>
+            </div>`;
+        }
+
+        return `<div class="motion-card">
+            <div class="motion-card-head">
+                <div>
+                    <span class="motion-index">${idxLabel}</span>
+                    <span class="motion-title">${stakingEscapeHtml(m.title || 'Council Motion')}</span>
+                </div>
+                <span class="reward-badge ${st.badge}">${st.label}</span>
+            </div>
+            <div class="motion-hash">${stakingEscapeHtml(m.hash)}</div>
+            <div class="motion-tally">
+                <div class="motion-tally-row"><span>Ayes</span><span>${ayes} / ${threshold} threshold</span></div>
+                <div class="motion-bar"><div class="motion-bar-fill aye" style="width:${ayePct}%;"></div></div>
+                <div class="motion-tally-row"><span>Nays</span><span>${nays} / ${threshold} threshold</span></div>
+                <div class="motion-bar"><div class="motion-bar-fill nay" style="width:${nayPct}%;"></div></div>
+            </div>
+            <div class="motion-meta">Voting ends at block ${stakingFormatNumber(m.end)}${currentBlock ? ` &middot; current block ${stakingFormatNumber(currentBlock)}` : ''}</div>
+            ${argsHtml}
+            ${voterList('Aye voters', m.ayes)}
+            ${voterList('Nay voters', m.nays)}
+            ${actions}
+        </div>`;
+    }).join('');
+
+    root.innerHTML = summary + roleNote + '<div class="motion-list">' + cards + '</div>';
+
+    root.querySelectorAll('.motion-aye-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), true)));
+    root.querySelectorAll('.motion-nay-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), false)));
+    root.querySelectorAll('.motion-close-btn').forEach(b => b.addEventListener('click', () => councilMotionClose(b.getAttribute('data-hash'), b.getAttribute('data-index'))));
+}
+
+function councilMotionVote(hash, index, approve) {
+    if (!councilData || !councilData.collectivePallet) return alert('Council data is not ready yet.');
+    const idx = Number(index);
+    if (!confirm(`Cast a ${approve ? 'AYE' : 'NAY'} vote on council motion #${idx}?`)) return;
+    const pallet = councilData.collectivePallet;
+    submitSignedTx({
+        buildTx: (api) => api.tx[pallet].vote(hash, idx, approve),
+        label: `Motion #${idx} ${approve ? 'aye' : 'nay'} vote`,
+        onSuccess: () => setTimeout(fetchCouncilData, 2500)
+    });
+}
+
+function councilMotionClose(hash, index) {
+    if (!councilData || !councilData.collectivePallet) return alert('Council data is not ready yet.');
+    const idx = Number(index);
+    const motion = (councilData.motions || []).find(m => m.hash === hash);
+    if (!motion) return alert('Motion details are no longer available — refresh the page.');
+    if (!confirm(`Close council motion #${idx}?\n\nThis finalizes the vote and, if it passed, dispatches the proposed call.`)) return;
+    const pallet = councilData.collectivePallet;
+    const weightBound = { refTime: motion.weightRefTime || '10000000000', proofSize: motion.weightProofSize || '500000' };
+    submitSignedTx({
+        buildTx: (api) => api.tx[pallet].close(hash, idx, weightBound, motion.lengthBound || 0),
+        label: `Motion #${idx} close`,
+        onSuccess: () => setTimeout(fetchCouncilData, 2500)
+    });
 }
 
 // Tab switching
@@ -3105,169 +3302,238 @@ if (document.getElementById('submit-vote-tx-btn')) {
     document.getElementById('submit-vote-tx-btn').addEventListener('click', submitCouncilVote);
 }
 
-// --- Treasury Module Logic ---
-async function fetchTreasuryData() {
+// --- Shared signed-transaction helper ---
+// Resolves the connected wallet, requests a signer from the extension, signs and
+// sends a transaction, and reports success/failure. Used by Treasury and Council.
+async function submitSignedTx({ buildTx, label, button, busyText, idleText, onError, onSuccess }) {
+    const fail = (m) => { if (onError) onError(m); else alert(m); };
+    const address = getStoredWallet();
+    if (!address) return fail('Please connect your wallet first.');
+    if (!globalApi) return fail('Blockchain connection is not ready yet. Please wait a moment and try again.');
+
+    let injected;
+    try { injected = await getInjectedAccounts(); }
+    catch (e) { return fail('Could not access your wallet extension.'); }
+    if (!injected || !injected.length) return fail('No Substrate wallet extension found. Install Polkadot.js, Talisman or SubWallet.');
+
+    const account = injected.find(a => a.address === address);
+    if (!account) return fail('The connected account was not found in your wallet extension. Please reconnect.');
+
+    let signer;
     try {
-        const response = await fetch('/api/treasury');
-        const data = await response.json();
-        if (data.error) throw new Error(data.error);
+        const provider = window.injectedWeb3[account.source];
+        const ext = await provider.enable('Polkadex Explorer');
+        signer = ext.signer;
+    } catch (e) { return fail('Wallet extension authorization was rejected.'); }
 
-        const proposals = Array.isArray(data.proposals) ? data.proposals : [];
-        const approvals = Array.isArray(data.approvals) ? data.approvals : [];
-        
-        document.getElementById('treasury-open-count').innerText = proposals.length;
-        document.getElementById('treasury-approved-count').innerText = approvals.length;
-        document.getElementById('treasury-total-count').innerText = data.proposalCount || 0;
-        
-        // Next burn
-        const spendableFunds = Number(data.spendableFunds) || 0;
-        let burnAmount = 0;
-        if (data.burn && data.burn > 0 && spendableFunds > 0) {
-             burnAmount = spendableFunds * (data.burn / 1000000000); // Usually a Permill (1000000)
-        }
-        document.getElementById('treasury-next-burn').innerText = formatPDEX(burnAmount);
-        
-        // Spendable / Available
-        const spendableFormatted = formatPDEX(spendableFunds);
-        document.getElementById('treasury-spendable').innerText = spendableFormatted;
-        document.getElementById('treasury-available').innerText = spendableFormatted;
+    const setBusy = () => { if (button) { button.disabled = true; if (busyText) button.textContent = busyText; } };
+    const restore = () => { if (button) { button.disabled = false; if (idleText) button.textContent = idleText; } };
 
-        // Spend period
-        const termDuration = Number(data.spendPeriod) || 0;
-        const blocksRemaining = Number(data.blocksRemaining) || 0;
-        const pct = termDuration > 0
-            ? Math.min(100, Math.max(0, Math.floor(((termDuration - blocksRemaining) / termDuration) * 100)))
-            : 0;
-        
-        const pctEl = document.getElementById('treasury-spend-pct');
-        const arcEl = document.getElementById('treasury-spend-arc');
-        if (pctEl) pctEl.innerText = `${pct}%`;
-        if (arcEl) arcEl.style.strokeDasharray = `${pct}, 100`;
-
-        const remainingSeconds = blocksRemaining * 12;
-        const days = Math.floor(remainingSeconds / (24 * 3600));
-        const hours = Math.floor((remainingSeconds % (24 * 3600)) / 3600);
-        document.getElementById('treasury-spend-days').innerText = days;
-        document.getElementById('treasury-spend-hours').innerText = hours;
-
-        // Render Open Proposals
-        const renderProposalsList = () => {
-            const el = document.getElementById('treasury-proposals-list');
-            if (!el) return;
-            el.innerHTML = '';
-            if (proposals.length === 0) {
-                el.innerHTML = '<tr><td colspan="3" style="text-align:center; padding: 20px;">No open proposals</td></tr>';
+    setBusy();
+    try {
+        const tx = buildTx(globalApi);
+        const unsub = await tx.signAndSend(address, { signer }, (result) => {
+            const { status, dispatchError } = result;
+            if (dispatchError) {
+                let msg = dispatchError.toString();
+                if (dispatchError.isModule) {
+                    try {
+                        const meta = globalApi.registry.findMetaError(dispatchError.asModule);
+                        msg = `${meta.section}.${meta.name}`;
+                    } catch (e) { }
+                }
+                fail((label || 'Transaction') + ' failed: ' + msg);
+                restore();
+                if (typeof unsub === 'function') unsub();
                 return;
             }
-            proposals.forEach(p => {
-                const tr = document.createElement('tr');
-                
-                // Column 1: ID
-                const tdId = document.createElement('td');
-                tdId.innerText = p.id;
-                
-                // Column 2: Beneficiary and Value
-                const tdBeneficiary = document.createElement('td');
-                tdBeneficiary.innerHTML = `
-                    <div style="display: flex; align-items: center; justify-content: space-between;">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            ${p.beneficiaryName && p.beneficiaryName !== p.beneficiary ? `<i class='bx bxs-check-circle' style="color: var(--success-color);"></i>` : ''}
-                            <span style="font-size: 11px; text-transform: uppercase;">${p.beneficiaryName || shortenAddress(p.beneficiary)}</span>
-                        </div>
-                        <div style="font-weight: 600;">${formatPDEX(p.value)} <span style="font-size: 11px; color: var(--text-secondary); font-weight: normal;">PDEX</span></div>
-                    </div>
-                `;
-
-                // Column 3: Proposer and Action
-                const tdProposer = document.createElement('td');
-                tdProposer.innerHTML = `
-                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 20px;">
-                        <div></div>
-                        <div style="display: flex; align-items: center; gap: 15px;">
-                            <div style="text-align: right;">
-                                <div style="display: flex; align-items: center; justify-content: flex-end; gap: 6px;">
-                                    ${p.proposerName && p.proposerName !== p.proposer ? `<i class='bx bxs-check-circle' style="color: var(--success-color);"></i>` : ''}
-                                    <span style="font-size: 11px; text-transform: uppercase;">${p.proposerName || shortenAddress(p.proposer)}</span>
-                                </div>
-                                <div style="font-size: 11px; color: var(--text-secondary);">${formatPDEX(p.bond)} PDEX</div>
-                            </div>
-                            <div class="glass" style="padding: 4px 10px; border-radius: 4px; font-size: 11px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <i class='bx bx-fast-forward' ></i> To council <i class='bx bx-chevron-down' ></i>
-                            </div>
-                        </div>
-                    </div>
-                `;
-
-                tr.appendChild(tdId);
-                tr.appendChild(tdBeneficiary);
-                tr.appendChild(tdProposer);
-                el.appendChild(tr);
-            });
-        };
-        renderProposalsList();
-
-        // Render Approved Proposals
-        const renderApprovedList = () => {
-            const el = document.getElementById('treasury-approved-list');
-            if (!el) return;
-            if (approvals.length === 0) {
-                el.innerHTML = '<tr><td style="text-align:center; padding: 20px; color: var(--text-secondary);">No approved proposals</td></tr>';
-            } else {
-                el.innerHTML = `<tr><td style="padding: 20px; color: var(--text-secondary);">IDs: ${approvals.join(', ')}</td></tr>`;
+            if (status.isInBlock || status.isFinalized) {
+                restore();
+                if (typeof unsub === 'function') unsub();
+                alert((label || 'Transaction') + ' was included on-chain.');
+                if (onSuccess) onSuccess();
             }
-        };
-        renderApprovedList();
-
-    } catch (err) {
-        console.error('Error fetching treasury data:', err);
+        });
+    } catch (e) {
+        fail((label || 'Transaction') + ' failed: ' + (e && e.message ? e.message : String(e)));
+        restore();
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    const submitBtn = document.getElementById('treasury-submit-btn');
-    if (submitBtn) {
-        submitBtn.addEventListener('click', async () => {
-            if (!activeSigner) {
-                alert('Please connect your wallet first by clicking "Connect Wallet" at the top right.');
-                return;
-            }
-            const amtStr = prompt("Enter the amount of PDEX you want to request from the Treasury:");
-            if (!amtStr) return;
-            const amt = parseFloat(amtStr);
-            if (isNaN(amt) || amt <= 0) {
-                alert("Invalid amount.");
-                return;
-            }
-            
-            const beneficiary = prompt("Enter the beneficiary address:");
-            if (!beneficiary || beneficiary.trim() === '') return;
+// --- Treasury Module Logic ---
+let treasuryData = null;
+let treasuryTab = 'overview';
 
-            const confirmMsg = `Submit Treasury Spend Proposal?\n\nAmount: ${amt} PDEX\nBeneficiary: ${beneficiary}\nProposer: ${activeSigner.address}\n\nA bond (usually 5% of the amount) will be reserved from your account.`;
-            
-            if (confirm(confirmMsg)) {
-                try {
-                    const api = await getApi();
-                    // value is requested in Planck (10^12)
-                    const valuePlanck = BigInt(Math.floor(amt * 1e12)).toString();
-                    
-                    const tx = api.tx.treasury.proposeSpend(valuePlanck, beneficiary);
-                    
-                    const injector = await window.injectedWeb3['polkadot-js'].enable('Polkadex Explorer');
-                    await tx.signAndSend(activeSigner.address, { signer: injector.signer }, ({ status, dispatchError }) => {
-                        if (status.isInBlock) {
-                            console.log(`Completed at block hash #${status.asInBlock.toString()}`);
-                        } else {
-                            console.log(`Current status: ${status.type}`);
-                        }
-                    });
-                    alert("Treasury proposal transaction submitted! Please check your extension.");
-                } catch (e) {
-                    console.error(e);
-                    alert("Failed to submit proposal: " + e.message);
-                }
-            }
-        });
+async function fetchTreasuryData() {
+    treasuryTab = 'overview';
+    const root = document.getElementById('treasury-content');
+    if (!root) return;
+    root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading treasury data…</div>';
+    try {
+        const res = await fetch('/api/treasury');
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        treasuryData = data;
+        renderTreasury();
+    } catch (e) {
+        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
     }
-});
+}
+
+function renderTreasury() {
+    const root = document.getElementById('treasury-content');
+    if (!root || !treasuryData) return;
+    const d = treasuryData;
+    const proposals = Array.isArray(d.proposals) ? d.proposals : [];
+    const approvals = Array.isArray(d.approvals) ? d.approvals : [];
+    const approvedSet = new Set(approvals);
+    const openProposals = proposals.filter(p => !approvedSet.has(p.id));
+    const approvedProposals = approvals.map(id => proposals.find(p => p.id === id)).filter(Boolean);
+
+    const tabBtn = (key, label) => `<button class="account-tab${treasuryTab === key ? ' active' : ''}" data-treastab="${key}">${label}</button>`;
+    let body;
+    if (treasuryTab === 'proposals') body = renderTreasuryProposals(openProposals);
+    else if (treasuryTab === 'approved') body = renderTreasuryApproved(approvedProposals, approvals);
+    else body = renderTreasuryOverview(d, openProposals.length, approvedProposals.length);
+
+    root.innerHTML = `
+        <div class="list-container glass">
+            <div class="list-header">
+                <h2>Treasury</h2>
+                <div style="display:flex;gap:14px;align-items:center;">
+                    <span style="color:var(--text-secondary);font-size:0.78rem;">${stakingFormatNumber(d.proposalCount)} lifetime proposals</span>
+                    <button id="treasury-submit-btn" class="staking-download-btn"><i class='bx bx-plus-circle'></i> Submit proposal</button>
+                </div>
+            </div>
+            <div class="account-tabs" style="margin:0 24px;">
+                ${tabBtn('overview', 'Overview')}${tabBtn('proposals', 'Open Proposals')}${tabBtn('approved', 'Approved')}
+            </div>
+            <div style="padding:24px;">${body}</div>
+        </div>`;
+
+    root.querySelectorAll('[data-treastab]').forEach(btn => {
+        btn.addEventListener('click', () => { treasuryTab = btn.getAttribute('data-treastab'); renderTreasury(); });
+    });
+    const submitBtn = document.getElementById('treasury-submit-btn');
+    if (submitBtn) submitBtn.addEventListener('click', openTreasurySubmitModal);
+}
+
+function renderTreasuryOverview(d, openCount, approvedCount) {
+    const spendable = Number(d.spendableFunds) || 0;
+    const spendPeriod = Number(d.spendPeriod) || 0;
+    const blocksRemaining = Number(d.blocksRemaining) || 0;
+    const pct = spendPeriod > 0
+        ? Math.min(100, Math.max(0, Math.floor(((spendPeriod - blocksRemaining) / spendPeriod) * 100)))
+        : 0;
+    const remSecs = blocksRemaining * 12;
+    const remDays = Math.floor(remSecs / 86400);
+    const remHrs = Math.floor((remSecs % 86400) / 3600);
+    const burnFraction = (Number(d.burn) || 0) / 1e6; // burn is a Permill
+    const burnAmount = spendable * burnFraction;
+    return `
+        <div class="staking-summary-grid">
+            <div class="staking-summary-card"><div class="label">Treasury Balance</div><div class="value accent">${stakingFormatPDEX(spendable)} PDEX</div></div>
+            <div class="staking-summary-card"><div class="label">Open Proposals</div><div class="value">${stakingFormatNumber(openCount)}</div></div>
+            <div class="staking-summary-card"><div class="label">Approved (awaiting payout)</div><div class="value">${stakingFormatNumber(approvedCount)}</div></div>
+            <div class="staking-summary-card"><div class="label">Next Burn</div><div class="value">${stakingFormatPDEX(burnAmount)} PDEX</div></div>
+            <div class="staking-summary-card"><div class="label">Spend Period</div><div class="value">${pct}%</div></div>
+        </div>
+        <div class="wallet-stat-list" style="padding:14px 0 0;">
+            <div class="wallet-stat"><span>Lifetime proposals</span><strong>${stakingFormatNumber(d.proposalCount)}</strong></div>
+            <div class="wallet-stat"><span>Spend period length</span><strong>${stakingFormatNumber(spendPeriod)} blocks</strong></div>
+            <div class="wallet-stat"><span>Next spend payout in</span><strong>~${remDays}d ${remHrs}h &middot; ${stakingFormatNumber(blocksRemaining)} blocks</strong></div>
+            <div class="wallet-stat"><span>Burn rate</span><strong>${(burnFraction * 100).toFixed(2)}% of spendable funds per period</strong></div>
+        </div>`;
+}
+
+function treasuryPartyName(name, address) {
+    return (name && name !== 'Unknown' && name !== address) ? name : stakingShortAddress(address);
+}
+
+function renderTreasuryProposalRows(list, withStatus) {
+    return list.map(p => {
+        const ben = treasuryPartyName(p.beneficiaryName, p.beneficiary);
+        const prop = treasuryPartyName(p.proposerName, p.proposer);
+        return `<tr>
+            <td>#${p.id}</td>
+            <td><a href="#account/${encodeURIComponent(p.beneficiary)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(ben)}</a></td>
+            <td><a href="#account/${encodeURIComponent(p.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(prop)}</a></td>
+            <td style="text-align:right;">${stakingFormatPDEX(p.bond)} PDEX</td>
+            <td style="text-align:right;font-weight:600;">${stakingFormatPDEX(p.value)} PDEX</td>
+            ${withStatus ? '<td style="text-align:right;"><span class="reward-badge claimed">Approved</span></td>' : ''}
+        </tr>`;
+    }).join('');
+}
+
+function renderTreasuryProposals(list) {
+    if (!list.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No open proposals are currently awaiting council approval.</div>';
+    return `<div class="table-responsive"><table class="data-table">
+        <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th></tr></thead>
+        <tbody>${renderTreasuryProposalRows(list, false)}</tbody></table></div>`;
+}
+
+function renderTreasuryApproved(list, ids) {
+    if (!ids.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No approved proposals are awaiting payout.</div>';
+    if (!list.length) {
+        return `<div style="padding:24px;text-align:center;color:var(--text-muted);">Approved proposals awaiting payout: ${ids.map(i => '#' + i).join(', ')}</div>`;
+    }
+    return `<div class="table-responsive"><table class="data-table">
+        <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th><th style="text-align:right;">Status</th></tr></thead>
+        <tbody>${renderTreasuryProposalRows(list, true)}</tbody></table></div>`;
+}
+
+function openTreasurySubmitModal() {
+    const modal = document.getElementById('treasury-submit-modal');
+    if (!modal) return;
+    const stored = getStoredWallet();
+    const warn = document.getElementById('treasury-modal-wallet-warning');
+    const activeEl = document.getElementById('treasury-active-wallet');
+    const errEl = document.getElementById('treasury-modal-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    if (warn) warn.style.display = stored ? 'none' : 'block';
+    if (activeEl) activeEl.textContent = stored || '--';
+    modal.style.display = 'flex';
+}
+
+async function submitTreasuryProposal() {
+    const errEl = document.getElementById('treasury-modal-error');
+    const showErr = (m) => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    const amtInput = document.getElementById('treasury-amount-input');
+    const benInput = document.getElementById('treasury-beneficiary-input');
+    const amt = parseFloat(amtInput ? amtInput.value : '');
+    const beneficiary = (benInput ? benInput.value : '').trim();
+
+    if (isNaN(amt) || amt <= 0) return showErr('Enter a valid PDEX amount greater than zero.');
+    if (!beneficiary) return showErr('Enter a beneficiary address.');
+    if (!isValidPolkadexAddress(beneficiary)) return showErr('That beneficiary address is not a valid Polkadex address.');
+
+    const valuePlanck = BigInt(Math.floor(amt * 1e12)).toString();
+    await submitSignedTx({
+        buildTx: (api) => api.tx.treasury.proposeSpend(valuePlanck, beneficiary),
+        label: 'Treasury proposal',
+        button: document.getElementById('submit-treasury-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Submit Proposal',
+        onError: showErr,
+        onSuccess: () => {
+            const modal = document.getElementById('treasury-submit-modal');
+            if (modal) modal.style.display = 'none';
+            if (amtInput) amtInput.value = '';
+            if (benInput) benInput.value = '';
+            setTimeout(fetchTreasuryData, 2000);
+        }
+    });
+}
+
+(function wireTreasuryModal() {
+    const modal = document.getElementById('treasury-submit-modal');
+    const closeBtn = document.getElementById('close-treasury-modal');
+    const submitTxBtn = document.getElementById('submit-treasury-tx-btn');
+    if (closeBtn && modal) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; });
+    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+    if (submitTxBtn) submitTxBtn.addEventListener('click', submitTreasuryProposal);
+})();
 
 init();

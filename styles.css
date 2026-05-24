@@ -1133,6 +1133,155 @@ h1, h2, h3 { font-weight: 600; }
 .wallet-account-name { font-size: 0.88rem; font-weight: 600; }
 .wallet-account-addr { font-size: 0.78rem; color: var(--text-secondary); }
 
+/* --- Wallet dashboard loading state --- */
+.wallet-loading {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+.wallet-loading-banner {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 30px 28px;
+}
+@media (max-width: 640px) {
+    .wallet-loading-banner { flex-direction: column; text-align: center; gap: 18px; }
+}
+.wallet-spinner {
+    position: relative;
+    width: 60px;
+    height: 60px;
+    flex-shrink: 0;
+}
+.wallet-spinner::before,
+.wallet-spinner::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    border: 3px solid transparent;
+}
+.wallet-spinner::before {
+    inset: 0;
+    border-top-color: var(--brand-primary);
+    border-right-color: var(--brand-primary);
+    animation: wallet-spin 0.9s linear infinite;
+}
+.wallet-spinner::after {
+    inset: 11px;
+    border-bottom-color: var(--brand-secondary);
+    border-left-color: var(--brand-secondary);
+    animation: wallet-spin 1.5s linear infinite reverse;
+}
+.wallet-spinner i {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    color: var(--brand-primary);
+    animation: wallet-glow 1.7s ease-in-out infinite;
+}
+@keyframes wallet-spin { to { transform: rotate(360deg); } }
+@keyframes wallet-glow {
+    0%, 100% { opacity: 0.5; transform: scale(0.88); }
+    50% { opacity: 1; transform: scale(1.06); }
+}
+.wallet-loading-text { flex: 1; min-width: 0; }
+.wallet-loading-title {
+    font-size: 1.06rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 5px;
+}
+.wallet-loading-msg {
+    font-size: 0.88rem;
+    color: var(--text-secondary);
+    min-height: 1.3em;
+}
+.wallet-loading-msg.swap { animation: wallet-fade 0.45s ease; }
+@keyframes wallet-fade {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.wallet-loading-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 15px;
+}
+@media (max-width: 640px) {
+    .wallet-loading-steps { justify-content: center; }
+}
+.wallet-step {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    transition: background var(--transition-normal), border-color var(--transition-normal), color var(--transition-normal);
+}
+.wallet-step i { font-size: 0.95rem; }
+.wallet-step.active {
+    background: var(--brand-primary-glow);
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+}
+.wallet-step.done {
+    color: var(--success);
+    border-color: rgba(20, 241, 149, 0.3);
+}
+.wallet-step.done i { color: var(--success); }
+.wallet-step .spin { animation: wallet-spin 0.8s linear infinite; }
+.wallet-loading .skel {
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.04) 25%, rgba(255, 255, 255, 0.09) 37%, rgba(255, 255, 255, 0.04) 63%);
+    background-size: 400% 100%;
+    animation: wallet-shimmer 1.5s ease infinite;
+    border-radius: 6px;
+}
+@keyframes wallet-shimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+}
+.wallet-skel-summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    padding: 10px 24px 24px;
+}
+@media (max-width: 760px) {
+    .wallet-skel-summary { grid-template-columns: repeat(2, 1fr); }
+}
+.wallet-skel-card {
+    height: 74px;
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+.wallet-skel-card .line-sm { height: 9px; width: 52%; }
+.wallet-skel-card .line-lg { height: 16px; width: 82%; }
+.wallet-skel-rows {
+    padding: 18px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+.wallet-skel-row { height: 13px; }
+.wallet-skel-row:nth-child(2) { width: 88%; }
+.wallet-skel-row:nth-child(3) { width: 72%; }
+.wallet-skel-row:nth-child(4) { width: 91%; }
+.wallet-skel-row:nth-child(5) { width: 64%; }
+
 /* --- Donate button + page --- */
 .donate-btn {
     display: inline-flex;
@@ -1462,4 +1611,155 @@ h1, h2, h3 { font-weight: 600; }
     border-radius: var(--radius-sm);
     color: var(--text-muted);
     font-size: 0.84rem;
+}
+
+/* --- Council motions --- */
+.reward-badge.neutral {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary);
+}
+.motion-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.motion-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 18px 20px;
+}
+.motion-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.motion-index {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--brand-primary);
+    margin-right: 8px;
+}
+.motion-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+.motion-hash {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+    word-break: break-all;
+    margin: 6px 0 14px;
+}
+.motion-tally {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.motion-tally-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.motion-bar {
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+.motion-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width var(--transition-normal);
+}
+.motion-bar-fill.aye { background: var(--brand-secondary); }
+.motion-bar-fill.nay { background: var(--brand-primary); }
+.motion-meta {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    margin-top: 10px;
+}
+.motion-details {
+    margin-top: 10px;
+    font-size: 0.8rem;
+}
+.motion-details summary {
+    cursor: pointer;
+    color: var(--brand-secondary);
+    font-size: 0.78rem;
+    padding: 4px 0;
+    user-select: none;
+}
+.motion-args {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 0 4px;
+}
+.motion-args > div {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+}
+.motion-args span {
+    color: var(--text-secondary);
+    min-width: 90px;
+    font-weight: 600;
+}
+.motion-args code {
+    color: var(--text-primary);
+    font-size: 0.74rem;
+    word-break: break-all;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.motion-voters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    padding: 8px 0 4px;
+}
+.motion-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-color);
+}
+.motion-btn {
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    transition: background var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast);
+}
+.motion-btn.aye {
+    border-color: rgba(0, 230, 118, 0.4);
+    color: var(--brand-secondary);
+    background: rgba(0, 230, 118, 0.08);
+}
+.motion-btn.aye:hover:not(:disabled) { background: rgba(0, 230, 118, 0.18); }
+.motion-btn.nay {
+    border-color: rgba(230, 0, 122, 0.4);
+    color: #ff5fae;
+    background: rgba(230, 0, 122, 0.08);
+}
+.motion-btn.nay:hover:not(:disabled) { background: rgba(230, 0, 122, 0.18); }
+.motion-btn.close:hover:not(:disabled) { background: rgba(255, 255, 255, 0.09); }
+.motion-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }

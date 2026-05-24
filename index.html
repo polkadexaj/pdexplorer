@@ -365,10 +365,8 @@
 
                     <!-- Council Motions Tab -->
                     <div id="council-motions" class="account-tab-content" style="padding: 24px;">
-                        <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
-                            <i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
-                            <h3>Coming Soon</h3>
-                            <p>The Council Motions module is currently under development.</p>
+                        <div id="council-motions-content">
+                            <div style="padding: 40px; text-align: center; color: var(--text-secondary);">Fetching council motions…</div>
                         </div>
                     </div>
                 </div>
@@ -412,100 +410,34 @@
 
             <!-- Treasury Page -->
             <div class="treasury-page page-section" data-page="treasury" style="display: none;">
-                <div class="list-container glass">
-                    <div class="list-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0; border-bottom: none;">
-                        <h2>Treasury</h2>
-                    </div>
-                    
-                    <div class="account-tabs" style="margin: 0 24px;">
-                        <button class="account-tab active" data-tab="treasury-overview">Overview</button>
-                    </div>
-                    
-                    <div id="treasury-overview" class="account-tab-content active" style="padding: 24px;">
-                        <!-- Summary Stats -->
-                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px;">
-                            <div style="display: flex; gap: 20px; flex: 1;">
-                                <div style="text-align: left;">
-                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">open</div>
-                                    <div id="treasury-open-count" style="font-size: 20px; color: var(--text-primary);">--</div>
-                                </div>
-                                <div style="text-align: left;">
-                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">approved</div>
-                                    <div id="treasury-approved-count" style="font-size: 20px; color: var(--text-primary);">--</div>
-                                </div>
-                                <div style="text-align: left;">
-                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">total</div>
-                                    <div id="treasury-total-count" style="font-size: 20px; color: var(--text-primary);">--</div>
-                                </div>
-                            </div>
-                            
-                            <div style="flex: 1; text-align: center;">
-                                <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">next burn</div>
-                                <div style="font-size: 20px; color: var(--text-primary);"><span id="treasury-next-burn">--</span> <span style="font-size: 14px; color: var(--text-secondary);">PDEX</span></div>
-                            </div>
-                            
-                            <div style="flex: 1; text-align: right; display: flex; justify-content: flex-end; align-items: center; gap: 10px;">
-                                <div>
-                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">spendable / available</div>
-                                    <div style="font-size: 20px; color: var(--text-primary);"><span id="treasury-spendable">--</span> <span style="font-size: 14px; color: var(--text-secondary);">MPDEX /</span> <span id="treasury-available">--</span> <span style="font-size: 14px; color: var(--text-secondary);">MPDEX</span></div>
-                                </div>
-                                <div class="progress-circle" style="width: 40px; height: 40px;">
-                                    <svg viewBox="0 0 36 36">
-                                        <path class="circle" stroke-dasharray="100, 100" stroke="var(--brand-primary)" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                                    </svg>
-                                    <div class="progress-text" style="font-size: 10px;">100%</div>
-                                </div>
-                            </div>
-                            
-                            <div style="flex: 1; text-align: right; display: flex; justify-content: flex-end; align-items: center; gap: 10px;">
-                                <div>
-                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">spend period</div>
-                                    <div style="font-size: 20px; color: var(--text-primary);"><span id="treasury-spend-days">--</span> <span style="font-size: 14px; color: var(--text-secondary);">days</span></div>
-                                    <div style="font-size: 12px; color: var(--text-secondary);"><span id="treasury-spend-hours">--</span> hrs</div>
-                                </div>
-                                <div class="progress-circle" id="treasury-spend-progress" style="width: 40px; height: 40px;">
-                                    <svg viewBox="0 0 36 36">
-                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                                        <path class="circle" id="treasury-spend-arc" stroke-dasharray="0, 100" stroke="var(--brand-primary)" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                                    </svg>
-                                    <div class="progress-text" id="treasury-spend-pct" style="font-size: 10px;">--%</div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div style="display: flex; justify-content: flex-end; margin-bottom: 20px;">
-                            <button id="treasury-submit-btn" class="glass" style="padding: 8px 16px; border: none; background: transparent; color: var(--brand-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600;">
-                                <i class='bx bx-plus-circle' style="font-size: 18px; color: var(--brand-primary);"></i> Submit proposal
-                            </button>
-                        </div>
+                <div id="treasury-content"></div>
+            </div>
 
-                        <!-- Proposals Table -->
-                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-weight: normal; text-transform: lowercase;">proposals</h3>
-                        <div class="table-responsive" style="margin-bottom: 30px;">
-                            <table class="data-table treasury-table">
-                                <thead>
-                                    <tr>
-                                        <th></th>
-                                        <th></th>
-                                        <th style="text-align: right; font-weight: normal; text-transform: lowercase; font-size: 12px; color: var(--text-secondary);">proposer</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="treasury-proposals-list">
-                                    <tr><td colspan="3" style="text-align:center; padding: 20px;">Fetching proposals...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
+            <!-- Treasury Submit Proposal Modal -->
+            <div id="treasury-submit-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px);">
+                <div class="glass" style="width: 100%; max-width: 500px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
+                    <button id="close-treasury-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 12px; font-size: 1.3rem;">Submit Treasury Proposal</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 20px; font-size: 0.9rem;">Request a spend from the on-chain Treasury. A bond is reserved from your account until the proposal is approved or rejected.</p>
+                    <div id="treasury-modal-wallet-warning" style="color: var(--error); margin-bottom: 15px; font-size: 0.9rem; display: none;">Please connect your wallet first.</div>
 
-                        <!-- Approved Table -->
-                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-weight: normal; text-transform: lowercase;">approved</h3>
-                        <div class="table-responsive">
-                            <table class="data-table treasury-table">
-                                <tbody id="treasury-approved-list">
-                                    <tr><td style="text-align:center; padding: 20px; color: var(--text-secondary);">No approved proposals</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Amount (PDEX)</label>
+                        <input type="number" id="treasury-amount-input" placeholder="1000.0" step="0.1" min="0" style="width: 100%; padding: 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm);">
                     </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Beneficiary Address</label>
+                        <input type="text" id="treasury-beneficiary-input" placeholder="es..." autocomplete="off" spellcheck="false" style="width: 100%; padding: 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm);">
+                    </div>
+
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px;">Active Wallet</label>
+                        <div id="treasury-active-wallet" style="padding: 12px 16px; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm); border: 1px solid rgba(255,255,255,0.05); font-family: monospace; font-size: 0.82rem; word-break: break-all;">--</div>
+                    </div>
+
+                    <div id="treasury-modal-error" class="staking-error" style="display: none; margin-bottom: 15px;"></div>
+                    <button id="submit-treasury-tx-btn" class="glass" style="width: 100%; padding: 12px; background: var(--brand-primary); color: white; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; transition: var(--transition-fast);">Sign &amp; Submit Proposal</button>
                 </div>
             </div>
 

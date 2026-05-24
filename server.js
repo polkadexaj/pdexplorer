@@ -868,7 +868,7 @@ app.get('/api/price-history', (req, res) => {
 // --- WALLET DASHBOARD ENDPOINT ---
 app.get('/api/council', (req, res) => {
     try {
-        const data = db.getKv('council') || { members: [], runnersUp: [], candidates: [], blocksRemaining: 0, termDuration: 0, desiredMembers: 0, desiredRunnersUp: 0 };
+        const data = db.getKv('council') || { members: [], runnersUp: [], candidates: [], motions: [], blocksRemaining: 0, termDuration: 0, desiredMembers: 0, desiredRunnersUp: 0, collectivePallet: null };
         res.json(data);
     } catch (err) {
         console.error('API Error /api/council:', err);
@@ -1286,24 +1286,77 @@ async function syncCouncil() {
         const runnersUp = await processAccountList(runnersUpData);
         const candidates = await processAccountList(candidatesData);
 
-        // Council motions (the collective pallet).
+        // Council motions (the collective pallet). The collective is registered
+        // under different names across runtimes (council / councilCollective / generalCouncil).
         const motions = [];
-        const collectiveModule = globalApi.query.council || globalApi.query.councilCollective || globalApi.query.generalCouncil;
-        if (collectiveModule && collectiveModule.proposals && collectiveModule.proposalOf) {
+        let collectivePallet = null;
+        for (const name of ['council', 'councilCollective', 'generalCouncil']) {
+            const mod = globalApi.query[name];
+            if (mod && mod.proposals && mod.proposalOf) { collectivePallet = name; break; }
+        }
+        if (collectivePallet) {
+            const collectiveModule = globalApi.query[collectivePallet];
             try {
                 const motionHashes = await collectiveModule.proposals();
+                const probeAddress = members[0] ? members[0].address : null;
                 for (const h of motionHashes) {
                     const hash = h.toString();
-                    let title = 'Council Motion';
+                    let section = '', method = '', args = [];
+                    let lengthBound = 0;
+                    // Generous defaults used as the close() weight bound when an
+                    // exact estimate cannot be computed (bound only needs to be >= actual).
+                    let weightRefTime = '10000000000', weightProofSize = '500000';
                     try {
                         const callOpt = await collectiveModule.proposalOf(h);
                         if (callOpt && callOpt.isSome) {
                             const call = callOpt.unwrap();
-                            title = `${call.section}.${call.method}`;
+                            section = String(call.section);
+                            method = String(call.method);
+                            lengthBound = call.encodedLength;
+                            const argMeta = (call.meta && call.meta.args) || [];
+                            args = call.args.map((a, i) => {
+                                let value;
+                                try { value = a.toString(); } catch (e) { value = '[unprintable]'; }
+                                // Cap large args (e.g. a runtime wasm blob) so the
+                                // council payload stays small.
+                                if (value.length > 512) value = value.slice(0, 512) + '…(truncated)';
+                                return { name: argMeta[i] ? String(argMeta[i].name) : ('arg' + i), value };
+                            });
+                            if (probeAddress) {
+                                try {
+                                    const info = await globalApi.tx(call).paymentInfo(probeAddress);
+                                    const w = info.weight;
+                                    if (w && w.refTime !== undefined) {
+                                        weightRefTime = (BigInt(w.refTime.toString()) * 2n).toString();
+                                        weightProofSize = (BigInt(w.proofSize.toString()) * 2n + 32768n).toString();
+                                    } else if (w) {
+                                        weightRefTime = (BigInt(w.toString()) * 2n).toString();
+                                    }
+                                } catch (e) { /* keep generous defaults */ }
+                            }
                         }
                     } catch (e) { }
-                    motions.push({ hash, title });
+                    let index = null, threshold = 0, ayes = [], nays = [], end = 0;
+                    try {
+                        const votingOpt = await collectiveModule.voting(h);
+                        if (votingOpt && votingOpt.isSome) {
+                            const v = votingOpt.unwrap();
+                            index = v.index.toNumber();
+                            threshold = v.threshold.toNumber();
+                            ayes = v.ayes.map(a => a.toString());
+                            nays = v.nays.map(a => a.toString());
+                            end = v.end.toNumber();
+                        }
+                    } catch (e) { }
+                    motions.push({
+                        hash,
+                        title: (section && method) ? `${section}.${method}` : 'Council Motion',
+                        section, method, args,
+                        index, threshold, ayes, nays, end,
+                        lengthBound, weightRefTime, weightProofSize
+                    });
                 }
+                motions.sort((a, b) => (b.index || 0) - (a.index || 0));
             } catch (e) { console.warn('Council motions skipped:', e.message); }
         }
 
@@ -1318,6 +1371,7 @@ async function syncCouncil() {
             desiredMembers,
             desiredRunnersUp,
             pallet: electionsModule,
+            collectivePallet,
             lastSync: Date.now()
         };
         
