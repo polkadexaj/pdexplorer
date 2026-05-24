@@ -413,13 +413,98 @@
             <!-- Treasury Page -->
             <div class="treasury-page page-section" data-page="treasury" style="display: none;">
                 <div class="list-container glass">
-                    <div class="list-header">
+                    <div class="list-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0; border-bottom: none;">
                         <h2>Treasury</h2>
                     </div>
-                    <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
-                        <i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>
-                        <h3>Coming Soon</h3>
-                        <p>The Treasury module is currently under development.</p>
+                    
+                    <div class="account-tabs" style="margin: 0 24px;">
+                        <button class="account-tab active" data-tab="treasury-overview">Overview</button>
+                    </div>
+                    
+                    <div id="treasury-overview" class="account-tab-content active" style="padding: 24px;">
+                        <!-- Summary Stats -->
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px;">
+                            <div style="display: flex; gap: 20px; flex: 1;">
+                                <div style="text-align: left;">
+                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">open</div>
+                                    <div id="treasury-open-count" style="font-size: 20px; color: var(--text-primary);">--</div>
+                                </div>
+                                <div style="text-align: left;">
+                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">approved</div>
+                                    <div id="treasury-approved-count" style="font-size: 20px; color: var(--text-primary);">--</div>
+                                </div>
+                                <div style="text-align: left;">
+                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">total</div>
+                                    <div id="treasury-total-count" style="font-size: 20px; color: var(--text-primary);">--</div>
+                                </div>
+                            </div>
+                            
+                            <div style="flex: 1; text-align: center;">
+                                <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">next burn</div>
+                                <div style="font-size: 20px; color: var(--text-primary);"><span id="treasury-next-burn">--</span> <span style="font-size: 14px; color: var(--text-secondary);">PDEX</span></div>
+                            </div>
+                            
+                            <div style="flex: 1; text-align: right; display: flex; justify-content: flex-end; align-items: center; gap: 10px;">
+                                <div>
+                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">spendable / available</div>
+                                    <div style="font-size: 20px; color: var(--text-primary);"><span id="treasury-spendable">--</span> <span style="font-size: 14px; color: var(--text-secondary);">MPDEX /</span> <span id="treasury-available">--</span> <span style="font-size: 14px; color: var(--text-secondary);">MPDEX</span></div>
+                                </div>
+                                <div class="progress-circle" style="width: 40px; height: 40px;">
+                                    <svg viewBox="0 0 36 36">
+                                        <path class="circle" stroke-dasharray="100, 100" stroke="var(--brand-primary)" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                    </svg>
+                                    <div class="progress-text" style="font-size: 10px;">100%</div>
+                                </div>
+                            </div>
+                            
+                            <div style="flex: 1; text-align: right; display: flex; justify-content: flex-end; align-items: center; gap: 10px;">
+                                <div>
+                                    <div style="font-size: 11px; text-transform: lowercase; color: var(--text-secondary); margin-bottom: 4px; font-weight: 600;">spend period</div>
+                                    <div style="font-size: 20px; color: var(--text-primary);"><span id="treasury-spend-days">--</span> <span style="font-size: 14px; color: var(--text-secondary);">days</span></div>
+                                    <div style="font-size: 12px; color: var(--text-secondary);"><span id="treasury-spend-hours">--</span> hrs</div>
+                                </div>
+                                <div class="progress-circle" id="treasury-spend-progress" style="width: 40px; height: 40px;">
+                                    <svg viewBox="0 0 36 36">
+                                        <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                        <path class="circle" id="treasury-spend-arc" stroke-dasharray="0, 100" stroke="var(--brand-primary)" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                    </svg>
+                                    <div class="progress-text" id="treasury-spend-pct" style="font-size: 10px;">--%</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div style="display: flex; justify-content: flex-end; margin-bottom: 20px;">
+                            <button id="treasury-submit-btn" class="glass" style="padding: 8px 16px; border: none; background: transparent; color: var(--brand-primary); cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600;">
+                                <i class='bx bx-plus-circle' style="font-size: 18px; color: var(--brand-primary);"></i> Submit proposal
+                            </button>
+                        </div>
+
+                        <!-- Proposals Table -->
+                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-weight: normal; text-transform: lowercase;">proposals</h3>
+                        <div class="table-responsive" style="margin-bottom: 30px;">
+                            <table class="data-table treasury-table">
+                                <thead>
+                                    <tr>
+                                        <th></th>
+                                        <th></th>
+                                        <th style="text-align: right; font-weight: normal; text-transform: lowercase; font-size: 12px; color: var(--text-secondary);">proposer</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="treasury-proposals-list">
+                                    <tr><td colspan="3" style="text-align:center; padding: 20px;">Fetching proposals...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Approved Table -->
+                        <h3 style="margin-bottom: 15px; font-size: 1.1rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-weight: normal; text-transform: lowercase;">approved</h3>
+                        <div class="table-responsive">
+                            <table class="data-table treasury-table">
+                                <tbody id="treasury-approved-list">
+                                    <tr><td style="text-align:center; padding: 20px; color: var(--text-secondary);">No approved proposals</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>

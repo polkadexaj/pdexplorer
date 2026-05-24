@@ -1159,6 +1159,8 @@ function routeTo(target) {
                 fetchCouncilData();
             } else if (mainTarget === 'democracy') {
                 initDemocracyPage();
+            } else if (mainTarget === 'treasury') {
+                fetchTreasuryData();
             }
         } else {
             page.style.display = 'none';
@@ -3102,5 +3104,170 @@ async function submitCouncilVote() {
 if (document.getElementById('submit-vote-tx-btn')) {
     document.getElementById('submit-vote-tx-btn').addEventListener('click', submitCouncilVote);
 }
+
+// --- Treasury Module Logic ---
+async function fetchTreasuryData() {
+    try {
+        const response = await fetch('/api/treasury');
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+
+        const proposals = Array.isArray(data.proposals) ? data.proposals : [];
+        const approvals = Array.isArray(data.approvals) ? data.approvals : [];
+        
+        document.getElementById('treasury-open-count').innerText = proposals.length;
+        document.getElementById('treasury-approved-count').innerText = approvals.length;
+        document.getElementById('treasury-total-count').innerText = data.proposalCount || 0;
+        
+        // Next burn
+        const spendableFunds = Number(data.spendableFunds) || 0;
+        let burnAmount = 0;
+        if (data.burn && data.burn > 0 && spendableFunds > 0) {
+             burnAmount = spendableFunds * (data.burn / 1000000000); // Usually a Permill (1000000)
+        }
+        document.getElementById('treasury-next-burn').innerText = formatPDEX(burnAmount);
+        
+        // Spendable / Available
+        const spendableFormatted = formatPDEX(spendableFunds);
+        document.getElementById('treasury-spendable').innerText = spendableFormatted;
+        document.getElementById('treasury-available').innerText = spendableFormatted;
+
+        // Spend period
+        const termDuration = Number(data.spendPeriod) || 0;
+        const blocksRemaining = Number(data.blocksRemaining) || 0;
+        const pct = termDuration > 0
+            ? Math.min(100, Math.max(0, Math.floor(((termDuration - blocksRemaining) / termDuration) * 100)))
+            : 0;
+        
+        const pctEl = document.getElementById('treasury-spend-pct');
+        const arcEl = document.getElementById('treasury-spend-arc');
+        if (pctEl) pctEl.innerText = `${pct}%`;
+        if (arcEl) arcEl.style.strokeDasharray = `${pct}, 100`;
+
+        const remainingSeconds = blocksRemaining * 12;
+        const days = Math.floor(remainingSeconds / (24 * 3600));
+        const hours = Math.floor((remainingSeconds % (24 * 3600)) / 3600);
+        document.getElementById('treasury-spend-days').innerText = days;
+        document.getElementById('treasury-spend-hours').innerText = hours;
+
+        // Render Open Proposals
+        const renderProposalsList = () => {
+            const el = document.getElementById('treasury-proposals-list');
+            if (!el) return;
+            el.innerHTML = '';
+            if (proposals.length === 0) {
+                el.innerHTML = '<tr><td colspan="3" style="text-align:center; padding: 20px;">No open proposals</td></tr>';
+                return;
+            }
+            proposals.forEach(p => {
+                const tr = document.createElement('tr');
+                
+                // Column 1: ID
+                const tdId = document.createElement('td');
+                tdId.innerText = p.id;
+                
+                // Column 2: Beneficiary and Value
+                const tdBeneficiary = document.createElement('td');
+                tdBeneficiary.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            ${p.beneficiaryName && p.beneficiaryName !== p.beneficiary ? `<i class='bx bxs-check-circle' style="color: var(--success-color);"></i>` : ''}
+                            <span style="font-size: 11px; text-transform: uppercase;">${p.beneficiaryName || shortenAddress(p.beneficiary)}</span>
+                        </div>
+                        <div style="font-weight: 600;">${formatPDEX(p.value)} <span style="font-size: 11px; color: var(--text-secondary); font-weight: normal;">PDEX</span></div>
+                    </div>
+                `;
+
+                // Column 3: Proposer and Action
+                const tdProposer = document.createElement('td');
+                tdProposer.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 20px;">
+                        <div></div>
+                        <div style="display: flex; align-items: center; gap: 15px;">
+                            <div style="text-align: right;">
+                                <div style="display: flex; align-items: center; justify-content: flex-end; gap: 6px;">
+                                    ${p.proposerName && p.proposerName !== p.proposer ? `<i class='bx bxs-check-circle' style="color: var(--success-color);"></i>` : ''}
+                                    <span style="font-size: 11px; text-transform: uppercase;">${p.proposerName || shortenAddress(p.proposer)}</span>
+                                </div>
+                                <div style="font-size: 11px; color: var(--text-secondary);">${formatPDEX(p.bond)} PDEX</div>
+                            </div>
+                            <div class="glass" style="padding: 4px 10px; border-radius: 4px; font-size: 11px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <i class='bx bx-fast-forward' ></i> To council <i class='bx bx-chevron-down' ></i>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                tr.appendChild(tdId);
+                tr.appendChild(tdBeneficiary);
+                tr.appendChild(tdProposer);
+                el.appendChild(tr);
+            });
+        };
+        renderProposalsList();
+
+        // Render Approved Proposals
+        const renderApprovedList = () => {
+            const el = document.getElementById('treasury-approved-list');
+            if (!el) return;
+            if (approvals.length === 0) {
+                el.innerHTML = '<tr><td style="text-align:center; padding: 20px; color: var(--text-secondary);">No approved proposals</td></tr>';
+            } else {
+                el.innerHTML = `<tr><td style="padding: 20px; color: var(--text-secondary);">IDs: ${approvals.join(', ')}</td></tr>`;
+            }
+        };
+        renderApprovedList();
+
+    } catch (err) {
+        console.error('Error fetching treasury data:', err);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const submitBtn = document.getElementById('treasury-submit-btn');
+    if (submitBtn) {
+        submitBtn.addEventListener('click', async () => {
+            if (!activeSigner) {
+                alert('Please connect your wallet first by clicking "Connect Wallet" at the top right.');
+                return;
+            }
+            const amtStr = prompt("Enter the amount of PDEX you want to request from the Treasury:");
+            if (!amtStr) return;
+            const amt = parseFloat(amtStr);
+            if (isNaN(amt) || amt <= 0) {
+                alert("Invalid amount.");
+                return;
+            }
+            
+            const beneficiary = prompt("Enter the beneficiary address:");
+            if (!beneficiary || beneficiary.trim() === '') return;
+
+            const confirmMsg = \`Submit Treasury Spend Proposal?\\n\\nAmount: \${amt} PDEX\\nBeneficiary: \${beneficiary}\\nProposer: \${activeSigner.address}\\n\\nA bond (usually 5% of the amount) will be reserved from your account.\`;
+            
+            if (confirm(confirmMsg)) {
+                try {
+                    const api = await getApi();
+                    // value is requested in Planck (10^12)
+                    const valuePlanck = BigInt(Math.floor(amt * 1e12)).toString();
+                    
+                    const tx = api.tx.treasury.proposeSpend(valuePlanck, beneficiary);
+                    
+                    const injector = await window.injectedWeb3['polkadot-js'].enable('Polkadex Explorer');
+                    await tx.signAndSend(activeSigner.address, { signer: injector.signer }, ({ status, dispatchError }) => {
+                        if (status.isInBlock) {
+                            console.log(\`Completed at block hash #\${status.asInBlock.toString()}\`);
+                        } else {
+                            console.log(\`Current status: \${status.type}\`);
+                        }
+                    });
+                    alert("Treasury proposal transaction submitted! Please check your extension.");
+                } catch (e) {
+                    console.error(e);
+                    alert("Failed to submit proposal: " + e.message);
+                }
+            }
+        });
+    }
+});
 
 init();

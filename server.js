@@ -48,6 +48,7 @@ let isSyncingStakingRewards = false;
 let isSyncingPrice = false;
 let isSyncingCouncil = false;
 let isSyncingDemocracy = false;
+let isSyncingTreasury = false;
 const computingUnclaimed = new Set();
 let isCrawlingAccount = {};
 let globalApi = null;
@@ -875,6 +876,24 @@ app.get('/api/council', (req, res) => {
     }
 });
 
+app.get('/api/treasury', (req, res) => {
+    try {
+        const data = db.getKv('treasury') || { 
+            proposals: [], 
+            approvals: [], 
+            spendPeriod: 0, 
+            burn: 0, 
+            blocksRemaining: 0, 
+            spendableFunds: 0,
+            proposalCount: 0
+        };
+        res.json(data);
+    } catch (err) {
+        console.error('API Error /api/treasury:', err);
+        res.status(500).json({ error: 'Failed to fetch treasury data' });
+    }
+});
+
 app.get('/api/democracy', (req, res) => {
     try {
         const meta = db.getKv('democracy_meta') || {};
@@ -1132,6 +1151,88 @@ app.get('/api/wallet/:address', async (req, res) => {
 });
 
 // --- BACKGROUND CRAWLERS ---
+async function syncTreasury() {
+    if (!globalApi || isSyncingTreasury) return;
+    isSyncingTreasury = true;
+    try {
+        if (!globalApi.query.treasury) {
+            console.warn('Treasury sync: no treasury pallet found on this runtime.');
+            db.setSyncState('treasury', { lastSync: Date.now(), status: 'Unavailable' });
+            return;
+        }
+
+        const [proposalsEntries, approvalsData, currentBlockOpt, proposalCountOpt] = await Promise.all([
+            globalApi.query.treasury.proposals.entries(),
+            globalApi.query.treasury.approvals(),
+            globalApi.query.system.number(),
+            globalApi.query.treasury.proposalCount ? globalApi.query.treasury.proposalCount() : Promise.resolve({ toNumber: () => 0 })
+        ]);
+
+        const currentBlock = currentBlockOpt.toNumber();
+        const spendPeriod = globalApi.consts.treasury.spendPeriod ? globalApi.consts.treasury.spendPeriod.toNumber() : 0;
+        const burn = globalApi.consts.treasury.burn ? globalApi.consts.treasury.burn.toNumber() : 0;
+
+        const progress = spendPeriod > 0 ? currentBlock % spendPeriod : 0;
+        const blocksRemaining = spendPeriod > 0 ? spendPeriod - progress : 0;
+
+        const approvedProposalIds = approvalsData.map(id => id.toNumber());
+
+        const proposals = await Promise.all(proposalsEntries.map(async ([key, proposalOpt]) => {
+            const id = key.args[0].toNumber();
+            const proposal = proposalOpt.unwrap();
+            const proposer = proposal.proposer.toString();
+            const beneficiary = proposal.beneficiary.toString();
+            
+            const proposerName = await getIdentity(globalApi, proposer);
+            const beneficiaryName = await getIdentity(globalApi, beneficiary);
+
+            return {
+                id,
+                proposer,
+                proposerName,
+                beneficiary,
+                beneficiaryName,
+                value: balanceToPDEX(proposal.value),
+                bond: balanceToPDEX(proposal.bond)
+            };
+        }));
+        
+        // Sort proposals descending by ID
+        proposals.sort((a, b) => b.id - a.id);
+
+        let spendableFunds = 0;
+        if (globalApi.consts.treasury.palletId) {
+            const { stringToU8a, u8aConcat } = require('@polkadot/util');
+            const { encodeAddress } = require('@polkadot/util-crypto');
+            const palletId = globalApi.consts.treasury.palletId.toU8a();
+            const treasuryAccountU8a = u8aConcat(
+                stringToU8a('modl'),
+                palletId,
+                new Uint8Array(32)
+            ).slice(0, 32);
+            const treasuryAddress = encodeAddress(treasuryAccountU8a, chainSS58);
+            const accountData = await globalApi.query.system.account(treasuryAddress);
+            spendableFunds = balanceToPDEX(accountData.data.free);
+        }
+
+        db.setKv('treasury', {
+            proposals,
+            approvals: approvedProposalIds,
+            spendPeriod,
+            burn,
+            blocksRemaining,
+            spendableFunds,
+            proposalCount: proposalCountOpt.toNumber()
+        });
+        db.setSyncState('treasury', { lastSync: Date.now(), status: 'Synced' });
+    } catch (err) {
+        console.error('Error syncing treasury:', err.message);
+        db.setSyncState('treasury', { lastSync: Date.now(), status: 'Error' });
+    } finally {
+        isSyncingTreasury = false;
+    }
+}
+
 async function syncCouncil() {
     if (!globalApi || isSyncingCouncil) return;
     isSyncingCouncil = true;
@@ -1880,6 +1981,7 @@ async function start() {
     }, RECENT_SYNC_INTERVAL);
     setInterval(syncHolders, THIRTY_MINUTES);
     setInterval(syncCouncil, FIVE_MINUTES);
+    setInterval(syncTreasury, FIVE_MINUTES);
     setInterval(syncDemocracy, FIVE_MINUTES);
     setInterval(syncTransactions, THIRTY_SECONDS);
     // Staking rewards indexer: continuously appends new payouts each era and
