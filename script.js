@@ -33,7 +33,6 @@ function setHtml(id, value) {
 // DOM Elements
 const blocksListEl = document.getElementById('blocks-list');
 const transactionsListEl = document.getElementById('transactions-list');
-const mobileToggle = document.querySelector('.mobile-toggle');
 const sidebar = document.querySelector('.sidebar');
 const statusIndicator = document.querySelector('.status-indicator');
 const networkStatusText = document.querySelector('.network-status span');
@@ -933,9 +932,6 @@ document.querySelectorAll('.sortable-tx').forEach(th => {
 });
 
 // --- Event Listeners ---
-mobileToggle.addEventListener('click', () => {
-    sidebar.classList.toggle('open');
-});
 
 const showMoreBtn = document.getElementById('show-more-btn');
 if (showMoreBtn) {
