@@ -173,6 +173,7 @@ h1, h2, h3 { font-weight: 600; }
 .sidebar-footer {
     padding: 24px;
     border-top: 1px solid var(--border-color);
+    background: var(--bg-dark);
 }
 
 .price-ticker {
@@ -702,7 +703,18 @@ h1, h2, h3 { font-weight: 600; }
     
     .mobile-top-bar { display: flex !important; }
     .mobile-toggle { display: block; }
-    .sidebar-close { display: block; }
+    .sidebar-close { 
+        display: flex; 
+        position: absolute; 
+        right: 16px; 
+        top: 24px; 
+        z-index: 100; 
+        background: rgba(255,255,255,0.1); 
+        padding: 4px; 
+        border-radius: 50%; 
+        align-items: center; 
+        justify-content: center;
+    }
     .search-container { display: none; } /* Hide search on mobile header to save space */
 }
 
