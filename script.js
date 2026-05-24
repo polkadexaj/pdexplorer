@@ -3242,7 +3242,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const beneficiary = prompt("Enter the beneficiary address:");
             if (!beneficiary || beneficiary.trim() === '') return;
 
-            const confirmMsg = \`Submit Treasury Spend Proposal?\\n\\nAmount: \${amt} PDEX\\nBeneficiary: \${beneficiary}\\nProposer: \${activeSigner.address}\\n\\nA bond (usually 5% of the amount) will be reserved from your account.\`;
+            const confirmMsg = `Submit Treasury Spend Proposal?\n\nAmount: ${amt} PDEX\nBeneficiary: ${beneficiary}\nProposer: ${activeSigner.address}\n\nA bond (usually 5% of the amount) will be reserved from your account.`;
             
             if (confirm(confirmMsg)) {
                 try {
@@ -3255,9 +3255,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     const injector = await window.injectedWeb3['polkadot-js'].enable('Polkadex Explorer');
                     await tx.signAndSend(activeSigner.address, { signer: injector.signer }, ({ status, dispatchError }) => {
                         if (status.isInBlock) {
-                            console.log(\`Completed at block hash #\${status.asInBlock.toString()}\`);
+                            console.log(`Completed at block hash #${status.asInBlock.toString()}`);
                         } else {
-                            console.log(\`Current status: \${status.type}\`);
+                            console.log(`Current status: ${status.type}`);
                         }
                     });
                     alert("Treasury proposal transaction submitted! Please check your extension.");
