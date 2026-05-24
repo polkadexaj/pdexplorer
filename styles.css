@@ -701,19 +701,33 @@ h1, h2, h3 { font-weight: 600; }
         box-shadow: 4px 0 24px rgba(0,0,0,0.8); 
     }
     
+    .sidebar-header {
+        padding: 16px;
+        align-items: flex-start;
+    }
+    .logo {
+        flex: 1;
+        align-items: flex-start;
+    }
+    .logo-text {
+        white-space: normal;
+        word-break: break-word;
+        font-size: 1rem;
+        line-height: 1.2;
+        margin-top: 4px;
+    }
     .mobile-top-bar { display: flex !important; }
     .mobile-toggle { display: block; }
     .sidebar-close { 
         display: flex; 
-        position: absolute; 
-        right: 16px; 
-        top: 24px; 
+        position: relative;
         z-index: 100; 
         background: rgba(255,255,255,0.1); 
-        padding: 4px; 
+        padding: 8px; 
         border-radius: 50%; 
         align-items: center; 
         justify-content: center;
+        margin-left: 12px;
     }
     .search-container { display: none; } /* Hide search on mobile header to save space */
 }
