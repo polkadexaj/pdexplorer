@@ -1161,6 +1161,8 @@ function routeTo(target) {
                 initDiscussionsPage(detailId);
             } else if (mainTarget === 'council') {
                 fetchCouncilData();
+            } else if (mainTarget === 'democracy') {
+                initDemocracyPage();
             }
         } else {
             page.style.display = 'none';
@@ -2622,6 +2624,211 @@ async function submitDiscussionPost(threadId) {
     } catch (e) {
         showErr(e.message);
         if (btn) btn.disabled = false;
+    }
+}
+
+// --- Democracy Page ---
+let democracyData = null;
+let democracyTab = 'overview';
+let democracyVoteChart = null;
+let democracyTurnoutChart = null;
+let democracyTurnoutPctChart = null;
+
+function initDemocracyPage() {
+    democracyTab = 'overview';
+    fetchDemocracyData();
+}
+
+async function fetchDemocracyData() {
+    const root = document.getElementById('democracy-content');
+    if (!root) return;
+    root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading democracy data…</div>';
+    try {
+        const res = await fetch('/api/democracy');
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        democracyData = data;
+        renderDemocracy();
+    } catch (e) {
+        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderDemocracy() {
+    const root = document.getElementById('democracy-content');
+    if (!root || !democracyData) return;
+    const d = democracyData;
+    const tabBtn = (key, label) => `<button class="account-tab${democracyTab === key ? ' active' : ''}" data-demtab="${key}">${label}</button>`;
+    let body;
+    if (democracyTab === 'referenda') body = renderDemocracyReferenda(d);
+    else if (democracyTab === 'proposals') body = renderDemocracyProposals(d);
+    else if (democracyTab === 'statistics') body = renderDemocracyStatisticsBody(d);
+    else body = renderDemocracyOverview(d);
+
+    root.innerHTML = `
+        <div class="list-container glass">
+            <div class="list-header">
+                <h2>Democracy</h2>
+                <span style="color:var(--text-secondary);font-size:0.78rem;">${d.status === 'Synced' ? 'Synced' : stakingEscapeHtml(d.status || 'Initializing')}</span>
+            </div>
+            <div class="account-tabs" style="margin:0 24px;">
+                ${tabBtn('overview', 'Overview')}${tabBtn('referenda', 'Referenda')}${tabBtn('proposals', 'Public Proposals')}${tabBtn('statistics', 'Statistics')}
+            </div>
+            <div style="padding:24px;">${body}</div>
+        </div>`;
+
+    root.querySelectorAll('[data-demtab]').forEach(btn => {
+        btn.addEventListener('click', () => { democracyTab = btn.getAttribute('data-demtab'); renderDemocracy(); });
+    });
+    if (democracyTab === 'statistics') renderDemocracyCharts(d);
+}
+
+function renderDemocracyOverview(d) {
+    const lp = Number(d.launchPeriod) || 0;
+    const into = lp > 0 ? (d.currentBlock % lp) : 0;
+    const remaining = lp > 0 ? (lp - into) : 0;
+    const pct = lp > 0 ? Math.floor(into / lp * 100) : 0;
+    const remSecs = remaining * 12;
+    const remDays = Math.floor(remSecs / 86400);
+    const remHrs = Math.floor((remSecs % 86400) / 3600);
+    const ext = d.externalProposal;
+    return `
+        <div class="staking-summary-grid">
+            <div class="staking-summary-card"><div class="label">Referenda (total)</div><div class="value accent">${stakingFormatNumber(d.referendumCount)}</div></div>
+            <div class="staking-summary-card"><div class="label">Public Proposals (total)</div><div class="value">${stakingFormatNumber(d.publicPropCount)}</div></div>
+            <div class="staking-summary-card"><div class="label">Active Referenda</div><div class="value">${stakingFormatNumber(d.activeReferenda)}</div></div>
+            <div class="staking-summary-card"><div class="label">Active Proposals</div><div class="value">${stakingFormatNumber(d.activeProposals)}</div></div>
+            <div class="staking-summary-card"><div class="label">Launch Period</div><div class="value">${pct}%</div></div>
+        </div>
+        <div class="wallet-stat-list" style="padding:14px 0 0;">
+            <div class="wallet-stat"><span>Launch period length</span><strong>${stakingFormatNumber(lp)} blocks</strong></div>
+            <div class="wallet-stat"><span>Next referendum launch in</span><strong>~${remDays}d ${remHrs}h &middot; ${stakingFormatNumber(remaining)} blocks</strong></div>
+            <div class="wallet-stat"><span>Current block</span><strong>${stakingFormatNumber(d.currentBlock)}</strong></div>
+            <div class="wallet-stat"><span>External proposal</span><strong>${ext ? 'Queued' + (ext.threshold ? ' (' + stakingEscapeHtml(ext.threshold) + ')' : '') : 'None'}</strong></div>
+        </div>`;
+}
+
+function democracyStatusBadge(s) {
+    if (s === 'Ongoing') return '<span class="reward-badge claimed">Ongoing</span>';
+    if (s === 'Passed') return '<span class="reward-badge claimed">Passed</span>';
+    return '<span class="reward-badge unclaimed">Not Passed</span>';
+}
+
+function renderDemocracyReferenda(d) {
+    const refs = d.referenda || [];
+    if (!refs.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No referenda indexed yet.</div>';
+    let rows = '';
+    refs.forEach(r => {
+        const dash = '<span style="color:var(--text-muted);">&mdash;</span>';
+        const tally = r.tallyKnown ? `${stakingFormatPDEX(r.ayes)} / ${stakingFormatPDEX(r.nays)}` : dash;
+        rows += `<tr>
+            <td>#${r.refIndex}</td>
+            <td>${democracyStatusBadge(r.status)}</td>
+            <td style="text-align:right;">${tally}</td>
+            <td style="text-align:right;">${r.tallyKnown ? stakingFormatPDEX(r.turnout) : dash}</td>
+            <td style="text-align:right;">${stakingFormatNumber(r.endBlock)}</td>
+        </tr>`;
+    });
+    return `<div class="table-responsive"><table class="data-table">
+        <thead><tr><th>Referendum</th><th>Status</th><th style="text-align:right;">Ayes / Nays (PDEX)</th><th style="text-align:right;">Turnout</th><th style="text-align:right;">End Block</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+}
+
+function renderDemocracyProposals(d) {
+    const props = d.publicProposals || [];
+    if (!props.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No active public proposals. Proposals appear here while they await tabling to a referendum.</div>';
+    let rows = '';
+    props.forEach(p => {
+        const who = p.proposerName && p.proposerName !== 'Unknown' ? p.proposerName : stakingShortAddress(p.proposer);
+        rows += `<tr>
+            <td>#${p.index}</td>
+            <td><a href="#account/${encodeURIComponent(p.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(who)}</a></td>
+            <td style="text-align:right;">${stakingFormatPDEX(p.deposit)} PDEX</td>
+            <td style="text-align:right;">${stakingFormatNumber(p.seconds)}</td>
+            <td style="text-align:right;"><a href="#discussions/proposal-${p.index}" class="item-link" style="color:var(--brand-secondary);">Discuss</a></td>
+        </tr>`;
+    });
+    return `<div class="table-responsive"><table class="data-table">
+        <thead><tr><th>Proposal</th><th>Proposer</th><th style="text-align:right;">Deposit</th><th style="text-align:right;">Seconds</th><th style="text-align:right;">Discussion</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+}
+
+function renderDemocracyStatisticsBody(d) {
+    const known = (d.referenda || []).filter(r => r.tallyKnown).length;
+    const note = known === 0
+        ? '<div style="padding:0 0 16px;color:var(--text-muted);font-size:0.83rem;line-height:1.6;">Vote tallies are still being collected. Tallies for ongoing referenda are captured live; historical tallies are recovered when the node serves archive state.</div>'
+        : '';
+    return note + `
+        <div class="staking-chart-wrap" style="height:300px;padding:10px 0 0;"><canvas id="dem-vote-chart"></canvas></div>
+        <div class="wallet-grid" style="margin-top:18px;">
+            <div>
+                <div style="color:var(--text-secondary);font-size:0.8rem;font-weight:600;margin-bottom:4px;">Turnout per Referendum (PDEX)</div>
+                <div class="staking-chart-wrap" style="height:230px;padding:6px 0 0;"><canvas id="dem-turnout-chart"></canvas></div>
+            </div>
+            <div>
+                <div style="color:var(--text-secondary);font-size:0.8rem;font-weight:600;margin-bottom:4px;">Turnout % of Total Issuance</div>
+                <div class="staking-chart-wrap" style="height:230px;padding:6px 0 0;"><canvas id="dem-turnoutpct-chart"></canvas></div>
+            </div>
+        </div>`;
+}
+
+function renderDemocracyCharts(d) {
+    if (typeof Chart === 'undefined') return;
+    [democracyVoteChart, democracyTurnoutChart, democracyTurnoutPctChart].forEach(c => { if (c) c.destroy(); });
+    democracyVoteChart = democracyTurnoutChart = democracyTurnoutPctChart = null;
+
+    const refs = (d.referenda || []).filter(r => r.tallyKnown).slice().sort((a, b) => a.refIndex - b.refIndex);
+    if (!refs.length) return;
+    const labels = refs.map(r => '#' + r.refIndex);
+    const axis = (extra) => Object.assign({
+        ticks: { color: '#888', maxTicksLimit: 14 }, grid: { color: 'rgba(255,255,255,0.05)' }
+    }, extra || {});
+
+    const voteCanvas = document.getElementById('dem-vote-chart');
+    if (voteCanvas) {
+        democracyVoteChart = new Chart(voteCanvas.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [
+                    { label: 'Ayes', data: refs.map(r => r.ayes || 0), backgroundColor: 'rgba(0,230,118,0.6)', borderColor: '#00E676', borderWidth: 1 },
+                    { label: 'Nays', data: refs.map(r => r.nays || 0), backgroundColor: 'rgba(230,0,122,0.55)', borderColor: '#E6007A', borderWidth: 1 }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: '#ccc', font: { size: 11 } } },
+                    title: { display: true, text: 'Vote Trend — Ayes vs Nays (PDEX)', color: '#ccc' }
+                },
+                scales: { x: axis({ stacked: true }), y: axis({ stacked: true, beginAtZero: true, maxTicksLimit: 8 }) }
+            }
+        });
+    }
+    const turnoutCanvas = document.getElementById('dem-turnout-chart');
+    if (turnoutCanvas) {
+        democracyTurnoutChart = new Chart(turnoutCanvas.getContext('2d'), {
+            type: 'bar',
+            data: { labels, datasets: [{ label: 'Turnout', data: refs.map(r => r.turnout || 0), backgroundColor: 'rgba(124,108,255,0.6)', borderColor: '#7c6cff', borderWidth: 1 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: { x: axis({ maxTicksLimit: 12 }), y: axis({ beginAtZero: true, maxTicksLimit: 6 }) }
+            }
+        });
+    }
+    const pctCanvas = document.getElementById('dem-turnoutpct-chart');
+    if (pctCanvas) {
+        const issuance = Number(d.totalIssuance) || 0;
+        democracyTurnoutPctChart = new Chart(pctCanvas.getContext('2d'), {
+            type: 'bar',
+            data: { labels, datasets: [{ label: 'Turnout %', data: refs.map(r => issuance > 0 ? (r.turnout / issuance * 100) : 0), backgroundColor: 'rgba(124,108,255,0.6)', borderColor: '#7c6cff', borderWidth: 1 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ' ' + ctx.parsed.y.toFixed(3) + '%' } } },
+                scales: { x: axis({ maxTicksLimit: 12 }), y: axis({ beginAtZero: true, maxTicksLimit: 6, ticks: { color: '#888', callback: v => v + '%' } }) }
+            }
+        });
     }
 }
 
