@@ -131,6 +131,36 @@ CREATE TABLE IF NOT EXISTS democracy_referenda (
   threshold TEXT,
   updated_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS discussion_threads (
+  id TEXT PRIMARY KEY,
+  kind TEXT,
+  ref_key TEXT,
+  title TEXT,
+  status TEXT DEFAULT 'open',
+  created_at INTEGER,
+  closed_at INTEGER,
+  closed_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS discussion_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id TEXT,
+  author TEXT,
+  author_name TEXT,
+  content TEXT,
+  created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_posts_thread ON discussion_posts(thread_id, created_at);
+CREATE TABLE IF NOT EXISTS auth_challenges (
+  address TEXT PRIMARY KEY,
+  nonce TEXT,
+  created_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token TEXT PRIMARY KEY,
+  address TEXT,
+  created_at INTEGER,
+  expires_at INTEGER
+);
 `;
 
 export function initDb(dataDir) {
@@ -366,6 +396,76 @@ export function getDemocracyReferenda() {
 }
 export function countDemocracyReferenda() {
     return db.prepare('SELECT COUNT(*) AS c FROM democracy_referenda').get().c;
+}
+
+// --- discussion threads + posts ---
+function mapThread(r) {
+    if (!r) return null;
+    return {
+        id: r.id, kind: r.kind, refKey: r.ref_key, title: r.title, status: r.status,
+        createdAt: r.created_at, closedAt: r.closed_at, closedReason: r.closed_reason,
+        postCount: db.prepare('SELECT COUNT(*) AS c FROM discussion_posts WHERE thread_id = ?').get(r.id).c
+    };
+}
+export function createThreadIfMissing(t) {
+    const exists = db.prepare('SELECT 1 FROM discussion_threads WHERE id = ?').get(t.id);
+    if (exists) return false;
+    db.prepare('INSERT INTO discussion_threads(id,kind,ref_key,title,status,created_at) VALUES(?,?,?,?,?,?)')
+        .run(t.id, t.kind ?? null, t.refKey ?? null, t.title ?? null, 'open', Date.now());
+    return true;
+}
+export function getThreads(kind) {
+    const rows = kind
+        ? db.prepare('SELECT * FROM discussion_threads WHERE kind = ? ORDER BY created_at DESC').all(kind)
+        : db.prepare('SELECT * FROM discussion_threads ORDER BY created_at DESC').all();
+    return rows.map(mapThread);
+}
+export function getThread(id) {
+    return mapThread(db.prepare('SELECT * FROM discussion_threads WHERE id = ?').get(id));
+}
+export function getOpenThreadIds(kind) {
+    return db.prepare("SELECT id FROM discussion_threads WHERE kind = ? AND status = 'open'").all(kind).map(r => r.id);
+}
+export function closeThread(id, reason) {
+    db.prepare("UPDATE discussion_threads SET status = 'closed', closed_at = ?, closed_reason = ? WHERE id = ? AND status != 'closed'")
+        .run(Date.now(), reason ?? null, id);
+}
+export function createPost(p) {
+    const r = db.prepare('INSERT INTO discussion_posts(thread_id,author,author_name,content,created_at) VALUES(?,?,?,?,?)')
+        .run(p.threadId, p.author, p.authorName ?? null, p.content, Date.now());
+    return Number(r.lastInsertRowid);
+}
+export function getPosts(threadId) {
+    return db.prepare('SELECT id, thread_id AS threadId, author, author_name AS authorName, content, created_at AS createdAt FROM discussion_posts WHERE thread_id = ? ORDER BY created_at ASC').all(threadId);
+}
+export function countThreads() {
+    return db.prepare('SELECT COUNT(*) AS c FROM discussion_threads').get().c;
+}
+
+// --- wallet-signature auth ---
+export function setChallenge(address, nonce) {
+    db.prepare('INSERT OR REPLACE INTO auth_challenges(address,nonce,created_at) VALUES(?,?,?)').run(address, nonce, Date.now());
+}
+export function getChallenge(address) {
+    const r = db.prepare('SELECT address, nonce, created_at AS createdAt FROM auth_challenges WHERE address = ?').get(address);
+    return r || null;
+}
+export function deleteChallenge(address) {
+    db.prepare('DELETE FROM auth_challenges WHERE address = ?').run(address);
+}
+export function createSession(token, address, ttlMs) {
+    const now = Date.now();
+    db.prepare('INSERT OR REPLACE INTO auth_sessions(token,address,created_at,expires_at) VALUES(?,?,?,?)')
+        .run(token, address, now, now + ttlMs);
+}
+export function getSession(token) {
+    const s = db.prepare('SELECT token, address, expires_at AS expiresAt FROM auth_sessions WHERE token = ?').get(token);
+    if (!s) return null;
+    if (s.expiresAt < Date.now()) { db.prepare('DELETE FROM auth_sessions WHERE token = ?').run(token); return null; }
+    return s;
+}
+export function deleteSession(token) {
+    db.prepare('DELETE FROM auth_sessions WHERE token = ?').run(token);
 }
 
 // --- one-time migration of legacy JSON caches ---

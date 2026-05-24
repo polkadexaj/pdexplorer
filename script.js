@@ -1110,6 +1110,9 @@ function routeTo(target) {
     } else if (target.startsWith('wallet/')) {
         mainTarget = 'wallet';
         detailId = target.substring('wallet/'.length);
+    } else if (target.startsWith('discussions/')) {
+        mainTarget = 'discussions';
+        detailId = target.substring('discussions/'.length);
     }
 
     // Update active nav
@@ -1154,6 +1157,8 @@ function routeTo(target) {
                 initWalletPage(detailId);
             } else if (mainTarget === 'donate') {
                 initDonatePage();
+            } else if (mainTarget === 'discussions') {
+                initDiscussionsPage(detailId);
             } else if (mainTarget === 'council') {
                 fetchCouncilData();
             }
@@ -2400,6 +2405,224 @@ function initDonatePage() {
     });
 
     donatePageRendered = true;
+}
+
+// --- Discussion Board ---
+const DISCUSS_TOKEN_KEY = 'pdex_discuss_session';
+
+function getDiscussSession() {
+    try {
+        const raw = localStorage.getItem(DISCUSS_TOKEN_KEY);
+        if (!raw) return null;
+        const s = JSON.parse(raw);
+        if (!s || !s.token || !s.address) return null;
+        const connected = getStoredWallet();
+        if (connected && connected !== s.address) return null;
+        return s;
+    } catch (e) { return null; }
+}
+
+function initDiscussionsPage(threadId) {
+    if (threadId) fetchDiscussionThread(threadId);
+    else fetchDiscussionThreads();
+}
+
+async function fetchDiscussionThreads() {
+    const root = document.getElementById('discussions-content');
+    if (!root) return;
+    root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading discussions…</div>';
+    try {
+        const res = await fetch('/api/discussions');
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        renderThreadList(data.threads || []);
+    } catch (e) {
+        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderThreadList(threads) {
+    const root = document.getElementById('discussions-content');
+    if (!root) return;
+    const proposals = threads.filter(t => t.kind === 'proposal');
+    const motions = threads.filter(t => t.kind === 'motion');
+    const card = t => {
+        const badge = t.status === 'open'
+            ? '<span class="reward-badge claimed">Open</span>'
+            : '<span class="reward-badge unclaimed">Closed</span>';
+        const meta = `${t.postCount} post${t.postCount === 1 ? '' : 's'}` +
+            (t.status === 'closed' && t.closedReason ? ' · ' + stakingEscapeHtml(t.closedReason) : '');
+        return `<a class="discussion-thread-row" href="#discussions/${encodeURIComponent(t.id)}">
+            <div class="discussion-thread-main">
+                <span class="discussion-thread-title">${stakingEscapeHtml(t.title || t.id)}</span>
+                <span class="discussion-thread-meta">${meta}</span>
+            </div>
+            ${badge}
+        </a>`;
+    };
+    const section = (title, items) => `
+        <div class="list-container glass" style="margin-bottom:20px;">
+            <div class="list-header"><h2>${title}</h2><span style="color:var(--text-secondary);font-size:0.8rem;">${items.length}</span></div>
+            <div style="padding:8px 0;">
+                ${items.length ? items.map(card).join('') : '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:0.86rem;">No threads yet — one is created automatically when a proposal or motion appears on-chain.</div>'}
+            </div>
+        </div>`;
+    root.innerHTML = `
+        <div class="list-container glass" style="margin-bottom:20px;">
+            <div class="list-header"><h2>Discussions</h2></div>
+            <div style="padding:18px 24px;color:var(--text-secondary);font-size:0.88rem;line-height:1.6;">
+                A discussion thread opens automatically for every public proposal and council motion. Each thread locks for new posts once its proposal moves to a referendum (voting) or its motion concludes. Sign in with your Substrate wallet to take part.
+            </div>
+        </div>
+        ${section('Public Proposals', proposals)}
+        ${section('Council Motions', motions)}`;
+}
+
+async function fetchDiscussionThread(id) {
+    const root = document.getElementById('discussions-content');
+    if (!root) return;
+    root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading discussion…</div>';
+    try {
+        const res = await fetch('/api/discussions/' + encodeURIComponent(id));
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        renderThread(data.thread, data.posts || []);
+    } catch (e) {
+        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderThread(thread, posts) {
+    const root = document.getElementById('discussions-content');
+    if (!root) return;
+    const session = getDiscussSession();
+    const postsHtml = posts.length
+        ? posts.map(p => `
+            <div class="discussion-post">
+                <div class="discussion-post-head">
+                    <a href="#account/${encodeURIComponent(p.author)}" class="item-link" style="color:var(--brand-secondary);font-weight:600;">${stakingEscapeHtml(p.authorName && p.authorName !== 'Unknown' ? p.authorName : stakingShortAddress(p.author))}</a>
+                    <span style="color:var(--text-muted);font-size:0.75rem;">${new Date(p.createdAt).toLocaleString('en-US')}</span>
+                </div>
+                <div class="discussion-post-body">${stakingEscapeHtml(p.content).replace(/\n/g, '<br>')}</div>
+            </div>`).join('')
+        : '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:0.86rem;">No posts yet — be the first to comment.</div>';
+
+    let composer;
+    if (thread.status === 'closed') {
+        composer = `<div class="discussion-closed-note"><i class='bx bx-lock-alt'></i> ${stakingEscapeHtml(thread.closedReason || 'This discussion is closed.')}</div>`;
+    } else if (!session) {
+        composer = `<div class="discussion-composer">
+            <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:10px;">Sign in with your Substrate wallet to join this discussion. You will sign a short message — no transaction, no fees.</p>
+            <button id="discuss-signin-btn" class="staking-download-btn"><i class='bx bx-log-in'></i> Sign in with wallet</button>
+            <div id="discuss-post-error" class="staking-error" style="display:none;"></div>
+        </div>`;
+    } else {
+        composer = `<div class="discussion-composer">
+            <div style="color:var(--text-secondary);font-size:0.78rem;margin-bottom:8px;">Posting as <span style="color:var(--brand-secondary);">${stakingShortAddress(session.address)}</span></div>
+            <textarea id="discuss-post-input" class="discussion-textarea" placeholder="Share your thoughts…" maxlength="4000"></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+                <button id="discuss-post-btn" class="staking-download-btn" style="background:var(--brand-primary);color:#fff;border-color:var(--brand-primary);"><i class='bx bx-send'></i> Post</button>
+            </div>
+            <div id="discuss-post-error" class="staking-error" style="display:none;"></div>
+        </div>`;
+    }
+
+    const badge = thread.status === 'open'
+        ? '<span class="reward-badge claimed">Open</span>'
+        : '<span class="reward-badge unclaimed">Closed</span>';
+    root.innerHTML = `
+        <div class="list-container glass">
+            <div class="list-header">
+                <h2 style="display:flex;align-items:center;gap:10px;">${stakingEscapeHtml(thread.title || thread.id)} ${badge}</h2>
+                <a href="#discussions" class="item-link" style="color:var(--text-secondary);font-size:0.8rem;">All discussions</a>
+            </div>
+            <div class="discussion-posts">${postsHtml}</div>
+            ${composer}
+        </div>`;
+
+    const signinBtn = document.getElementById('discuss-signin-btn');
+    if (signinBtn) signinBtn.addEventListener('click', async () => {
+        signinBtn.disabled = true;
+        signinBtn.innerHTML = "<i class='bx bx-loader-alt'></i> Check your wallet…";
+        const ok = await discussSignIn();
+        if (ok) fetchDiscussionThread(thread.id);
+        else { signinBtn.disabled = false; signinBtn.innerHTML = "<i class='bx bx-log-in'></i> Sign in with wallet"; }
+    });
+    const postBtn = document.getElementById('discuss-post-btn');
+    if (postBtn) postBtn.addEventListener('click', () => submitDiscussionPost(thread.id));
+}
+
+// Locate an extension signer that can sign for the given address.
+async function getWalletSigner(address) {
+    const injected = window.injectedWeb3;
+    if (!injected) return null;
+    for (const key of Object.keys(injected)) {
+        try {
+            const provider = injected[key];
+            if (!provider || typeof provider.enable !== 'function') continue;
+            const ext = await provider.enable('Polkadex Explorer');
+            if (ext && ext.accounts && ext.accounts.get && ext.signer && ext.signer.signRaw) {
+                const accs = await ext.accounts.get();
+                if (accs.some(a => a.address === address)) return ext.signer;
+            }
+        } catch (e) { /* user rejected this extension */ }
+    }
+    return null;
+}
+
+async function discussSignIn() {
+    const address = getStoredWallet();
+    if (!address) { alert('Connect your wallet first using the button in the top-right.'); return false; }
+    try {
+        const challRes = await fetch('/api/auth/challenge', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address })
+        });
+        const chall = await challRes.json();
+        if (!challRes.ok || chall.error) throw new Error(chall.error || 'Could not start sign-in.');
+        const signer = await getWalletSigner(address);
+        if (!signer) throw new Error('Could not reach a wallet extension that holds this address.');
+        const signed = await signer.signRaw({ address, data: chall.message, type: 'bytes' });
+        const verRes = await fetch('/api/auth/verify', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address, signature: signed.signature })
+        });
+        const ver = await verRes.json();
+        if (!verRes.ok || ver.error) throw new Error(ver.error || 'Verification failed.');
+        localStorage.setItem(DISCUSS_TOKEN_KEY, JSON.stringify({ token: ver.token, address }));
+        return true;
+    } catch (e) {
+        alert('Sign-in failed: ' + e.message);
+        return false;
+    }
+}
+
+async function submitDiscussionPost(threadId) {
+    const input = document.getElementById('discuss-post-input');
+    const errEl = document.getElementById('discuss-post-error');
+    const btn = document.getElementById('discuss-post-btn');
+    if (!input) return;
+    const content = input.value.trim();
+    const showErr = msg => { if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; } };
+    if (!content) { showErr('Write something before posting.'); return; }
+    const session = getDiscussSession();
+    if (!session) { showErr('Your session has expired — please sign in again.'); fetchDiscussionThread(threadId); return; }
+    if (btn) btn.disabled = true;
+    if (errEl) errEl.style.display = 'none';
+    try {
+        const res = await fetch('/api/discussions/' + encodeURIComponent(threadId) + '/posts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.token },
+            body: JSON.stringify({ content })
+        });
+        const data = await res.json();
+        if (res.status === 401) { localStorage.removeItem(DISCUSS_TOKEN_KEY); throw new Error('Session expired — please sign in again.'); }
+        if (!res.ok || data.error) throw new Error(data.error || 'Failed to post.');
+        renderThread(data.thread, data.posts || []);
+    } catch (e) {
+        showErr(e.message);
+        if (btn) btn.disabled = false;
+    }
 }
 
 // --- Event wiring: staking rewards + wallet connect ---

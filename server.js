@@ -1,12 +1,14 @@
 import express from 'express';
 import cors from 'cors';
 import { ApiPromise, WsProvider } from '@polkadot/api';
-import { decodeAddress, encodeAddress } from '@polkadot/util-crypto';
+import { decodeAddress, encodeAddress, signatureVerify, randomAsHex } from '@polkadot/util-crypto';
+import { u8aWrapBytes } from '@polkadot/util';
 import path from 'path';
 import * as db from './db.js';
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '64kb' }));
 
 // Use dedicated data directory for Docker volumes
 const PORT = process.env.PORT || 3001;
@@ -45,6 +47,7 @@ let isSyncingEvents = false;
 let isSyncingStakingRewards = false;
 let isSyncingPrice = false;
 let isSyncingCouncil = false;
+let isSyncingDemocracy = false;
 const computingUnclaimed = new Set();
 let isCrawlingAccount = {};
 let globalApi = null;
@@ -872,6 +875,157 @@ app.get('/api/council', (req, res) => {
     }
 });
 
+app.get('/api/democracy', (req, res) => {
+    try {
+        const meta = db.getKv('democracy_meta') || {};
+        const state = db.getSyncState('democracy');
+        res.json({
+            referendumCount: meta.referendumCount || 0,
+            publicPropCount: meta.publicPropCount || 0,
+            activeReferenda: meta.activeReferenda || 0,
+            activeProposals: meta.activeProposals || 0,
+            launchPeriod: meta.launchPeriod || 0,
+            currentBlock: meta.currentBlock || 0,
+            lowestUnbaked: meta.lowestUnbaked || 0,
+            totalIssuance: meta.totalIssuance || 0,
+            publicProposals: meta.publicProposals || [],
+            externalProposal: meta.externalProposal || null,
+            referenda: db.getDemocracyReferenda(),
+            lastSync: meta.lastSync || state.lastSync || 0,
+            status: state.status || 'Initializing'
+        });
+    } catch (err) {
+        console.error('API Error /api/democracy:', err);
+        res.status(500).json({ error: 'Failed to fetch democracy data' });
+    }
+});
+
+// --- DISCUSSION BOARD: wallet-signature auth ---
+const AUTH_SESSION_TTL = 7 * 24 * 60 * 60 * 1000;
+const AUTH_CHALLENGE_TTL = 10 * 60 * 1000;
+const POST_COOLDOWN_MS = 8 * 1000;
+const lastPostAt = new Map();
+
+function challengeMessage(address, nonce) {
+    return `Sign in to the Polkadex Explorer discussion board.\n\nAddress: ${address}\nNonce: ${nonce}`;
+}
+
+function getAuthAddress(req) {
+    const header = req.headers['authorization'] || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (!token) return null;
+    const session = db.getSession(token);
+    return session ? session.address : null;
+}
+
+app.post('/api/auth/challenge', (req, res) => {
+    const raw = (req.body && req.body.address || '').trim();
+    if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid wallet address.' });
+    let address;
+    try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid wallet address.' }); }
+    const nonce = randomAsHex(16);
+    db.setChallenge(address, nonce);
+    res.json({ address, message: challengeMessage(address, nonce) });
+});
+
+app.post('/api/auth/verify', (req, res) => {
+    const raw = (req.body && req.body.address || '').trim();
+    const signature = (req.body && req.body.signature || '').trim();
+    if (!isValidAddress(raw) || !signature) return res.status(400).json({ error: 'Invalid request.' });
+    let address;
+    try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid wallet address.' }); }
+    const challenge = db.getChallenge(address);
+    if (!challenge || Date.now() - challenge.createdAt > AUTH_CHALLENGE_TTL) {
+        return res.status(400).json({ error: 'Login challenge expired — please try again.' });
+    }
+    const message = challengeMessage(address, challenge.nonce);
+    let valid = false;
+    try {
+        // Browser extensions wrap raw-bytes payloads in <Bytes>…</Bytes>, so accept either form.
+        valid = signatureVerify(message, signature, address).isValid
+            || signatureVerify(u8aWrapBytes(message), signature, address).isValid;
+    } catch (e) { valid = false; }
+    if (!valid) return res.status(401).json({ error: 'Signature verification failed.' });
+    db.deleteChallenge(address);
+    const token = randomAsHex(24);
+    db.createSession(token, address, AUTH_SESSION_TTL);
+    res.json({ token, address, expiresIn: AUTH_SESSION_TTL });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+    const header = req.headers['authorization'] || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (token) db.deleteSession(token);
+    res.json({ ok: true });
+});
+
+// --- DISCUSSION BOARD: threads + posts ---
+app.get('/api/discussions', (req, res) => {
+    try {
+        const kind = (req.query.kind === 'proposal' || req.query.kind === 'motion') ? req.query.kind : null;
+        res.json({ threads: db.getThreads(kind) });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/discussions/:id', (req, res) => {
+    try {
+        const thread = db.getThread(req.params.id);
+        if (!thread) return res.status(404).json({ error: 'Discussion thread not found.' });
+        res.json({ thread, posts: db.getPosts(thread.id) });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/discussions/:id/posts', async (req, res) => {
+    try {
+        const address = getAuthAddress(req);
+        if (!address) return res.status(401).json({ error: 'Sign in with your wallet to post.' });
+        const thread = db.getThread(req.params.id);
+        if (!thread) return res.status(404).json({ error: 'Discussion thread not found.' });
+        if (thread.status === 'closed') return res.status(403).json({ error: 'This discussion is closed.' });
+
+        const content = (req.body && req.body.content || '').trim();
+        if (!content) return res.status(400).json({ error: 'Post content is required.' });
+        if (content.length > 4000) return res.status(400).json({ error: 'Post is too long (4000 character limit).' });
+
+        const now = Date.now();
+        if (now - (lastPostAt.get(address) || 0) < POST_COOLDOWN_MS) {
+            return res.status(429).json({ error: 'You are posting too quickly — please wait a moment.' });
+        }
+        lastPostAt.set(address, now);
+
+        let authorName = 'Unknown';
+        try { authorName = await getIdentity(globalApi, address); } catch (e) { }
+        db.createPost({ threadId: thread.id, author: address, authorName, content });
+        res.json({ thread: db.getThread(thread.id), posts: db.getPosts(thread.id) });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Auto-create one discussion thread per active item and close threads whose
+// underlying proposal/motion has moved on (to voting, or concluded).
+function reconcileProposalThreads(publicProposals) {
+    const activeIds = new Set();
+    for (const p of (publicProposals || [])) {
+        const id = `proposal-${p.index}`;
+        activeIds.add(id);
+        db.createThreadIfMissing({ id, kind: 'proposal', refKey: String(p.index), title: `Public Proposal #${p.index}` });
+    }
+    for (const openId of db.getOpenThreadIds('proposal')) {
+        if (!activeIds.has(openId)) db.closeThread(openId, 'Proposal tabled and moved to a referendum (voting).');
+    }
+}
+
+function reconcileMotionThreads(motions) {
+    const activeIds = new Set();
+    for (const m of (motions || [])) {
+        const id = `motion-${m.hash}`;
+        activeIds.add(id);
+        db.createThreadIfMissing({ id, kind: 'motion', refKey: m.hash, title: m.title || 'Council Motion' });
+    }
+    for (const openId of db.getOpenThreadIds('motion')) {
+        if (!activeIds.has(openId)) db.closeThread(openId, 'Council motion concluded.');
+    }
+}
+
 app.get('/api/wallet/:address', async (req, res) => {
     const raw = (req.params.address || '').trim();
     if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
@@ -1030,11 +1184,33 @@ async function syncCouncil() {
         const members = await processAccountList(membersData);
         const runnersUp = await processAccountList(runnersUpData);
         const candidates = await processAccountList(candidatesData);
-        
+
+        // Council motions (the collective pallet).
+        const motions = [];
+        const collectiveModule = globalApi.query.council || globalApi.query.councilCollective || globalApi.query.generalCouncil;
+        if (collectiveModule && collectiveModule.proposals && collectiveModule.proposalOf) {
+            try {
+                const motionHashes = await collectiveModule.proposals();
+                for (const h of motionHashes) {
+                    const hash = h.toString();
+                    let title = 'Council Motion';
+                    try {
+                        const callOpt = await collectiveModule.proposalOf(h);
+                        if (callOpt && callOpt.isSome) {
+                            const call = callOpt.unwrap();
+                            title = `${call.section}.${call.method}`;
+                        }
+                    } catch (e) { }
+                    motions.push({ hash, title });
+                }
+            } catch (e) { console.warn('Council motions skipped:', e.message); }
+        }
+
         const councilData = {
             members,
             runnersUp,
             candidates,
+            motions,
             currentBlock,
             termDuration,
             blocksRemaining,
@@ -1046,10 +1222,138 @@ async function syncCouncil() {
         
         db.setKv('council', councilData);
         db.setSyncState('council', { lastSync: Date.now(), status: 'Synced' });
+        reconcileMotionThreads(motions);
     } catch (err) {
         console.error('Council sync error:', err);
     } finally {
         isSyncingCouncil = false;
+    }
+}
+
+// Indexes the democracy pallet: referenda (status + vote tally), active public
+// proposals, the queued external proposal, and launch-period progress.
+async function syncDemocracy() {
+    if (isSyncingDemocracy || !globalApi) return;
+    isSyncingDemocracy = true;
+    try {
+        const dem = globalApi.query.democracy;
+        if (!dem || !dem.referendumCount) {
+            db.setSyncState('democracy', { lastSync: Date.now(), status: 'Unavailable' });
+            return;
+        }
+
+        const [refCountRaw, propCountRaw, publicPropsRaw, nextExternalRaw, lowestUnbakedRaw, currentBlockRaw, totalIssuanceRaw] = await Promise.all([
+            dem.referendumCount(),
+            dem.publicPropCount ? dem.publicPropCount() : Promise.resolve(null),
+            dem.publicProps(),
+            dem.nextExternal ? dem.nextExternal() : Promise.resolve(null),
+            dem.lowestUnbaked ? dem.lowestUnbaked() : Promise.resolve(null),
+            globalApi.query.system.number(),
+            globalApi.query.balances.totalIssuance()
+        ]);
+
+        const referendumCount = refCountRaw.toNumber();
+        const publicPropCount = propCountRaw ? propCountRaw.toNumber() : 0;
+        const currentBlock = currentBlockRaw.toNumber();
+        const totalIssuance = balanceToPDEX(totalIssuanceRaw);
+        const launchPeriod = (globalApi.consts.democracy && globalApi.consts.democracy.launchPeriod)
+            ? Number(globalApi.consts.democracy.launchPeriod.toString()) : 0;
+
+        // Active public proposals.
+        const publicProposals = [];
+        const propsJson = publicPropsRaw.toJSON() || [];
+        for (const entry of propsJson) {
+            const propIndex = Array.isArray(entry) ? entry[0] : entry;
+            const proposer = Array.isArray(entry) ? entry[entry.length - 1] : null;
+            let deposit = 0, seconds = 0;
+            try {
+                const depOpt = await dem.depositOf(propIndex);
+                if (depOpt && depOpt.isSome) {
+                    const depJson = depOpt.unwrap().toJSON();
+                    if (Array.isArray(depJson[0])) { seconds = depJson[0].length; deposit = balanceToPDEX(depJson[1]); }
+                    else { deposit = balanceToPDEX(depJson[0]); seconds = Array.isArray(depJson[1]) ? depJson[1].length : 0; }
+                }
+            } catch (e) { }
+            let proposerName = 'Unknown';
+            if (proposer) { try { proposerName = await getIdentity(globalApi, proposer); } catch (e) { } }
+            publicProposals.push({ index: propIndex, proposer, proposerName, deposit, seconds });
+        }
+
+        // Current external proposal.
+        let externalProposal = null;
+        if (nextExternalRaw && nextExternalRaw.isSome) {
+            const ext = nextExternalRaw.unwrap();
+            externalProposal = {
+                proposal: ext[0] ? ext[0].toString().slice(0, 66) : null,
+                threshold: ext[1] ? ext[1].toString() : null
+            };
+        }
+
+        // Referenda — index new/ongoing ones; finalised ones with a known tally are skipped.
+        const existing = {};
+        for (const r of db.getDemocracyReferenda()) existing[r.refIndex] = r;
+        let activeReferenda = 0;
+        for (let i = 0; i < referendumCount; i++) {
+            const prev = existing[i];
+            if (prev && prev.status !== 'Ongoing' && prev.tallyKnown) continue;
+            let info;
+            try { info = await dem.referendumInfoOf(i); } catch (e) { continue; }
+            if (!info || info.isNone) continue;
+            const r = info.unwrap();
+            if (r.isOngoing) {
+                activeReferenda++;
+                const s = r.asOngoing;
+                db.upsertDemocracyReferendum({
+                    refIndex: i, status: 'Ongoing', endBlock: s.end.toNumber(),
+                    ayes: balanceToPDEX(s.tally.ayes), nays: balanceToPDEX(s.tally.nays), turnout: balanceToPDEX(s.tally.turnout),
+                    tallyKnown: 1,
+                    proposal: s.proposal ? s.proposal.toString().slice(0, 66) : null,
+                    threshold: s.threshold ? s.threshold.toString() : null
+                });
+            } else if (r.isFinished) {
+                const f = r.asFinished;
+                const status = f.approved.isTrue ? 'Passed' : 'NotPassed';
+                const endBlock = f.end.toNumber();
+                let ayes = prev ? prev.ayes : null;
+                let nays = prev ? prev.nays : null;
+                let turnout = prev ? prev.turnout : null;
+                let tallyKnown = (prev && prev.tallyKnown) ? 1 : 0;
+                // Recover the final tally from historical state (archive nodes only).
+                if (!tallyKnown) {
+                    try {
+                        const histHash = await globalApi.rpc.chain.getBlockHash(Math.max(endBlock - 1, 0));
+                        const histInfo = await dem.referendumInfoOf.at(histHash, i);
+                        if (histInfo && histInfo.isSome && histInfo.unwrap().isOngoing) {
+                            const hs = histInfo.unwrap().asOngoing;
+                            ayes = balanceToPDEX(hs.tally.ayes);
+                            nays = balanceToPDEX(hs.tally.nays);
+                            turnout = balanceToPDEX(hs.tally.turnout);
+                            tallyKnown = 1;
+                        }
+                    } catch (e) { /* node is not an archive — tally remains unknown */ }
+                }
+                db.upsertDemocracyReferendum({
+                    refIndex: i, status, endBlock, ayes, nays, turnout, tallyKnown,
+                    proposal: prev ? prev.proposal : null, threshold: prev ? prev.threshold : null
+                });
+            }
+        }
+
+        reconcileProposalThreads(publicProposals);
+
+        db.setKv('democracy_meta', {
+            referendumCount, publicPropCount, launchPeriod, currentBlock, totalIssuance,
+            lowestUnbaked: lowestUnbakedRaw ? lowestUnbakedRaw.toNumber() : 0,
+            activeReferenda, activeProposals: publicProposals.length,
+            publicProposals, externalProposal, lastSync: Date.now()
+        });
+        db.setSyncState('democracy', { lastSync: Date.now(), status: 'Synced' });
+        console.log(`Democracy indexer: ${referendumCount} referenda, ${publicProposals.length} active proposals.`);
+    } catch (err) {
+        console.error('Democracy sync error:', err);
+        db.setSyncState('democracy', { ...db.getSyncState('democracy'), status: 'Error', error: err.message });
+    } finally {
+        isSyncingDemocracy = false;
     }
 }
 
@@ -1566,6 +1870,7 @@ async function start() {
     syncStakingRewards();
     syncPrice();
     syncCouncil();
+    syncDemocracy();
 
     // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
     setInterval(() => {
@@ -1575,6 +1880,7 @@ async function start() {
     }, RECENT_SYNC_INTERVAL);
     setInterval(syncHolders, THIRTY_MINUTES);
     setInterval(syncCouncil, FIVE_MINUTES);
+    setInterval(syncDemocracy, FIVE_MINUTES);
     setInterval(syncTransactions, THIRTY_SECONDS);
     // Staking rewards indexer: continuously appends new payouts each era and
     // resumably backfills older history.

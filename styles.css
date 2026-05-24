@@ -1370,3 +1370,69 @@ h1, h2, h3 { font-weight: 600; }
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 .data-table tbody tr:hover td { background: rgba(255, 255, 255, 0.03); }
+
+/* --- Discussion board --- */
+.discussion-thread-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    text-decoration: none;
+    transition: background var(--transition-fast);
+}
+.discussion-thread-row:last-child { border-bottom: none; }
+.discussion-thread-row:hover { background: rgba(255, 255, 255, 0.03); }
+.discussion-thread-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.discussion-thread-title { color: var(--text-primary); font-weight: 600; font-size: 0.9rem; }
+.discussion-thread-meta { color: var(--text-muted); font-size: 0.76rem; }
+.discussion-posts { display: flex; flex-direction: column; }
+.discussion-post {
+    padding: 16px 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.discussion-post:last-child { border-bottom: none; }
+.discussion-post-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.discussion-post-body {
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.6;
+    word-break: break-word;
+}
+.discussion-composer {
+    padding: 18px 24px 22px;
+    border-top: 1px solid var(--border-color);
+}
+.discussion-textarea {
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    padding: 12px 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+.discussion-textarea:focus { outline: none; border-color: var(--border-hover); }
+.discussion-closed-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 18px 24px 22px;
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 0.84rem;
+}
