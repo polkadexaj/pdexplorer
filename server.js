@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import { decodeAddress, encodeAddress, signatureVerify, randomAsHex } from '@polkadot/util-crypto';
-import { u8aWrapBytes } from '@polkadot/util';
+import { u8aWrapBytes, stringToU8a, u8aConcat } from '@polkadot/util';
 import path from 'path';
 import * as db from './db.js';
 
@@ -43,6 +43,9 @@ const DISPLAY_NAME_OVERRIDES = new Map([
     ['esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew', 'Polkadex Treasury'],
     ['esm4teFDTrvy4VJ8msKTQmAywumeinGjzsrFzmTEB5FBiiekE', 'Gate.IO']
 ]);
+// Known Polkadex mainnet treasury account — used as a fallback if the
+// pallet-id derivation is unavailable on the connected runtime.
+const TREASURY_ACCOUNT = process.env.TREASURY_ACCOUNT || 'esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew';
 
 let isSyncing = false;
 let isSyncingHolders = false;
@@ -1222,19 +1225,34 @@ async function syncTreasury() {
         // Sort proposals descending by ID
         proposals.sort((a, b) => b.id - a.id);
 
+        // Treasury balance. Try the pallet-id derived account (modl + palletId
+        // + zero padding) and the known mainnet treasury address, then take the
+        // funded one. The candidates resolve to the same account when the
+        // derivation succeeds; the fallback covers runtimes that don't expose
+        // treasury.palletId as a const.
         let spendableFunds = 0;
-        if (globalApi.consts.treasury.palletId) {
-            const { stringToU8a, u8aConcat } = require('@polkadot/util');
-            const { encodeAddress } = require('@polkadot/util-crypto');
-            const palletId = globalApi.consts.treasury.palletId.toU8a();
-            const treasuryAccountU8a = u8aConcat(
-                stringToU8a('modl'),
-                palletId,
-                new Uint8Array(32)
-            ).slice(0, 32);
-            const treasuryAddress = encodeAddress(treasuryAccountU8a, chainSS58);
-            const accountData = await globalApi.query.system.account(treasuryAddress);
-            spendableFunds = balanceToPDEX(accountData.data.free);
+        try {
+            const candidates = [];
+            if (globalApi.consts.treasury && globalApi.consts.treasury.palletId) {
+                const palletId = globalApi.consts.treasury.palletId.toU8a();
+                const treasuryAccountU8a = u8aConcat(
+                    stringToU8a('modl'),
+                    palletId,
+                    new Uint8Array(32)
+                ).slice(0, 32);
+                candidates.push(encodeAddress(treasuryAccountU8a, chainSS58));
+            }
+            if (TREASURY_ACCOUNT) candidates.push(TREASURY_ACCOUNT);
+
+            for (const addr of candidates) {
+                try {
+                    const accountData = await globalApi.query.system.account(addr);
+                    const free = balanceToPDEX(accountData.data.free);
+                    if (free > spendableFunds) spendableFunds = free;
+                } catch (e) { /* try the next candidate */ }
+            }
+        } catch (e) {
+            console.warn('Treasury balance lookup failed:', e.message);
         }
 
         db.setKv('treasury', {
