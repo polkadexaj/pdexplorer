@@ -161,6 +161,40 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   created_at INTEGER,
   expires_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS treasury_proposals (
+  id INTEGER PRIMARY KEY,
+  proposer TEXT,
+  proposer_name TEXT,
+  beneficiary TEXT,
+  beneficiary_name TEXT,
+  value REAL,
+  bond REAL,
+  status TEXT,
+  proposed_block INTEGER,
+  proposed_at INTEGER,
+  resolved_block INTEGER,
+  resolved_at INTEGER,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_treasury_status ON treasury_proposals(status);
+CREATE TABLE IF NOT EXISTS council_motions (
+  hash TEXT PRIMARY KEY,
+  motion_index INTEGER,
+  proposer TEXT,
+  proposer_name TEXT,
+  section TEXT,
+  method TEXT,
+  threshold INTEGER,
+  status TEXT,
+  ayes INTEGER,
+  nays INTEGER,
+  proposed_block INTEGER,
+  proposed_at INTEGER,
+  resolved_block INTEGER,
+  resolved_at INTEGER,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_motions_index ON council_motions(motion_index DESC);
 `;
 
 export function initDb(dataDir) {
@@ -466,6 +500,90 @@ export function getSession(token) {
 }
 export function deleteSession(token) {
     db.prepare('DELETE FROM auth_sessions WHERE token = ?').run(token);
+}
+
+// --- treasury proposals (full history, crawled from chain events) ---
+// Status ranks ensure a partial update never downgrades a resolved proposal
+// (e.g. a backfilled "proposed" event must not overwrite an "awarded" status).
+const TREASURY_STATUS_RANK = { proposed: 0, approved: 1, awarded: 2, rejected: 2 };
+export function upsertTreasuryProposal(p) {
+    if (p == null || p.id == null) return;
+    const ex = db.prepare('SELECT proposer,proposer_name,beneficiary,beneficiary_name,value,bond,status,proposed_block,proposed_at,resolved_block,resolved_at FROM treasury_proposals WHERE id = ?').get(p.id);
+    const keep = (v, old) => (v !== undefined && v !== null) ? v : (ex ? old : null);
+    let status = ex ? ex.status : null;
+    if (p.status) {
+        const newRank = TREASURY_STATUS_RANK[p.status] ?? 0;
+        const oldRank = status ? (TREASURY_STATUS_RANK[status] ?? 0) : -1;
+        if (newRank >= oldRank) status = p.status;
+    }
+    db.prepare(`INSERT OR REPLACE INTO treasury_proposals
+        (id,proposer,proposer_name,beneficiary,beneficiary_name,value,bond,status,proposed_block,proposed_at,resolved_block,resolved_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        p.id,
+        keep(p.proposer, ex && ex.proposer),
+        keep(p.proposerName, ex && ex.proposer_name),
+        keep(p.beneficiary, ex && ex.beneficiary),
+        keep(p.beneficiaryName, ex && ex.beneficiary_name),
+        keep(p.value, ex && ex.value),
+        keep(p.bond, ex && ex.bond),
+        status,
+        keep(p.proposedBlock, ex && ex.proposed_block),
+        keep(p.proposedAt, ex && ex.proposed_at),
+        keep(p.resolvedBlock, ex && ex.resolved_block),
+        keep(p.resolvedAt, ex && ex.resolved_at),
+        Date.now()
+    );
+}
+export function getTreasuryProposals() {
+    return db.prepare(`SELECT id, proposer, proposer_name AS proposerName, beneficiary, beneficiary_name AS beneficiaryName,
+        value, bond, status, proposed_block AS proposedBlock, proposed_at AS proposedAt,
+        resolved_block AS resolvedBlock, resolved_at AS resolvedAt
+        FROM treasury_proposals ORDER BY id DESC`).all();
+}
+export function countTreasuryProposals() {
+    return db.prepare('SELECT COUNT(*) AS c FROM treasury_proposals').get().c;
+}
+
+// --- council motions (full history, crawled from chain events) ---
+const MOTION_STATUS_RANK = { proposed: 0, closed: 1, approved: 2, disapproved: 2, executed: 3 };
+export function upsertCouncilMotion(m) {
+    if (m == null || !m.hash) return;
+    const ex = db.prepare('SELECT motion_index,proposer,proposer_name,section,method,threshold,status,ayes,nays,proposed_block,proposed_at,resolved_block,resolved_at FROM council_motions WHERE hash = ?').get(m.hash);
+    const keep = (v, old) => (v !== undefined && v !== null) ? v : (ex ? old : null);
+    let status = ex ? ex.status : null;
+    if (m.status) {
+        const newRank = MOTION_STATUS_RANK[m.status] ?? 0;
+        const oldRank = status ? (MOTION_STATUS_RANK[status] ?? 0) : -1;
+        if (newRank >= oldRank) status = m.status;
+    }
+    db.prepare(`INSERT OR REPLACE INTO council_motions
+        (hash,motion_index,proposer,proposer_name,section,method,threshold,status,ayes,nays,proposed_block,proposed_at,resolved_block,resolved_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        m.hash,
+        keep(m.motionIndex, ex && ex.motion_index),
+        keep(m.proposer, ex && ex.proposer),
+        keep(m.proposerName, ex && ex.proposer_name),
+        keep(m.section, ex && ex.section),
+        keep(m.method, ex && ex.method),
+        keep(m.threshold, ex && ex.threshold),
+        status,
+        keep(m.ayes, ex && ex.ayes),
+        keep(m.nays, ex && ex.nays),
+        keep(m.proposedBlock, ex && ex.proposed_block),
+        keep(m.proposedAt, ex && ex.proposed_at),
+        keep(m.resolvedBlock, ex && ex.resolved_block),
+        keep(m.resolvedAt, ex && ex.resolved_at),
+        Date.now()
+    );
+}
+export function getCouncilMotions() {
+    return db.prepare(`SELECT hash, motion_index AS motionIndex, proposer, proposer_name AS proposerName,
+        section, method, threshold, status, ayes, nays, proposed_block AS proposedBlock, proposed_at AS proposedAt,
+        resolved_block AS resolvedBlock, resolved_at AS resolvedAt
+        FROM council_motions ORDER BY motion_index DESC`).all();
+}
+export function countCouncilMotions() {
+    return db.prepare('SELECT COUNT(*) AS c FROM council_motions').get().c;
 }
 
 // --- one-time migration of legacy JSON caches ---

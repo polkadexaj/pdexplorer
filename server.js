@@ -29,6 +29,11 @@ const STAKING_REWARDS_SCAN_BATCH = readPositiveInteger(process.env.STAKING_REWAR
 const STAKING_REWARDS_BACKFILL_CHUNK = readPositiveInteger(process.env.STAKING_REWARDS_BACKFILL_CHUNK, 500);
 const STAKING_REWARDS_FORWARD_MAX = readPositiveInteger(process.env.STAKING_REWARDS_FORWARD_MAX, 20000);
 const STAKING_REWARDS_MIN_BLOCK = readPositiveInteger(process.env.STAKING_REWARDS_MIN_BLOCK, 1);
+// Governance history crawler (treasury proposals + council motions).
+const GOV_SCAN_BATCH = readPositiveInteger(process.env.GOV_SCAN_BATCH, 50);
+const GOV_BACKFILL_CHUNK = readPositiveInteger(process.env.GOV_BACKFILL_CHUNK, 1000);
+const GOV_FORWARD_MAX = readPositiveInteger(process.env.GOV_FORWARD_MAX, 50000);
+const GOV_MIN_BLOCK = readPositiveInteger(process.env.GOV_MIN_BLOCK, 1);
 // Wallet dashboard / price chart / unpaid-reward tuning.
 const CMC_API_KEY = process.env.CMC_API_KEY || '';
 const CMC_SYMBOL = process.env.CMC_SYMBOL || 'PDEX';
@@ -49,6 +54,7 @@ let isSyncingPrice = false;
 let isSyncingCouncil = false;
 let isSyncingDemocracy = false;
 let isSyncingTreasury = false;
+let isSyncingGovernance = false;
 const computingUnclaimed = new Set();
 let isCrawlingAccount = {};
 let globalApi = null;
@@ -866,9 +872,23 @@ app.get('/api/price-history', (req, res) => {
 });
 
 // --- WALLET DASHBOARD ENDPOINT ---
+// Summarize the governance crawler progress for the frontend.
+function governanceHistoryMeta() {
+    const s = db.getSyncState('governance');
+    return {
+        status: s.status || 'Initializing',
+        backfillComplete: !!s.backfillComplete,
+        oldestScannedBlock: Number(s.oldestScannedBlock) || 0,
+        latestScannedBlock: Number(s.latestScannedBlock) || 0,
+        lastSync: s.lastSync || 0
+    };
+}
+
 app.get('/api/council', (req, res) => {
     try {
         const data = db.getKv('council') || { members: [], runnersUp: [], candidates: [], motions: [], blocksRemaining: 0, termDuration: 0, desiredMembers: 0, desiredRunnersUp: 0, collectivePallet: null };
+        data.motionHistory = db.getCouncilMotions();
+        data.history = governanceHistoryMeta();
         res.json(data);
     } catch (err) {
         console.error('API Error /api/council:', err);
@@ -878,15 +898,17 @@ app.get('/api/council', (req, res) => {
 
 app.get('/api/treasury', (req, res) => {
     try {
-        const data = db.getKv('treasury') || { 
-            proposals: [], 
-            approvals: [], 
-            spendPeriod: 0, 
-            burn: 0, 
-            blocksRemaining: 0, 
+        const data = db.getKv('treasury') || {
+            proposals: [],
+            approvals: [],
+            spendPeriod: 0,
+            burn: 0,
+            blocksRemaining: 0,
             spendableFunds: 0,
             proposalCount: 0
         };
+        data.allProposals = db.getTreasuryProposals();
+        data.history = governanceHistoryMeta();
         res.json(data);
     } catch (err) {
         console.error('API Error /api/treasury:', err);
@@ -1224,6 +1246,22 @@ async function syncTreasury() {
             spendableFunds,
             proposalCount: proposalCountOpt.toNumber()
         });
+
+        // Keep the persistent proposal history fresh with the live open/approved
+        // proposals. Resolved (paid/rejected) ones are filled in by syncGovernance.
+        const approvedSet = new Set(approvedProposalIds);
+        for (const p of proposals) {
+            db.upsertTreasuryProposal({
+                id: p.id,
+                proposer: p.proposer,
+                proposerName: p.proposerName,
+                beneficiary: p.beneficiary,
+                beneficiaryName: p.beneficiaryName,
+                value: p.value,
+                bond: p.bond,
+                status: approvedSet.has(p.id) ? 'approved' : 'proposed'
+            });
+        }
         db.setSyncState('treasury', { lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
         console.error('Error syncing treasury:', err.message);
@@ -1378,10 +1416,254 @@ async function syncCouncil() {
         db.setKv('council', councilData);
         db.setSyncState('council', { lastSync: Date.now(), status: 'Synced' });
         reconcileMotionThreads(motions);
+
+        // Keep the persistent motions history fresh with the live open motions.
+        for (const m of motions) {
+            db.upsertCouncilMotion({
+                hash: m.hash,
+                motionIndex: m.index,
+                section: m.section || null,
+                method: m.method || null,
+                threshold: m.threshold || null,
+                ayes: (m.ayes || []).length,
+                nays: (m.nays || []).length,
+                status: 'proposed'
+            });
+        }
     } catch (err) {
         console.error('Council sync error:', err);
     } finally {
         isSyncingCouncil = false;
+    }
+}
+
+// --- Governance history crawler ---------------------------------------------
+// Treasury proposals and council motions are removed from chain storage once
+// they resolve (paid out / rejected / closed), so the live syncs only ever see
+// the open ones. This crawler walks block events — a forward pass for new
+// blocks plus a resumable backfill toward genesis — and indexes every
+// proposal/motion lifecycle event into SQLite so the full history survives.
+
+// Flatten an event's data into positional + named lookups.
+function govEventFields(ev) {
+    const data = ev.data;
+    const names = data.names || null;
+    const out = {};
+    for (let i = 0; i < data.length; i++) {
+        out[i] = data[i];
+        if (names && names[i]) out[names[i]] = data[i];
+    }
+    return out;
+}
+function govNum(x) {
+    if (x === undefined || x === null) return null;
+    try { if (typeof x.toNumber === 'function') return x.toNumber(); } catch (e) { }
+    try { const n = Number(x.toString()); return Number.isFinite(n) ? n : null; } catch (e) { }
+    return null;
+}
+function govStr(x) {
+    if (x === undefined || x === null) return null;
+    try { return x.toString(); } catch (e) { return null; }
+}
+
+// Scan one block's events for governance activity. Returns null when the block
+// has none (the overwhelming majority), so the extra block/storage reads only
+// happen on the rare blocks that matter.
+async function scanBlockForGovernance(blockNumber, collectiveName) {
+    try {
+        const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+        const events = await globalApi.query.system.events.at(blockHash);
+
+        const TREASURY_METHODS = ['Proposed', 'Awarded', 'Rejected', 'SpendApproved'];
+        const COLLECTIVE_METHODS = ['Proposed', 'Closed', 'Approved', 'Disapproved', 'Executed', 'MemberExecuted'];
+        const relevant = [];
+        events.forEach((record) => {
+            const ev = record.event;
+            if (ev.section === 'treasury' && TREASURY_METHODS.includes(ev.method)) relevant.push(ev);
+            else if (ev.section === collectiveName && COLLECTIVE_METHODS.includes(ev.method)) relevant.push(ev);
+        });
+        if (!relevant.length) return null;
+
+        const timestamp = await getBlockTimestampAt(blockHash);
+        const treasury = [];
+        const motions = [];
+
+        for (const ev of relevant) {
+            const f = govEventFields(ev);
+            if (ev.section === 'treasury') {
+                const id = govNum(f.proposalIndex ?? f.index ?? f[0]);
+                if (id === null) continue;
+                if (ev.method === 'Proposed') {
+                    const rec = { id, status: 'proposed', proposedBlock: blockNumber, proposedAt: timestamp };
+                    try {
+                        const opt = await globalApi.query.treasury.proposals.at(blockHash, id);
+                        if (opt && opt.isSome) {
+                            const pr = opt.unwrap();
+                            rec.proposer = pr.proposer.toString();
+                            rec.beneficiary = pr.beneficiary.toString();
+                            rec.value = balanceToPDEX(pr.value);
+                            rec.bond = balanceToPDEX(pr.bond);
+                        }
+                    } catch (e) { }
+                    treasury.push(rec);
+                } else if (ev.method === 'Awarded') {
+                    treasury.push({ id, status: 'awarded', resolvedBlock: blockNumber, resolvedAt: timestamp });
+                } else if (ev.method === 'Rejected') {
+                    treasury.push({ id, status: 'rejected', resolvedBlock: blockNumber, resolvedAt: timestamp });
+                } else if (ev.method === 'SpendApproved') {
+                    treasury.push({ id, status: 'approved' });
+                }
+            } else {
+                // Collective (council) motion events.
+                if (ev.method === 'Proposed') {
+                    const hash = govStr(f.proposalHash ?? f[2]);
+                    if (!hash) continue;
+                    const rec = {
+                        hash,
+                        motionIndex: govNum(f.proposalIndex ?? f[1]),
+                        proposer: govStr(f.account ?? f[0]),
+                        threshold: govNum(f.threshold ?? f[3]),
+                        status: 'proposed',
+                        proposedBlock: blockNumber,
+                        proposedAt: timestamp
+                    };
+                    try {
+                        const opt = await globalApi.query[collectiveName].proposalOf.at(blockHash, hash);
+                        if (opt && opt.isSome) {
+                            const call = opt.unwrap();
+                            rec.section = String(call.section);
+                            rec.method = String(call.method);
+                        }
+                    } catch (e) { }
+                    motions.push(rec);
+                } else {
+                    const hash = govStr(f.proposalHash ?? f[0]);
+                    if (!hash) continue;
+                    if (ev.method === 'Closed') {
+                        motions.push({ hash, status: 'closed', ayes: govNum(f.yes ?? f[1]), nays: govNum(f.no ?? f[2]), resolvedBlock: blockNumber, resolvedAt: timestamp });
+                    } else if (ev.method === 'Approved') {
+                        motions.push({ hash, status: 'approved', resolvedBlock: blockNumber, resolvedAt: timestamp });
+                    } else if (ev.method === 'Disapproved') {
+                        motions.push({ hash, status: 'disapproved', resolvedBlock: blockNumber, resolvedAt: timestamp });
+                    } else if (ev.method === 'Executed' || ev.method === 'MemberExecuted') {
+                        motions.push({ hash, status: 'executed', resolvedBlock: blockNumber, resolvedAt: timestamp });
+                    }
+                }
+            }
+        }
+        return { treasury, motions };
+    } catch (err) {
+        console.warn(`Governance scan skipped block ${blockNumber}:`, err.message);
+        return null;
+    }
+}
+
+// Scan a descending block range in concurrent batches.
+async function scanGovernanceRange({ startBlock, stopBlock, maxBlocks, collectiveName }) {
+    const treasury = [];
+    const motions = [];
+    let scanned = 0;
+    let oldest = startBlock;
+    for (let next = startBlock; next >= stopBlock && scanned < maxBlocks;) {
+        const nums = [];
+        while (next >= stopBlock && nums.length < GOV_SCAN_BATCH && scanned + nums.length < maxBlocks) {
+            nums.push(next);
+            next--;
+        }
+        if (!nums.length) break;
+        const results = await Promise.all(nums.map(b => scanBlockForGovernance(b, collectiveName)));
+        scanned += nums.length;
+        oldest = nums[nums.length - 1];
+        for (const r of results) {
+            if (!r) continue;
+            for (const t of r.treasury) treasury.push(t);
+            for (const m of r.motions) motions.push(m);
+        }
+    }
+    return { treasury, motions, scanned, oldest };
+}
+
+// Resolve identities and persist a batch of scanned governance records.
+async function applyGovernanceRecords(treasury, motions) {
+    for (const t of treasury) {
+        if (t.proposer && !t.proposerName) { try { t.proposerName = await getIdentity(globalApi, t.proposer); } catch (e) { } }
+        if (t.beneficiary && !t.beneficiaryName) { try { t.beneficiaryName = await getIdentity(globalApi, t.beneficiary); } catch (e) { } }
+        db.upsertTreasuryProposal(t);
+    }
+    for (const m of motions) {
+        if (m.proposer && !m.proposerName) { try { m.proposerName = await getIdentity(globalApi, m.proposer); } catch (e) { } }
+        db.upsertCouncilMotion(m);
+    }
+}
+
+// One crawl pass: index new blocks (forward) and walk a resumable chunk of
+// older history (backfill).
+async function syncGovernance() {
+    if (isSyncingGovernance || !globalApi) return;
+    isSyncingGovernance = true;
+    try {
+        const collectiveName = ['council', 'councilCollective', 'generalCouncil']
+            .find(n => globalApi.query[n] && globalApi.query[n].proposalOf) || 'council';
+
+        const state = db.getSyncState('governance');
+        const head = (await globalApi.rpc.chain.getHeader()).number.toNumber();
+
+        let initialized = !!state.initialized;
+        let latestScannedBlock = Number(state.latestScannedBlock) || 0;
+        let oldestScannedBlock = Number(state.oldestScannedBlock) || 0;
+        let backfillCursor = Number(state.backfillCursor) || 0;
+        let backfillComplete = !!state.backfillComplete;
+
+        if (!initialized) {
+            initialized = true;
+            latestScannedBlock = head;
+            oldestScannedBlock = head;
+            backfillCursor = head - 1;
+            backfillComplete = (head - 1) < GOV_MIN_BLOCK;
+        }
+
+        // FORWARD PASS — blocks produced since the previous crawl.
+        if (head > latestScannedBlock) {
+            const fwd = await scanGovernanceRange({
+                startBlock: head,
+                stopBlock: latestScannedBlock + 1,
+                maxBlocks: GOV_FORWARD_MAX,
+                collectiveName
+            });
+            await applyGovernanceRecords(fwd.treasury, fwd.motions);
+            latestScannedBlock = head;
+            db.setSyncState('governance', { initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete, lastSync: Date.now(), status: 'Backfilling' });
+        }
+
+        // BACKFILL PASS — one resumable chunk further down the chain.
+        if (!backfillComplete) {
+            if (backfillCursor >= GOV_MIN_BLOCK) {
+                const stop = Math.max(backfillCursor - GOV_BACKFILL_CHUNK + 1, GOV_MIN_BLOCK);
+                const bf = await scanGovernanceRange({
+                    startBlock: backfillCursor,
+                    stopBlock: stop,
+                    maxBlocks: GOV_BACKFILL_CHUNK,
+                    collectiveName
+                });
+                await applyGovernanceRecords(bf.treasury, bf.motions);
+                oldestScannedBlock = Math.min(oldestScannedBlock || backfillCursor, bf.oldest);
+                backfillCursor = bf.oldest - 1;
+                if (backfillCursor < GOV_MIN_BLOCK) backfillComplete = true;
+            } else {
+                backfillComplete = true;
+            }
+        }
+
+        db.setSyncState('governance', {
+            initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete,
+            lastSync: Date.now(), status: backfillComplete ? 'Synced' : 'Backfilling'
+        });
+        console.log(`Governance indexer: blocks ${oldestScannedBlock}-${latestScannedBlock}, ${db.countTreasuryProposals()} treasury proposals, ${db.countCouncilMotions()} motions, backfill ${backfillComplete ? 'complete' : 'in progress'}.`);
+    } catch (err) {
+        console.error('Governance sync error:', err.message);
+        db.setSyncState('governance', { ...db.getSyncState('governance'), status: 'Error', error: err.message });
+    } finally {
+        isSyncingGovernance = false;
     }
 }
 
@@ -2025,7 +2307,9 @@ async function start() {
     syncStakingRewards();
     syncPrice();
     syncCouncil();
+    syncTreasury();
     syncDemocracy();
+    syncGovernance();
 
     // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
     setInterval(() => {
@@ -2041,6 +2325,9 @@ async function start() {
     // Staking rewards indexer: continuously appends new payouts each era and
     // resumably backfills older history.
     setInterval(syncStakingRewards, THIRTY_SECONDS);
+    // Governance history indexer: forward pass for new blocks + resumable
+    // backfill of treasury proposals and council motions toward genesis.
+    setInterval(syncGovernance, THIRTY_SECONDS);
     setInterval(syncPrice, PRICE_SYNC_INTERVAL);
 }
 

@@ -3051,7 +3051,10 @@ function renderCouncilMotions(data) {
         </div>`;
 
     if (!motions.length) {
-        root.innerHTML = summary + '<div style="padding:32px;text-align:center;color:var(--text-muted);">No motions are currently open before the council.</div>';
+        root.innerHTML = summary
+            + governanceIndexNote(data.history, 'motions')
+            + '<div style="padding:28px;text-align:center;color:var(--text-muted);">No motions are currently open before the council.</div>'
+            + renderResolvedMotions(data);
         return;
     }
 
@@ -3115,11 +3118,51 @@ function renderCouncilMotions(data) {
         </div>`;
     }).join('');
 
-    root.innerHTML = summary + roleNote + '<div class="motion-list">' + cards + '</div>';
+    root.innerHTML = summary + governanceIndexNote(data.history, 'motions') + roleNote
+        + '<div class="motion-list">' + cards + '</div>'
+        + renderResolvedMotions(data);
 
     root.querySelectorAll('.motion-aye-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), true)));
     root.querySelectorAll('.motion-nay-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), false)));
     root.querySelectorAll('.motion-close-btn').forEach(b => b.addEventListener('click', () => councilMotionClose(b.getAttribute('data-hash'), b.getAttribute('data-index'))));
+}
+
+// Resolved (historical) council motions, crawled from chain events.
+function resolvedMotionBadge(status) {
+    if (status === 'executed') return '<span class="reward-badge claimed">Executed</span>';
+    if (status === 'approved') return '<span class="reward-badge claimed">Approved</span>';
+    if (status === 'disapproved') return '<span class="reward-badge unclaimed">Disapproved</span>';
+    return '<span class="reward-badge neutral">Closed</span>';
+}
+
+function renderResolvedMotions(data) {
+    const history = Array.isArray(data.motionHistory) ? data.motionHistory : [];
+    const resolved = history.filter(m => m.status && m.status !== 'proposed');
+    if (!resolved.length) return '';
+    const rows = resolved.map(m => {
+        const idx = (m.motionIndex === null || m.motionIndex === undefined) ? '—' : ('#' + m.motionIndex);
+        const call = (m.section && m.method) ? `${m.section}.${m.method}` : 'Council Motion';
+        const proposer = m.proposer
+            ? `<a href="#account/${encodeURIComponent(m.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(m.proposerName, m.proposer))}</a>`
+            : '<span style="color:var(--text-muted);">—</span>';
+        const tally = (m.ayes == null && m.nays == null) ? '—' : `${m.ayes || 0} / ${m.nays || 0}`;
+        return `<tr>
+            <td>${idx}</td>
+            <td><span class="motion-title" style="font-size:0.82rem;">${stakingEscapeHtml(call)}</span></td>
+            <td>${proposer}</td>
+            <td style="text-align:right;">${m.threshold == null ? '—' : m.threshold}</td>
+            <td style="text-align:right;">${tally}</td>
+            <td style="text-align:right;">${stakingFormatNumber(m.resolvedBlock)}</td>
+            <td style="text-align:right;">${resolvedMotionBadge(m.status)}</td>
+        </tr>`;
+    }).join('');
+    return `<div style="margin-top:26px;">
+        <h3 style="font-size:0.95rem;color:var(--text-primary);margin-bottom:12px;">Resolved Motions <span style="color:var(--text-muted);font-weight:400;font-size:0.8rem;">(${resolved.length})</span></h3>
+        <div class="table-responsive"><table class="data-table">
+            <thead><tr><th>Motion</th><th>Call</th><th>Proposer</th><th style="text-align:right;">Threshold</th><th style="text-align:right;">Ayes / Nays</th><th style="text-align:right;">Resolved Block</th><th style="text-align:right;">Outcome</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table></div>
+    </div>`;
 }
 
 function councilMotionVote(hash, index, approve) {
@@ -3384,17 +3427,17 @@ function renderTreasury() {
     const root = document.getElementById('treasury-content');
     if (!root || !treasuryData) return;
     const d = treasuryData;
-    const proposals = Array.isArray(d.proposals) ? d.proposals : [];
-    const approvals = Array.isArray(d.approvals) ? d.approvals : [];
-    const approvedSet = new Set(approvals);
-    const openProposals = proposals.filter(p => !approvedSet.has(p.id));
-    const approvedProposals = approvals.map(id => proposals.find(p => p.id === id)).filter(Boolean);
+    const all = Array.isArray(d.allProposals) ? d.allProposals : [];
+    const openProposals = all.filter(p => p.status === 'proposed');
+    const approvedProposals = all.filter(p => p.status === 'approved');
+    const historyProposals = all.filter(p => p.status === 'awarded' || p.status === 'rejected');
 
     const tabBtn = (key, label) => `<button class="account-tab${treasuryTab === key ? ' active' : ''}" data-treastab="${key}">${label}</button>`;
     let body;
     if (treasuryTab === 'proposals') body = renderTreasuryProposals(openProposals);
-    else if (treasuryTab === 'approved') body = renderTreasuryApproved(approvedProposals, approvals);
-    else body = renderTreasuryOverview(d, openProposals.length, approvedProposals.length);
+    else if (treasuryTab === 'approved') body = renderTreasuryApproved(approvedProposals);
+    else if (treasuryTab === 'history') body = renderTreasuryHistory(historyProposals);
+    else body = renderTreasuryOverview(d, openProposals.length, approvedProposals.length, historyProposals);
 
     root.innerHTML = `
         <div class="list-container glass">
@@ -3406,9 +3449,9 @@ function renderTreasury() {
                 </div>
             </div>
             <div class="account-tabs" style="margin:0 24px;">
-                ${tabBtn('overview', 'Overview')}${tabBtn('proposals', 'Open Proposals')}${tabBtn('approved', 'Approved')}
+                ${tabBtn('overview', 'Overview')}${tabBtn('proposals', `Open (${openProposals.length})`)}${tabBtn('approved', `Approved (${approvedProposals.length})`)}${tabBtn('history', `History (${historyProposals.length})`)}
             </div>
-            <div style="padding:24px;">${body}</div>
+            <div style="padding:24px;">${governanceIndexNote(d.history, 'proposals')}${body}</div>
         </div>`;
 
     root.querySelectorAll('[data-treastab]').forEach(btn => {
@@ -3418,7 +3461,13 @@ function renderTreasury() {
     if (submitBtn) submitBtn.addEventListener('click', openTreasurySubmitModal);
 }
 
-function renderTreasuryOverview(d, openCount, approvedCount) {
+// Banner shown while the governance history crawler is still backfilling.
+function governanceIndexNote(history, noun) {
+    if (!history || history.backfillComplete || !history.status || history.status === 'Initializing') return '';
+    return `<div class="gov-index-note"><i class='bx bx-loader-alt bx-spin'></i> Indexing past ${noun} from chain history — scanned back to block ${stakingFormatNumber(history.oldestScannedBlock)}. Older ${noun} will keep appearing as the crawl progresses.</div>`;
+}
+
+function renderTreasuryOverview(d, openCount, approvedCount, historyList) {
     const spendable = Number(d.spendableFunds) || 0;
     const spendPeriod = Number(d.spendPeriod) || 0;
     const blocksRemaining = Number(d.blocksRemaining) || 0;
@@ -3430,39 +3479,53 @@ function renderTreasuryOverview(d, openCount, approvedCount) {
     const remHrs = Math.floor((remSecs % 86400) / 3600);
     const burnFraction = (Number(d.burn) || 0) / 1e6; // burn is a Permill
     const burnAmount = spendable * burnFraction;
+    const awardedCount = historyList.filter(p => p.status === 'awarded').length;
+    const rejectedCount = historyList.filter(p => p.status === 'rejected').length;
+    const indexed = (Array.isArray(d.allProposals) ? d.allProposals.length : 0);
     return `
         <div class="staking-summary-grid">
             <div class="staking-summary-card"><div class="label">Treasury Balance</div><div class="value accent">${stakingFormatPDEX(spendable)} PDEX</div></div>
             <div class="staking-summary-card"><div class="label">Open Proposals</div><div class="value">${stakingFormatNumber(openCount)}</div></div>
             <div class="staking-summary-card"><div class="label">Approved (awaiting payout)</div><div class="value">${stakingFormatNumber(approvedCount)}</div></div>
-            <div class="staking-summary-card"><div class="label">Next Burn</div><div class="value">${stakingFormatPDEX(burnAmount)} PDEX</div></div>
-            <div class="staking-summary-card"><div class="label">Spend Period</div><div class="value">${pct}%</div></div>
+            <div class="staking-summary-card"><div class="label">Paid Out</div><div class="value">${stakingFormatNumber(awardedCount)}</div></div>
+            <div class="staking-summary-card"><div class="label">Rejected</div><div class="value">${stakingFormatNumber(rejectedCount)}</div></div>
         </div>
         <div class="wallet-stat-list" style="padding:14px 0 0;">
-            <div class="wallet-stat"><span>Lifetime proposals</span><strong>${stakingFormatNumber(d.proposalCount)}</strong></div>
+            <div class="wallet-stat"><span>Lifetime proposals (on-chain counter)</span><strong>${stakingFormatNumber(d.proposalCount)}</strong></div>
+            <div class="wallet-stat"><span>Proposals indexed locally</span><strong>${stakingFormatNumber(indexed)}</strong></div>
+            <div class="wallet-stat"><span>Next burn</span><strong>${stakingFormatPDEX(burnAmount)} PDEX (${(burnFraction * 100).toFixed(2)}%)</strong></div>
             <div class="wallet-stat"><span>Spend period length</span><strong>${stakingFormatNumber(spendPeriod)} blocks</strong></div>
-            <div class="wallet-stat"><span>Next spend payout in</span><strong>~${remDays}d ${remHrs}h &middot; ${stakingFormatNumber(blocksRemaining)} blocks</strong></div>
-            <div class="wallet-stat"><span>Burn rate</span><strong>${(burnFraction * 100).toFixed(2)}% of spendable funds per period</strong></div>
+            <div class="wallet-stat"><span>Next spend payout in</span><strong>~${remDays}d ${remHrs}h &middot; ${stakingFormatNumber(blocksRemaining)} blocks (${pct}%)</strong></div>
         </div>`;
 }
 
 function treasuryPartyName(name, address) {
-    return (name && name !== 'Unknown' && name !== address) ? name : stakingShortAddress(address);
+    if (name && name !== 'Unknown' && name !== address) return name;
+    if (address) return stakingShortAddress(address);
+    return '—';
 }
 
-function renderTreasuryProposalRows(list, withStatus) {
-    return list.map(p => {
-        const ben = treasuryPartyName(p.beneficiaryName, p.beneficiary);
-        const prop = treasuryPartyName(p.proposerName, p.proposer);
-        return `<tr>
-            <td>#${p.id}</td>
-            <td><a href="#account/${encodeURIComponent(p.beneficiary)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(ben)}</a></td>
-            <td><a href="#account/${encodeURIComponent(p.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(prop)}</a></td>
-            <td style="text-align:right;">${stakingFormatPDEX(p.bond)} PDEX</td>
-            <td style="text-align:right;font-weight:600;">${stakingFormatPDEX(p.value)} PDEX</td>
-            ${withStatus ? '<td style="text-align:right;"><span class="reward-badge claimed">Approved</span></td>' : ''}
-        </tr>`;
-    }).join('');
+function treasuryStatusBadge(status) {
+    if (status === 'awarded') return '<span class="reward-badge claimed">Paid out</span>';
+    if (status === 'rejected') return '<span class="reward-badge unclaimed">Rejected</span>';
+    if (status === 'approved') return '<span class="reward-badge claimed">Approved</span>';
+    return '<span class="reward-badge neutral">Open</span>';
+}
+
+function treasuryPartyCell(name, address) {
+    if (!address) return '<span style="color:var(--text-muted);">—</span>';
+    return `<a href="#account/${encodeURIComponent(address)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(name, address))}</a>`;
+}
+
+function renderTreasuryProposalRows(list, showStatus) {
+    return list.map(p => `<tr>
+        <td>#${p.id}</td>
+        <td>${treasuryPartyCell(p.beneficiaryName, p.beneficiary)}</td>
+        <td>${treasuryPartyCell(p.proposerName, p.proposer)}</td>
+        <td style="text-align:right;">${p.bond == null ? '—' : stakingFormatPDEX(p.bond) + ' PDEX'}</td>
+        <td style="text-align:right;font-weight:600;">${p.value == null ? '—' : stakingFormatPDEX(p.value) + ' PDEX'}</td>
+        ${showStatus ? `<td style="text-align:right;">${treasuryStatusBadge(p.status)}</td>` : ''}
+    </tr>`).join('');
 }
 
 function renderTreasuryProposals(list) {
@@ -3472,13 +3535,17 @@ function renderTreasuryProposals(list) {
         <tbody>${renderTreasuryProposalRows(list, false)}</tbody></table></div>`;
 }
 
-function renderTreasuryApproved(list, ids) {
-    if (!ids.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No approved proposals are awaiting payout.</div>';
-    if (!list.length) {
-        return `<div style="padding:24px;text-align:center;color:var(--text-muted);">Approved proposals awaiting payout: ${ids.map(i => '#' + i).join(', ')}</div>`;
-    }
+function renderTreasuryApproved(list) {
+    if (!list.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No approved proposals are awaiting payout.</div>';
     return `<div class="table-responsive"><table class="data-table">
         <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th><th style="text-align:right;">Status</th></tr></thead>
+        <tbody>${renderTreasuryProposalRows(list, true)}</tbody></table></div>`;
+}
+
+function renderTreasuryHistory(list) {
+    if (!list.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No resolved proposals indexed yet. Past proposals are crawled from chain history in the background.</div>';
+    return `<div class="table-responsive"><table class="data-table">
+        <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th><th style="text-align:right;">Outcome</th></tr></thead>
         <tbody>${renderTreasuryProposalRows(list, true)}</tbody></table></div>`;
 }
 
