@@ -1825,14 +1825,22 @@ function renderStakingRewards(data) {
         const note = data.unclaimedComputing
             ? 'Unpaid rewards are still being computed — this can take a moment.'
             : (index.backfillComplete
-                ? 'The indexer has scanned the full available chain history.'
+                ? `No staking rewards were found for <span style="color: var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(data.address))}</span>.`
                 : 'The indexer is still backfilling older history — check back shortly.');
+                
+        const title = data.unclaimedComputing 
+            ? 'Computing Rewards' 
+            : (index.backfillComplete ? 'No Staking Rewards' : 'Coming Soon');
+
+        const iconHtml = (data.unclaimedComputing || !index.backfillComplete) 
+            ? `<i class='bx bx-time-five' style="font-size: 48px; margin-bottom: 16px; opacity: 0.5;"></i>` 
+            : '';
+
         resultsEl.innerHTML = `
-            <div class="list-header"><h2>No staking rewards found</h2></div>
-            <div style="padding: 32px 24px; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7;">
-                No staking rewards were found for
-                <span style="color: var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(data.address))}</span>.
-                <br>${note}
+            <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
+                ${iconHtml}
+                <h3>${title}</h3>
+                <p>${note}</p>
             </div>`;
         return;
     }
