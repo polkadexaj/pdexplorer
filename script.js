@@ -1719,10 +1719,13 @@ async function loadStakingIndexStatus() {
         const res = await fetch('/api/staking-rewards-status');
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        const backfill = data.backfillComplete ? 'backfill complete' : 'backfill in progress';
-        el.textContent = `Indexer: blocks ${stakingFormatNumber(data.oldestScannedBlock)}–${stakingFormatNumber(data.latestScannedBlock)} · ${stakingFormatNumber(data.totalRewardsIndexed)} payouts · ${backfill}`;
+        if (!data.backfillComplete) {
+            el.innerHTML = `<div class="gov-index-note" style="margin-top: 10px;"><i class='bx bx-loader-alt bx-spin'></i> Indexing past staking rewards from chain history — scanned back to block ${stakingFormatNumber(data.oldestScannedBlock)}. Older staking rewards will keep appearing as the crawl progresses.</div>`;
+        } else {
+            el.innerHTML = `<span class="staking-index-status" style="margin-top: 10px; display: inline-block;">Indexer: blocks ${stakingFormatNumber(data.oldestScannedBlock)}–${stakingFormatNumber(data.latestScannedBlock)} · ${stakingFormatNumber(data.totalRewardsIndexed)} payouts · backfill complete</span>`;
+        }
     } catch (e) {
-        el.textContent = 'Indexer: status unavailable';
+        el.innerHTML = `<span class="staking-index-status" style="margin-top: 10px; display: inline-block;">Indexer: status unavailable</span>`;
     }
 }
 

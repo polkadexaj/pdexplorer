@@ -239,11 +239,11 @@
             <!-- Staking Rewards Page -->
             <div class="staking-rewards-page page-section" data-page="staking-rewards" style="display: none;">
                 <div class="list-container glass">
-                    <div class="list-header">
+                    <div class="list-header" style="border-bottom: none; padding-bottom: 0;">
                         <h2>Staking Rewards</h2>
-                        <span class="staking-index-status" id="staking-index-status">Indexer: loading&hellip;</span>
                     </div>
-                    <div class="staking-search-wrap">
+                    <div id="staking-index-status" style="padding: 0 24px;"></div>
+                    <div class="staking-search-wrap" style="margin-top: 15px;">
                         <p class="staking-search-hint">Enter a Polkadex wallet address to view its claimed staking reward history, then download it as CSV or JSON.</p>
                         <div class="staking-search-bar">
                             <div style="flex: 1 1 320px; position: relative; display: flex; align-items: center;">
