@@ -9,8 +9,12 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      # Maps the Docker volume to the new DATA_DIR we created in server.js
-      - cache_data:/app/data
+      # Host bind mount for the SQLite index (server.js DATA_DIR = /app/data).
+      # A bind mount lives on the host filesystem, so the indexed data survives
+      # container deletion, `docker compose down` (even with -v) and
+      # `docker volume prune`. Override the host location with DATA_PATH in .env
+      # (e.g. an absolute path outside the repo).
+      - ${DATA_PATH:-./data}:/app/data
 
   frontend:
     build:
@@ -34,6 +38,3 @@ services:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-
-volumes:
-  cache_data:
