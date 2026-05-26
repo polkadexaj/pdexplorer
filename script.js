@@ -98,18 +98,25 @@ async function init() {
                 fetch('/api/transactions').catch(() => null),
                 fetch('/api/blocks').catch(() => null)
             ]);
+            // Only repaint the dashboard widgets when the user is actually
+            // viewing the home page — avoids flicker when they deep-linked to
+            // another route.
+            const onHome = () => {
+                const path = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '');
+                return path === '' || path === 'home';
+            };
             if (txRes) {
                 const txData = await txRes.json();
                 if (txData.transactions && txData.transactions.length > 0) {
                     transactions = financialTransactionRows(txData.transactions);
-                    if (window.location.hash === '') renderTransactions();
+                    if (onHome()) renderTransactions();
                 }
             }
             if (bRes) {
                 const bData = await bRes.json();
                 if (bData.blocks && bData.blocks.length > 0) {
                     blocks = bData.blocks;
-                    if (window.location.hash === '') renderBlocks();
+                    if (onHome()) renderBlocks();
                 }
             }
         } catch (e) { }
@@ -125,8 +132,11 @@ async function init() {
         statusIndicator.classList.remove('live');
     }
 
-    // Initialize routing once after data subscriptions are ready.
-    routeTo(window.location.hash.substring(1) || 'home');
+    // Initialize routing once after data subscriptions are ready. The router
+    // boot wires popstate + the delegated click handler and rewrites any
+    // legacy "#X" URL to a clean "/X" URL so canonical/og:url stay accurate.
+    bootSeoRouter();
+    routeTo(readRouteFromLocation());
 }
 
 async function fetchNetworkStats(api) {
@@ -294,9 +304,9 @@ function renderBlocks() {
             <div class="item-main">
                 <div class="item-icon"><i class='bx bx-cube-alt'></i></div>
                 <div class="item-details">
-                    <a href="#block/${block.number}" class="item-title">${block.number}</a>
+                    <a href="/block/${block.number}" class="item-title">${block.number}</a>
                     <div class="item-sub">
-                        Hash: <a href="#block/${block.hash}" class="item-link">${block.hash.substring(0, 10)}...</a>
+                        Hash: <a href="/block/${block.hash}" class="item-link">${block.hash.substring(0, 10)}...</a>
                     </div>
                     <div class="item-sub">
                         Extrinsics: ${block.extrinsics}
@@ -327,8 +337,8 @@ function renderTransactions() {
         let shortTo = tx.to.toString();
         if (shortTo.length > 10) shortTo = shortTo.substring(0, 8) + '...';
         const titleHtml = tx.eventDerived
-            ? `<a href="#block/${tx.block}" class="item-title">${shortHash}</a>`
-            : `<a href="#tx/${tx.block}/${tx.hash}" class="item-title">${shortHash}</a>`;
+            ? `<a href="/block/${tx.block}" class="item-title">${shortHash}</a>`
+            : `<a href="/tx/${tx.block}/${tx.hash}" class="item-title">${shortHash}</a>`;
 
         el.innerHTML = `
             <div class="item-main">
@@ -336,16 +346,16 @@ function renderTransactions() {
                 <div class="item-details">
                     ${titleHtml}
                     <div class="item-sub">
-                        From: ${tx.from === 'System' ? shortFrom : `<a href="#account/${tx.from}" class="item-link">${shortFrom}</a>`}
+                        From: ${tx.from === 'System' ? shortFrom : `<a href="/account/${tx.from}" class="item-link">${shortFrom}</a>`}
                     </div>
                     <div class="item-sub">
-                        To: ${tx.to === tx.amount ? shortTo : `<a href="#account/${tx.to}" class="item-link">${shortTo}</a>`}
+                        To: ${tx.to === tx.amount ? shortTo : `<a href="/account/${tx.to}" class="item-link">${shortTo}</a>`}
                     </div>
                 </div>
             </div>
             <div class="item-meta">
                 <span class="item-amount">${tx.amount}</span>
-                <span class="item-time">${timeAgo(tx.timestamp)} / Block <a href="#block/${tx.block}" class="item-link">${tx.block}</a></span>
+                <span class="item-time">${timeAgo(tx.timestamp)} / Block <a href="/block/${tx.block}" class="item-link">${tx.block}</a></span>
             </div>
         `;
         transactionsListEl.appendChild(el);
@@ -397,8 +407,8 @@ function renderValidators() {
 
         html += `
             <tr>
-                <td class="address-cell"><a href="#validator/${val.address}" class="item-link">${shortAddr}</a></td>
-                <td><a href="#validator/${val.address}" class="item-link">${val.name}</a></td>
+                <td class="address-cell"><a href="/validator/${val.address}" class="item-link">${shortAddr}</a></td>
+                <td><a href="/validator/${val.address}" class="item-link">${val.name}</a></td>
                 <td>${Number(val.totalStake).toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="unit">PDEX</span></td>
                 <td>${commissionHtml}</td>
                 <td style="color: var(--success); font-weight: 500;">${val.avg30DayApy.toFixed(2)}%</td>
@@ -500,8 +510,8 @@ function renderHolders() {
         html += `
             <tr>
                 <td>#${val.rank}</td>
-                <td class="address-cell"><a href="#account/${val.address}" class="item-link">${shortAddr}</a></td>
-                <td><a href="#account/${val.address}" class="item-link">${val.name}</a></td>
+                <td class="address-cell"><a href="/account/${val.address}" class="item-link">${shortAddr}</a></td>
+                <td><a href="/account/${val.address}" class="item-link">${val.name}</a></td>
                 <td>${Number(val.balance).toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="unit">PDEX</span></td>
                 <td style="color: var(--brand-primary); font-weight: 500;">${val.share.toFixed(4)}%</td>
             </tr>
@@ -616,16 +626,16 @@ function renderFullTransactions() {
         const dateObj = new Date(tx.timestamp);
         const dateStr = `${timeAgo(tx.timestamp)} (${dateObj.toISOString().replace('T', ' ').substring(0, 19)})`;
         const hashCell = tx.eventDerived
-            ? `<a href="#block/${tx.block}" class="item-link">${shortHash}</a>`
-            : `<a href="#tx/${tx.block}/${tx.hash}" class="item-link">${shortHash}</a>`;
+            ? `<a href="/block/${tx.block}" class="item-link">${shortHash}</a>`
+            : `<a href="/tx/${tx.block}/${tx.hash}" class="item-link">${shortHash}</a>`;
 
         html += `
             <tr>
                 <td class="address-cell">${hashCell}</td>
-                <td>${tx.from === 'System' ? shortFrom : `<a href="#account/${tx.from}" class="item-link">${shortFrom}</a>`}</td>
-                <td>${tx.to === tx.amount ? shortTo : `<a href="#account/${tx.to}" class="item-link">${shortTo}</a>`}</td>
+                <td>${tx.from === 'System' ? shortFrom : `<a href="/account/${tx.from}" class="item-link">${shortFrom}</a>`}</td>
+                <td>${tx.to === tx.amount ? shortTo : `<a href="/account/${tx.to}" class="item-link">${shortTo}</a>`}</td>
                 <td style="color: var(--text-secondary);">${dateStr}</td>
-                <td><a href="#block/${tx.block}" class="item-link">${tx.block}</a></td>
+                <td><a href="/block/${tx.block}" class="item-link">${tx.block}</a></td>
                 <td style="font-weight: 500;">${tx.amount}</td>
                 <td style="color: var(--text-secondary);">${tx.value}</td>
                 <td><span class="badge" style="background: ${tx.status === 'failed' ? 'var(--error)' : 'var(--success)'};">${tx.status}</span></td>
@@ -762,12 +772,12 @@ function renderFullBlocks() {
 
         html += `
             <tr>
-                <td><a href="#block/${b.number}" class="item-link">${b.number}</a></td>
+                <td><a href="/block/${b.number}" class="item-link">${b.number}</a></td>
                 <td style="color: var(--text-secondary);">${timeAgo(b.timestamp)}</td>
-                <td>${b.authorName && b.authorName !== "Unknown" && b.authorName !== "System" && !b.authorName.startsWith("Validator") ? `<a href="#account/${b.authorAddress}" class="item-link">${b.authorName}</a>` : `<a href="#account/${b.authorAddress}" class="address-cell item-link">${b.authorAddress.substring(0, 8)}...</a>`}</td>
+                <td>${b.authorName && b.authorName !== "Unknown" && b.authorName !== "System" && !b.authorName.startsWith("Validator") ? `<a href="/account/${b.authorAddress}" class="item-link">${b.authorName}</a>` : `<a href="/account/${b.authorAddress}" class="address-cell item-link">${b.authorAddress.substring(0, 8)}...</a>`}</td>
                 <td style="font-weight: 500;">${b.extrinsicsCount}</td>
                 <td style="font-weight: 500;">${b.eventsCount}</td>
-                <td class="address-cell"><a href="#block/${b.hash}" class="item-link">${shortHash}</a></td>
+                <td class="address-cell"><a href="/block/${b.hash}" class="item-link">${shortHash}</a></td>
                 <td style="color: var(--text-secondary);">${dateObj.toISOString().replace('T', ' ').substring(0, 19)}</td>
             </tr>
         `;
@@ -869,21 +879,21 @@ function renderFullEvents() {
         const actionStr = `${ev.section} -> ${ev.method}`;
         const identityStr = (ev.signerName && ev.signerName !== "Unknown") ? ev.signerName : ev.signerAddress;
         const eventLink = ev.txHash
-            ? `<a href="#tx/${ev.block}/${ev.txHash}" class="item-link" style="font-size: 13px; color: var(--brand-secondary); opacity: 0.8;">tx: ${shortHash}</a>`
+            ? `<a href="/tx/${ev.block}/${ev.txHash}" class="item-link" style="font-size: 13px; color: var(--brand-secondary); opacity: 0.8;">tx: ${shortHash}</a>`
             : `<span style="font-size: 13px; color: var(--text-secondary); opacity: 0.8;">event: ${shortHash}</span>`;
         const statusColor = ev.status === 'failed' ? 'var(--error)' : 'var(--success)';
 
         html += `
             <div class="event-list-item">
                 <div>
-                    <a href="#block/${ev.block}" class="item-link" style="display: block; font-size: 15px; margin-bottom: 5px;">${ev.block}</a>
+                    <a href="/block/${ev.block}" class="item-link" style="display: block; font-size: 15px; margin-bottom: 5px;">${ev.block}</a>
                     ${eventLink}
                 </div>
                 <div>
                     <div style="font-weight: 500; font-size: 14px; margin-bottom: 5px;">${actionStr}</div>
                     <div style="font-size: 13px; color: var(--text-secondary);">
                         signer:<br>
-                        <a href="#account/${ev.signerAddress}" class="item-link" style="font-size: 13px;">${identityStr}</a>
+                        <a href="/account/${ev.signerAddress}" class="item-link" style="font-size: 13px;">${identityStr}</a>
                     </div>
                 </div>
                 <div style="color: var(--text-secondary); font-size: 14px;">
@@ -990,7 +1000,7 @@ if (searchInput) {
         if (e.key === 'Enter') {
             const query = searchInput.value.trim();
             if (query) {
-                window.location.hash = '#search';
+                navigateTo('search');
                 performSearch(query);
             }
         }
@@ -1079,6 +1089,312 @@ async function deepSearchNetwork(query) {
     }
 }
 
+// --- SEO router (clean URLs + per-route metadata) ----------------------------
+// The app used to hash-route (#blocks, #validator/abc). Crawlers don't index
+// fragment URLs as separate pages, so we now use the History API: each route
+// gets a real path (/blocks, /validator/abc) that nginx falls back to
+// index.html for. Old #X URLs still work — we rewrite them to clean URLs on
+// boot for backward compatibility.
+const SITE_ORIGIN = 'https://explorer.polkadex.ee';
+const SITE_DEFAULT_OG_IMAGE = SITE_ORIGIN + '/og-image.png';
+const SITE_NAME = 'Polkadex Explorer';
+
+// Per-route SEO metadata. `title` and `description` are templates; dynamic
+// routes (block/:id, validator/:addr, …) are filled in once the detail fetcher
+// has real data via `updateSeoMeta()`.
+const ROUTE_SEO = {
+    'home':               { title: 'Polkadex Mainnet Explorer — Blocks, Validators, Staking & Governance',
+                            description: 'The Polkadex Mainnet block explorer. Browse blocks, extrinsics, events, transactions, accounts, validators, staking rewards, and on-chain governance in real time.' },
+    'holders':            { title: 'Top PDEX Holders — Polkadex Explorer',
+                            description: 'Ranking of the largest PDEX token holders on the Polkadex Mainnet, with balance, share of total supply, and identity.' },
+    'transactions':       { title: 'Latest Transactions — Polkadex Explorer',
+                            description: 'Real-time feed of Polkadex transactions: transfers, staking calls, governance actions, and more.' },
+    'blocks':             { title: 'Latest Blocks — Polkadex Explorer',
+                            description: 'Recent blocks finalized on the Polkadex Mainnet, with author, extrinsics count, and timestamps.' },
+    'events':             { title: 'On-chain Events — Polkadex Explorer',
+                            description: 'Live event log from the Polkadex Mainnet: balances, staking, council, treasury, and runtime events.' },
+    'validators':         { title: 'Validators — Polkadex Explorer',
+                            description: 'Active and waiting validators on the Polkadex Mainnet, with commission, total stake, nominators, and identity.' },
+    'staking-rewards':    { title: 'Staking Rewards — Polkadex Explorer',
+                            description: 'Look up staking rewards, claim payouts, stake more, and unstake on the Polkadex Mainnet.' },
+    'democracy':          { title: 'Democracy — Polkadex Explorer',
+                            description: 'Polkadex governance: open referenda, public proposals, and democracy participation.' },
+    'council':            { title: 'Council — Polkadex Explorer',
+                            description: 'Polkadex Council members, motions, and recent governance activity.' },
+    'treasury':           { title: 'Treasury — Polkadex Explorer',
+                            description: 'Polkadex Treasury balance, approved spending, and active proposals.' },
+    'discussions':        { title: 'Discussions — Polkadex Explorer',
+                            description: 'On-chain governance discussions for Polkadex referenda, treasury proposals, and council motions.' },
+    // /wallet (no address) is a public connect-wallet landing page — index it
+    // so it captures searches like "connect Polkadex wallet" or "send PDEX".
+    // initWalletPage() flips it to noindex when an address is bound (personal).
+    'wallet':             { title: 'Connect Wallet — Send PDEX, Stake & Manage Your Account · Polkadex Explorer',
+                            description: 'Connect a Polkadot.js, Talisman, or SubWallet extension on desktop, or use Nova Wallet / SubWallet on mobile to send PDEX, stake, and manage your Polkadex account.' },
+    'donate':             { title: 'Support the Explorer — Polkadex Explorer',
+                            description: 'Donate to support the Polkadex Explorer with PDEX or any major crypto asset.' },
+    'search':             { title: 'Search Results — Polkadex Explorer',
+                            description: 'Search Polkadex Mainnet for blocks, extrinsics, accounts, and validators.',
+                            noindex: true },
+    'account-details':    { title: 'Account — Polkadex Explorer',
+                            description: 'Polkadex account details: balance, history, and events.' },
+    'validator-details':  { title: 'Validator — Polkadex Explorer',
+                            description: 'Polkadex validator details: commission, stake, nominators, and era history.' },
+    'block-details':      { title: 'Block — Polkadex Explorer',
+                            description: 'Polkadex block details: extrinsics, events, author, and timestamp.' },
+    'tx-details':         { title: 'Transaction — Polkadex Explorer',
+                            description: 'Polkadex transaction details: signer, call, status, and events.' }
+};
+
+// Update <title>, meta[description], canonical, and Open Graph / Twitter tags
+// for the current route. Detail pages call this again once they've loaded the
+// concrete entity (e.g. validator name) so the metadata reflects real content.
+function updateSeoMeta(mainTarget, { title, description, canonicalPath, noindex } = {}) {
+    const base = ROUTE_SEO[mainTarget] || ROUTE_SEO.home;
+    const finalTitle = title || base.title;
+    const finalDesc = description || base.description;
+    const path = canonicalPath || (window.location.pathname + window.location.search) || '/';
+    const canonical = SITE_ORIGIN + (path === '/' ? '/' : path.replace(/\/+$/, '') || '/');
+    const shouldNoindex = noindex === true || (noindex !== false && base.noindex === true);
+
+    document.title = finalTitle;
+    setMetaContent('name', 'description', finalDesc);
+    setLinkHref('canonical', canonical);
+
+    // robots: noindex pages (search results, personal wallet view) should not
+    // surface in the SERP even though they're reachable.
+    setMetaContent('name', 'robots', shouldNoindex
+        ? 'noindex, nofollow'
+        : 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1');
+
+    // Open Graph
+    setMetaContent('property', 'og:title', finalTitle);
+    setMetaContent('property', 'og:description', finalDesc);
+    setMetaContent('property', 'og:url', canonical);
+    setMetaContent('property', 'og:type', mainTarget === 'home' ? 'website' : 'article');
+
+    // Twitter
+    setMetaContent('name', 'twitter:title', finalTitle);
+    setMetaContent('name', 'twitter:description', finalDesc);
+
+    // Clear any route-scoped JSON-LD by default; routes that own one (e.g.
+    // /wallet) re-inject after this call returns.
+    setRouteJsonLd(null);
+}
+
+function setMetaContent(attr, key, value) {
+    let el = document.head.querySelector(`meta[${attr}="${key}"]`);
+    if (!el) {
+        el = document.createElement('meta');
+        el.setAttribute(attr, key);
+        document.head.appendChild(el);
+    }
+    el.setAttribute('content', value);
+}
+function setLinkHref(rel, href) {
+    let el = document.head.querySelector(`link[rel="${rel}"]`);
+    if (!el) {
+        el = document.createElement('link');
+        el.setAttribute('rel', rel);
+        document.head.appendChild(el);
+    }
+    el.setAttribute('href', href);
+}
+
+// Swap a per-route JSON-LD block in <head>. Pass `null` to remove. The script
+// is keyed by a stable id so it never duplicates and we can replace it cleanly
+// when the user navigates away from the route that owns it.
+function setRouteJsonLd(json) {
+    const ID = 'route-jsonld';
+    const existing = document.getElementById(ID);
+    if (!json) { if (existing) existing.remove(); return; }
+    const text = (typeof json === 'string') ? json : JSON.stringify(json);
+    if (existing) { existing.textContent = text; return; }
+    const el = document.createElement('script');
+    el.type = 'application/ld+json';
+    el.id = ID;
+    el.textContent = text;
+    document.head.appendChild(el);
+}
+
+// Reusable HowTo + FAQ schemas for the connect-wallet page. These help search
+// engines surface our connect/send flow for "how to send PDEX" / "connect
+// Polkadex wallet" / "Nova Wallet PDEX" style queries.
+function buildWalletConnectJsonLd() {
+    return {
+        '@context': 'https://schema.org',
+        '@graph': [
+            {
+                '@type': 'HowTo',
+                '@id': 'https://explorer.polkadex.ee/wallet#howto-send-pdex',
+                'name': 'How to send PDEX on the Polkadex Mainnet',
+                'description': 'Connect a Substrate wallet to the Polkadex Explorer and transfer PDEX to any Polkadex address.',
+                'image': 'https://explorer.polkadex.ee/og-image.png',
+                'totalTime': 'PT2M',
+                'tool': [
+                    { '@type': 'HowToTool', 'name': 'Polkadot.js, Talisman, or SubWallet browser extension (desktop)' },
+                    { '@type': 'HowToTool', 'name': 'Nova Wallet or SubWallet mobile app with in-app browser (mobile)' }
+                ],
+                'supply': [
+                    { '@type': 'HowToSupply', 'name': 'A small PDEX balance to cover the network fee (~0.05 PDEX is plenty)' }
+                ],
+                'step': [
+                    {
+                        '@type': 'HowToStep', 'position': 1,
+                        'name': 'Connect your wallet',
+                        'text': 'Open explorer.polkadex.ee/wallet and click Connect Wallet. On mobile, open the URL inside Nova Wallet or SubWallet\'s in-app dapp browser.',
+                        'url': 'https://explorer.polkadex.ee/wallet'
+                    },
+                    {
+                        '@type': 'HowToStep', 'position': 2,
+                        'name': 'Authorise the site',
+                        'text': 'Approve the connection request in your wallet so it can share account addresses with the explorer.'
+                    },
+                    {
+                        '@type': 'HowToStep', 'position': 3,
+                        'name': 'Pick your account',
+                        'text': 'Choose the Polkadex account you want to use. Your account dashboard opens with balances, staking, and recent transactions.'
+                    },
+                    {
+                        '@type': 'HowToStep', 'position': 4,
+                        'name': 'Open the Send PDEX modal',
+                        'text': 'Click the Send PDEX action on the dashboard.'
+                    },
+                    {
+                        '@type': 'HowToStep', 'position': 5,
+                        'name': 'Enter recipient and amount',
+                        'text': 'Paste the recipient\'s Polkadex address, type the amount in PDEX, and review the live network-fee estimate.'
+                    },
+                    {
+                        '@type': 'HowToStep', 'position': 6,
+                        'name': 'Sign in your wallet',
+                        'text': 'Click Sign & Send and approve the transaction in your wallet extension. The transfer is included on-chain within seconds.'
+                    }
+                ]
+            },
+            {
+                '@type': 'FAQPage',
+                '@id': 'https://explorer.polkadex.ee/wallet#faq',
+                'mainEntity': [
+                    {
+                        '@type': 'Question',
+                        'name': 'Can I send PDEX from a mobile wallet like Nova Wallet?',
+                        'acceptedAnswer': {
+                            '@type': 'Answer',
+                            'text': 'Yes. Open explorer.polkadex.ee inside Nova Wallet or SubWallet\'s built-in dapp browser. Your accounts are injected automatically, just like with a desktop Polkadot.js extension, and you can sign transfers and staking actions directly in the mobile wallet.'
+                        }
+                    },
+                    {
+                        '@type': 'Question',
+                        'name': 'Which wallets work with the Polkadex Explorer?',
+                        'acceptedAnswer': {
+                            '@type': 'Answer',
+                            'text': 'On desktop: Polkadot.js extension, Talisman, SubWallet, PolkaGate. On mobile: Nova Wallet and SubWallet via their in-app dapp browsers. The explorer never stores private keys — every transaction is signed by your wallet.'
+                        }
+                    },
+                    {
+                        '@type': 'Question',
+                        'name': 'How much does a PDEX transfer cost?',
+                        'acceptedAnswer': {
+                            '@type': 'Answer',
+                            'text': 'Network fees on Polkadex Mainnet are very small — typically a few thousandths of a PDEX. The Send PDEX modal shows a live fee estimate before you sign so there are no surprises.'
+                        }
+                    },
+                    {
+                        '@type': 'Question',
+                        'name': 'What is "Keep my account alive" on the Send PDEX modal?',
+                        'acceptedAnswer': {
+                            '@type': 'Answer',
+                            'text': 'Substrate chains require accounts to hold at least the existential deposit. Keep account alive uses balances.transferKeepAlive, which fails the transfer if it would leave your balance below the existential deposit (preventing accidental account reaping). Uncheck it only if you intend to empty an account completely.'
+                        }
+                    },
+                    {
+                        '@type': 'Question',
+                        'name': 'Can I view my Polkadex account without connecting a wallet?',
+                        'acceptedAnswer': {
+                            '@type': 'Answer',
+                            'text': 'Yes. Paste any Polkadex address into the "look up any address" field on the wallet page for a read-only dashboard with balances, staking, and recent activity. You only need to connect a wallet when you want to send or sign actions.'
+                        }
+                    }
+                ]
+            }
+        ]
+    };
+}
+
+// Parse the current address-bar URL into the route token routeTo() expects
+// (e.g. "block/12345"). Pathname wins; if a legacy #X fragment is present on
+// "/" we fall back to it (and the boot routine rewrites the URL).
+function readRouteFromLocation() {
+    const path = window.location.pathname || '/';
+    const stripped = path.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (stripped) return stripped;
+    const hash = window.location.hash.replace(/^#/, '').trim();
+    return hash || 'home';
+}
+
+// Push a new history entry and route to it. All call sites that used to do
+// `window.location.hash = X` now go through here so the URL bar shows a
+// clean path and crawlers can index it.
+function navigateTo(target, { replace = false } = {}) {
+    if (!target || target === 'home') target = '';
+    // Don't push duplicate history entries for the same URL.
+    const newPath = '/' + target.replace(/^\/+/, '');
+    const currentPath = window.location.pathname + window.location.hash;
+    if (newPath !== currentPath || window.location.hash) {
+        const fn = replace ? 'replaceState' : 'pushState';
+        try { history[fn](null, '', newPath || '/'); }
+        catch (e) { /* same-origin / sandboxed iframes can throw; fall back below */ }
+    }
+    routeTo(target || 'home');
+}
+
+// One-time wiring: clean-URL routing, popstate, click delegation, legacy
+// hash-URL redirect. Called at the bottom of init.
+function bootSeoRouter() {
+    // Rewrite any legacy "#X" URLs people might have bookmarked into clean URLs
+    // so canonical/og:url match what the user sees.
+    const legacyHash = window.location.hash.replace(/^#/, '').trim();
+    if (legacyHash && (window.location.pathname === '/' || window.location.pathname === '')) {
+        try { history.replaceState(null, '', '/' + legacyHash); }
+        catch (e) { /* ignore */ }
+    }
+
+    window.addEventListener('popstate', () => {
+        routeTo(readRouteFromLocation());
+    });
+
+    // Delegated click handler for internal links. Catches both new clean
+    // URLs (href="/blocks") and any leftover legacy fragment links
+    // (href="/blocks") rendered from inline HTML strings.
+    document.addEventListener('click', (e) => {
+        // Honor modifier keys and middle-click so "open in new tab" still works.
+        if (e.defaultPrevented) return;
+        if (e.button !== 0 && e.button !== undefined) return;
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        const a = e.target.closest && e.target.closest('a');
+        if (!a) return;
+        if (a.target && a.target !== '' && a.target !== '_self') return;
+        if (a.hasAttribute('download')) return;
+        const href = a.getAttribute('href');
+        if (!href) return;
+        // External / mailto / tel / protocol-relative.
+        if (/^(https?:)?\/\//i.test(href) || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+        let target = null;
+        if (href.startsWith('#')) {
+            const t = href.substring(1).trim();
+            if (!t) return;
+            target = t;
+        } else if (href.startsWith('/')) {
+            // Only intercept if the host is the same; absolute paths are SPA routes.
+            target = href.replace(/^\/+/, '');
+        } else {
+            return;
+        }
+        e.preventDefault();
+        navigateTo(target);
+    });
+}
+
 // Routing Logic
 function routeTo(target) {
     if (!target) target = 'home';
@@ -1121,6 +1437,11 @@ function routeTo(target) {
 
     // Close sidebar on mobile
     if (typeof sidebar !== 'undefined' && sidebar) sidebar.classList.remove('open');
+
+    // Refresh SEO metadata for the new route. Detail pages (block/validator/
+    // wallet/etc.) will call updateSeoMeta() again with concrete data once the
+    // fetcher resolves so titles/descriptions reflect real content.
+    updateSeoMeta(mainTarget, { canonicalPath: '/' + (target === 'home' ? '' : target) });
 
     // Show target page
     pageSections.forEach(page => {
@@ -1220,10 +1541,22 @@ window.switchAccountTab = function (tabName) {
 
 async function fetchAccountDetails(address) {
     if (accountDetailsContainer) accountDetailsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Fetching account details...</div>';
+    const shortAddr = address ? (address.substring(0, 8) + '…' + address.substring(address.length - 6)) : '';
+    updateSeoMeta('account-details', {
+        title: `Account ${shortAddr} — Polkadex Explorer`,
+        description: `Polkadex account ${address}: balance, transactions, and events.`,
+        canonicalPath: `/account/${address}`
+    });
     try {
         const res = await fetch(`/api/account/${address}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
+        const label = (data.display && data.display !== 'Unknown') ? data.display : shortAddr;
+        updateSeoMeta('account-details', {
+            title: `Account ${label} — Polkadex Explorer`,
+            description: `Polkadex account ${address}${data.display && data.display !== 'Unknown' ? ' (' + data.display + ')' : ''}: balance ${data.balanceTotal != null ? data.balanceTotal.toFixed ? data.balanceTotal.toFixed(2) + ' PDEX' : data.balanceTotal + ' PDEX' : ''}, transactions, and events.`,
+            canonicalPath: `/account/${address}`
+        });
 
         // Transactions Table
         let txHtml = `
@@ -1247,7 +1580,7 @@ async function fetchAccountDetails(address) {
 
             txHtml += `
                 <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                    <td style="padding: 15px 10px;"><a href="#tx/${t.block}/${t.hash}" class="item-link" style="color: var(--brand-secondary);">${t.hash.substring(0, 25)}...</a></td>
+                    <td style="padding: 15px 10px;"><a href="/tx/${t.block}/${t.hash}" class="item-link" style="color: var(--brand-secondary);">${t.hash.substring(0, 25)}...</a></td>
                     <td style="padding: 15px 10px;">${t.amount || 'system'}<br><span style="color: var(--text-secondary); font-size: 11px;">call</span></td>
                     <td style="padding: 15px 10px;">${timeAgo(t.timestamp)}</td>
                     <td style="padding: 15px 10px;">${dateStr}</td>
@@ -1363,10 +1696,22 @@ async function fetchAccountDetails(address) {
 
 async function fetchBlockDetails(id) {
     if (blockDetailsContainer) blockDetailsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Fetching block details...</div>';
+    // Provisional SEO update — overwritten with concrete data once the fetch lands.
+    updateSeoMeta('block-details', {
+        title: `Block #${id} — Polkadex Explorer`,
+        description: `Polkadex Mainnet block #${id}: extrinsics, events, author, and timestamp.`,
+        canonicalPath: `/block/${id}`
+    });
     try {
         const res = await fetch(`/api/block/${id}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
+        const blockNum = data.block && data.block.header && data.block.header.number;
+        updateSeoMeta('block-details', {
+            title: `Block #${blockNum || id} — Polkadex Explorer`,
+            description: `Polkadex Mainnet block #${blockNum || id} (${new Date(data.date).toISOString().substring(0, 19).replace('T', ' ')} UTC): extrinsics, events, and author.`,
+            canonicalPath: `/block/${id}`
+        });
 
         let html = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
@@ -1389,10 +1734,21 @@ async function fetchBlockDetails(id) {
 
 async function fetchTxDetails(block, hash) {
     if (txDetailsContainer) txDetailsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Fetching transaction details...</div>';
+    const shortHash = (hash || '').substring(0, 12);
+    updateSeoMeta('tx-details', {
+        title: `Transaction ${shortHash}… — Polkadex Explorer`,
+        description: `Polkadex Mainnet transaction ${hash} in block #${block}.`,
+        canonicalPath: `/tx/${block}/${hash}`
+    });
     try {
         const res = await fetch(`/api/extrinsic/${block}/${hash}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
+        updateSeoMeta('tx-details', {
+            title: `Transaction ${shortHash}… (${data.event || 'extrinsic'}) — Polkadex Explorer`,
+            description: `Polkadex Mainnet transaction ${data.hash || hash} in block #${block}: ${data.event || 'extrinsic'} from ${data.from || 'unknown'} to ${data.to || 'unknown'}, status: ${data.status || 'unknown'}.`,
+            canonicalPath: `/tx/${block}/${hash}`
+        });
 
         let html = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
@@ -1403,10 +1759,10 @@ async function fetchTxDetails(block, hash) {
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px; text-align: left;">
                     <tr><td style="padding: 10px; font-weight: bold; width: 150px;">Time</td><td style="padding: 10px;">${new Date(data.time).toISOString().replace('T', ' ').substring(0, 19)} (UTC)</td></tr>
                     <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">event</td><td style="padding: 10px;">${data.event}</td></tr>
-                    <tr><td style="padding: 10px; font-weight: bold;">from</td><td style="padding: 10px;"><a href="#account/${data.from}" class="item-link address-cell">${data.from}</a></td></tr>
-                    <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">to</td><td style="padding: 10px;"><a href="#account/${data.to}" class="item-link address-cell">${data.to}</a></td></tr>
+                    <tr><td style="padding: 10px; font-weight: bold;">from</td><td style="padding: 10px;"><a href="/account/${data.from}" class="item-link address-cell">${data.from}</a></td></tr>
+                    <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">to</td><td style="padding: 10px;"><a href="/account/${data.to}" class="item-link address-cell">${data.to}</a></td></tr>
                     <tr><td style="padding: 10px; font-weight: bold;">status</td><td style="padding: 10px;"><span class="badge" style="background: ${data.status === 'success' ? 'var(--success)' : 'var(--error)'}; font-size: 11px;">${data.status}</span></td></tr>
-                    <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">block</td><td style="padding: 10px;"><a href="#block/${data.block}" class="item-link">${data.block}</a></td></tr>
+                    <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">block</td><td style="padding: 10px;"><a href="/block/${data.block}" class="item-link">${data.block}</a></td></tr>
                 </table>
                 <div class="json-container">
                     ${renderJSONTree({ hash: data.hash, signer: data.from, method: data.event, extrinsic: data.extrinsic, events: data.events })}
@@ -1419,9 +1775,11 @@ async function fetchTxDetails(block, hash) {
     }
 }
 
+// Kept for backward compatibility — if a third-party link still drops a "#X"
+// fragment on the user, fall through to clean-URL routing.
 window.addEventListener('hashchange', () => {
-    let hash = window.location.hash.substring(1);
-    routeTo(hash || 'home');
+    const hash = window.location.hash.substring(1).trim();
+    if (hash) navigateTo(hash, { replace: true });
 });
 
 window.copyToClipboard = function (element, text) {
@@ -1440,11 +1798,15 @@ window.copyToClipboard = function (element, text) {
 
 navItems.forEach(item => {
     item.addEventListener('click', (e) => {
-        // e.preventDefault();
-
         const target = item.getAttribute('data-target');
         if (!target) return;
-        window.location.hash = target;
+        // The delegated click handler in bootSeoRouter() also catches these
+        // anchors (since their href is "/<target>"). We keep this listener so
+        // data-target-only nav items (no href) still work as expected.
+        if (!item.getAttribute('href')) {
+            e.preventDefault();
+            navigateTo(target);
+        }
     });
 });
 
@@ -1455,10 +1817,24 @@ async function fetchValidatorDetails(address) {
     if (!container) return;
     container.innerHTML = '<div style="text-align:center; padding: 20px;">Fetching validator history...</div>';
 
+    const shortAddr = address ? (address.substring(0, 8) + '…' + address.substring(address.length - 6)) : '';
+    updateSeoMeta('validator-details', {
+        title: `Validator ${shortAddr} — Polkadex Explorer`,
+        description: `Polkadex validator ${address}: era history, commission, stake, and nominators.`,
+        canonicalPath: `/validator/${address}`
+    });
+
     try {
         const res = await fetch(`/api/validator/${address}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
+
+        const validatorLabel = (data.identity && data.identity !== 'Unknown') ? data.identity : shortAddr;
+        updateSeoMeta('validator-details', {
+            title: `Validator ${validatorLabel} — Polkadex Explorer`,
+            description: `Polkadex validator ${validatorLabel} (${address}): era history, commission, total stake, and nominators on the Polkadex Mainnet.`,
+            canonicalPath: `/validator/${address}`
+        });
 
         const identityStr = data.identity !== "Unknown" ? data.identity : `<span class="address-cell">${address.substring(0, 8)}...</span>`;
 
@@ -1532,7 +1908,7 @@ async function fetchValidatorDetails(address) {
         container.innerHTML = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <h2 style="font-size: 18px;">Validator history - ${identityStr}</h2>
-                <a href="#validators" style="color: var(--text-secondary); text-decoration: none;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+                <a href="/validators" style="color: var(--text-secondary); text-decoration: none;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             
             <div style="padding: 20px;">
@@ -1769,7 +2145,7 @@ function submitStakingSearch() {
         return;
     }
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-    window.location.hash = 'staking-rewards/' + addr;
+    navigateTo('staking-rewards/' + addr);
 }
 
 async function fetchStakingRewards(address, isPoll) {
@@ -1869,10 +2245,10 @@ function renderStakingRewards(data) {
     shown.forEach(r => {
         const date = r.timestamp ? new Date(r.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '—';
         const validatorCell = r.validator
-            ? `<a href="#validator/${encodeURIComponent(r.validator)}" class="item-link" style="color: var(--brand-secondary);">${stakingShortAddress(r.validator)}</a>`
+            ? `<a href="/validator/${encodeURIComponent(r.validator)}" class="item-link" style="color: var(--brand-secondary);">${stakingShortAddress(r.validator)}</a>`
             : '<span style="color: var(--text-muted);">—</span>';
         const blockCell = r.block != null
-            ? `<a href="#block/${r.block}" class="item-link" style="color: var(--brand-secondary);">${stakingFormatNumber(r.block)}</a>`
+            ? `<a href="/block/${r.block}" class="item-link" style="color: var(--brand-secondary);">${stakingFormatNumber(r.block)}</a>`
             : '<span style="color: var(--text-muted);">—</span>';
         const statusBadge = r.status === 'claimed'
             ? '<span class="reward-badge claimed">Claimed</span>'
@@ -1900,7 +2276,7 @@ function renderStakingRewards(data) {
     resultsEl.innerHTML = `
         <div class="list-header">
             <h2>Reward history${identity ? ' — ' + stakingEscapeHtml(identity) : ''}</h2>
-            <a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color: var(--text-secondary); font-size: 0.78rem;">${stakingEscapeHtml(data.address)}</a>
+            <a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color: var(--text-secondary); font-size: 0.78rem;">${stakingEscapeHtml(data.address)}</a>
         </div>
         <div class="staking-summary-grid">
             <div class="staking-summary-card"><div class="label">Claimed Rewards</div><div class="value accent">${stakingFormatPDEX(summary.claimedTotal)} PDEX</div></div>
@@ -2036,15 +2412,119 @@ function setStoredWallet(addr) {
     catch (e) { }
 }
 function refreshConnectWalletButton() {
+    const btn = document.getElementById('connect-wallet-btn');
     const label = document.getElementById('connect-wallet-label');
+    const sub = document.getElementById('connect-wallet-sub');
     const disconnectBtn = document.getElementById('disconnect-wallet-btn');
     const stored = getStoredWallet();
-    if (label) label.textContent = stored ? stakingShortAddress(stored) : 'Connect Wallet';
+    if (stored) {
+        // Connected: lead with "My Account" so the affordance is obvious, and
+        // tuck the abbreviated address underneath as a secondary line.
+        if (label) label.textContent = 'My Account';
+        if (sub) { sub.textContent = stakingShortAddress(stored); sub.style.display = 'block'; }
+        if (btn) {
+            btn.classList.add('is-connected');
+            btn.setAttribute('title', 'View your account: ' + stored);
+            btn.setAttribute('aria-label', 'View my account (' + stakingShortAddress(stored) + ')');
+        }
+    } else {
+        if (label) label.textContent = 'Connect Wallet';
+        if (sub) { sub.textContent = ''; sub.style.display = 'none'; }
+        if (btn) {
+            btn.classList.remove('is-connected');
+            btn.setAttribute('title', 'Connect your Substrate wallet to view balances and sign staking actions');
+            btn.setAttribute('aria-label', 'Connect wallet');
+        }
+    }
     if (disconnectBtn) disconnectBtn.style.display = stored ? 'inline-flex' : 'none';
+    // Reflect connected state on the sidebar item too — clearer than a generic "My Account" link.
+    const navMine = document.getElementById('nav-my-account');
+    if (navMine) {
+        const navLabel = navMine.querySelector('span') || navMine;
+        navMine.title = stored ? ('Your account: ' + stored) : 'Connect a wallet to view your account';
+    }
 }
 
-// Enumerate accounts from installed Substrate wallet extensions.
-async function getInjectedAccounts() {
+// --- Mobile / in-app wallet detection --------------------------------------
+// A handful of mobile wallets (Nova, SubWallet, Talisman, Math, etc.) ship an
+// in-app browser that injects `window.injectedWeb3` exactly like the desktop
+// Polkadot.js extension does. The existing enumeration below already picks
+// those up — these helpers just let the connect panel show appropriate
+// messaging and deep-link buttons.
+function isMobileDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    if (navigator.userAgentData && navigator.userAgentData.mobile) return true;
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+}
+
+// Identify the in-app wallet browser hosting us (if any) so the panel can
+// greet the user by name. `window.injectedWeb3` key names are stable identifiers
+// each wallet self-declares.
+function detectInjectedWalletEnv() {
+    const w = (typeof window !== 'undefined' && window.injectedWeb3) || {};
+    const keys = Object.keys(w);
+    const has = (k) => keys.includes(k);
+    if (has('subwallet-js')) return { id: 'subwallet', name: 'SubWallet' };
+    if (has('talisman')) return { id: 'talisman', name: 'Talisman' };
+    if (has('polkagate')) return { id: 'polkagate', name: 'PolkaGate' };
+    if (has('polkadot-js')) {
+        // polkadot-js is the namespace Nova Wallet and the desktop extension
+        // both use. UA sniffing tells them apart for greeting purposes.
+        const ua = (navigator.userAgent || '').toLowerCase();
+        if (ua.includes('novawallet') || ua.includes('nova-wallet') || ua.includes('nova/')) return { id: 'nova', name: 'Nova Wallet' };
+        return { id: 'polkadot-js', name: 'Polkadot.js' };
+    }
+    if (keys.length) return { id: keys[0], name: keys[0] };
+    return null;
+}
+
+// Known mobile wallets that ship a dapp browser. Each entry tells the connect
+// panel how to deep-link / app-store-link / explain itself. Deep links use the
+// wallets' published universal-link domains where verified; users who don't
+// have the wallet installed get the app-store fallback automatically.
+const MOBILE_WALLETS = [
+    {
+        id: 'nova',
+        name: 'Nova Wallet',
+        // Nova publishes nova.app.link for opening URLs in its built-in browser.
+        deeplink: (url) => 'https://app.novawallet.io/open/dapp?url=' + encodeURIComponent(url),
+        appStore: 'https://apps.apple.com/app/nova-polkadot-kusama-wallet/id1597119355',
+        playStore: 'https://play.google.com/store/apps/details?id=io.novafoundation.nova.market',
+        site: 'https://novawallet.io',
+        tagline: 'Polkadot & Kusama native — Apple/Android'
+    },
+    {
+        id: 'subwallet',
+        name: 'SubWallet',
+        // SubWallet exposes subwallet:// as a URL scheme to open arbitrary dapp URLs.
+        deeplink: (url) => 'subwallet://browser?url=' + encodeURIComponent(url),
+        appStore: 'https://apps.apple.com/app/subwallet-polkadot-wallet/id1633050285',
+        playStore: 'https://play.google.com/store/apps/details?id=app.subwallet.mobile',
+        site: 'https://subwallet.app',
+        tagline: 'Multi-chain dapp browser — Apple/Android'
+    },
+    {
+        id: 'talisman',
+        name: 'Talisman',
+        // Talisman is browser-extension first; the deep-link is a docs hand-off.
+        deeplink: null,
+        appStore: null,
+        playStore: null,
+        site: 'https://talisman.xyz/download',
+        tagline: 'Browser extension — desktop today'
+    }
+];
+
+// Enumerate accounts from installed Substrate wallet extensions / mobile
+// in-app browsers. The retry loop helps mobile wallets that inject
+// `window.injectedWeb3` slightly after `DOMContentLoaded`.
+async function getInjectedAccounts({ retries = 6, retryDelayMs = 250 } = {}) {
+    // Wait briefly for late injection on mobile wallet in-app browsers.
+    for (let i = 0; i < retries; i++) {
+        if (window.injectedWeb3 && Object.keys(window.injectedWeb3).length) break;
+        await new Promise(r => setTimeout(r, retryDelayMs));
+    }
     const injected = window.injectedWeb3;
     if (!injected || Object.keys(injected).length === 0) return null;
     const accounts = [];
@@ -2064,25 +2544,25 @@ async function getInjectedAccounts() {
 
 function connectWallet() {
     const stored = getStoredWallet();
-    window.location.hash = stored ? ('wallet/' + stored) : 'wallet';
+    navigateTo(stored ? ('wallet/' + stored) : 'wallet');
 }
 function selectWallet(address) {
     if (!isValidPolkadexAddress(address)) return;
     setStoredWallet(address);
     refreshConnectWalletButton();
-    window.location.hash = 'wallet/' + address;
+    navigateTo('wallet/' + address);
 }
 function disconnectWallet() {
     setStoredWallet('');
     refreshConnectWalletButton();
     // If the user is currently on a wallet page, return them to the connect panel.
-    const hash = window.location.hash.replace(/^#/, '');
-    if (hash.startsWith('wallet')) {
-        if (hash === 'wallet') {
+    const current = readRouteFromLocation();
+    if (current.startsWith('wallet')) {
+        if (current === 'wallet') {
             const root = document.getElementById('wallet-dashboard');
             if (root) renderWalletConnectPanel(root);
         } else {
-            window.location.hash = 'wallet';
+            navigateTo('wallet');
         }
     }
 }
@@ -2091,27 +2571,90 @@ function initWalletPage(address) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
     if (address) {
+        // Personal dashboard: noindex and no route JSON-LD (PII / dynamic).
+        updateSeoMeta('wallet', {
+            title: 'My Account — Polkadex Explorer',
+            description: 'Your Polkadex account dashboard: balances, staking, nominations, rewards, and recent transactions.',
+            canonicalPath: '/wallet/' + address,
+            noindex: true
+        });
         if (isValidPolkadexAddress(address)) fetchWalletDashboard(address);
         else root.innerHTML = '<div class="list-container glass" style="padding:32px;color:var(--error);">Invalid Polkadex address.</div>';
         return;
     }
+    // Public connect-wallet landing: indexable + rich HowTo/FAQ structured
+    // data so search engines surface us for "connect Polkadex wallet" and
+    // "how to send PDEX" queries.
+    updateSeoMeta('wallet', { canonicalPath: '/wallet', noindex: false });
+    setRouteJsonLd(buildWalletConnectJsonLd());
     renderWalletConnectPanel(root);
 }
 
+// Build the "Open in mobile wallet" deep-link card list. Rendered as an extra
+// section in the connect panel so phone users have a one-tap path into a
+// wallet's in-app browser (where injectedWeb3 just works).
+function renderMobileWalletCards(currentUrl) {
+    const isMobile = isMobileDevice();
+    const cards = MOBILE_WALLETS.map(w => {
+        const link = w.deeplink ? w.deeplink(currentUrl) : null;
+        // On mobile, the primary CTA is the deep-link; on desktop we point to
+        // app stores so the user can install + paste the URL.
+        const primary = isMobile && link
+            ? `<a class="mobile-wallet-cta" href="${stakingEscapeHtml(link)}">Open in ${stakingEscapeHtml(w.name)}</a>`
+            : (w.appStore || w.playStore)
+                ? `<div class="mobile-wallet-storelinks">
+                    ${w.appStore ? `<a href="${stakingEscapeHtml(w.appStore)}" target="_blank" rel="noopener"><i class='bx bxl-apple'></i> iOS</a>` : ''}
+                    ${w.playStore ? `<a href="${stakingEscapeHtml(w.playStore)}" target="_blank" rel="noopener"><i class='bx bxl-play-store'></i> Android</a>` : ''}
+                   </div>`
+                : `<a class="mobile-wallet-cta secondary" href="${stakingEscapeHtml(w.site)}" target="_blank" rel="noopener">Visit ${stakingEscapeHtml(w.name)}</a>`;
+        return `<div class="mobile-wallet-card">
+            <div class="mobile-wallet-head">
+                <strong>${stakingEscapeHtml(w.name)}</strong>
+                <span>${stakingEscapeHtml(w.tagline)}</span>
+            </div>
+            ${primary}
+        </div>`;
+    }).join('');
+    return `<div class="mobile-wallet-grid">${cards}</div>`;
+}
+
 async function renderWalletConnectPanel(root) {
+    const env = detectInjectedWalletEnv();
+    const onMobile = isMobileDevice();
+    const currentUrl = (typeof location !== 'undefined') ? location.href : 'https://explorer.polkadex.ee/wallet';
+
+    const envBanner = env
+        ? `<div class="wallet-env-banner"><i class='bx bx-check-circle'></i> Detected <strong>${stakingEscapeHtml(env.name)}</strong> — pick an account below to connect.</div>`
+        : '';
+
     root.innerHTML = `
         <div class="list-container glass">
             <div class="list-header"><h2>Connect Wallet</h2></div>
             <div style="padding: 24px;">
+                ${envBanner}
                 <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 16px; line-height: 1.6;">
-                    Connect a Substrate wallet extension to open your dashboard. You'll be able to view your
-                    balance and sign staking actions — bond more, nominate validators, pay out rewards or unbond.
-                    Every transaction needs your explicit approval in the wallet extension; the explorer can
-                    never move funds without it.
+                    Connect a Substrate wallet to open your dashboard. You'll be able to view your balance and
+                    sign actions — send PDEX, bond more, nominate validators, pay out rewards or unbond.
+                    Every transaction needs your explicit approval in the wallet; the explorer can never move
+                    funds without it.
                 </p>
                 <div id="wallet-accounts" style="display:flex; flex-direction:column; gap:10px;">
-                    <div style="color: var(--text-muted); font-size: 0.85rem;">Looking for wallet extensions…</div>
+                    <div style="color: var(--text-muted); font-size: 0.85rem;">Looking for wallets…</div>
                 </div>
+
+                <div id="wallet-mobile-section" style="display:none; margin-top: 24px;">
+                    <h3 style="font-size: 0.95rem; margin-bottom: 6px;">On mobile? Use a wallet's in-app browser</h3>
+                    <p style="color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 12px; line-height: 1.5;">
+                        Browser extensions don't run on phones. Open the explorer inside a mobile wallet's built-in
+                        dapp browser — your accounts inject automatically, just like with a desktop extension.
+                    </p>
+                    ${renderMobileWalletCards(currentUrl)}
+                    <div class="mobile-wallet-copyrow">
+                        <input id="wallet-copy-url" type="text" readonly value="${stakingEscapeHtml(currentUrl)}">
+                        <button id="wallet-copy-btn" type="button"><i class='bx bx-copy'></i> Copy URL</button>
+                    </div>
+                </div>
+
                 <div style="margin-top: 22px; border-top: 1px solid var(--border-color); padding-top: 18px;">
                     <p style="color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 10px;">…or look up any address without connecting (view-only):</p>
                     <div class="staking-search-bar">
@@ -2138,17 +2681,51 @@ async function renderWalletConnectPanel(root) {
     if (manualBtn) manualBtn.addEventListener('click', submitManual);
     if (manualInput) manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitManual(); });
 
+    // Copy-URL helper for mobile users; falls back to selecting the input
+    // when navigator.clipboard isn't available (older WebViews).
+    const copyBtn = document.getElementById('wallet-copy-btn');
+    const copyInput = document.getElementById('wallet-copy-url');
+    if (copyBtn && copyInput) copyBtn.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(copyInput.value);
+            copyBtn.innerHTML = "<i class='bx bx-check'></i> Copied!";
+            setTimeout(() => { copyBtn.innerHTML = "<i class='bx bx-copy'></i> Copy URL"; }, 1500);
+        } catch (e) {
+            copyInput.select();
+            try { document.execCommand('copy'); } catch (e2) { /* nothing more to try */ }
+        }
+    });
+
+    // Show the mobile-wallet section by default on mobile; on desktop, only
+    // surface it if no wallet was detected (it's still useful info for users
+    // who keep their stash on a phone-only wallet like Nova).
+    const mobileSection = document.getElementById('wallet-mobile-section');
     const accountsEl = document.getElementById('wallet-accounts');
+
     const accounts = await getInjectedAccounts();
     if (accounts === null) {
-        accountsEl.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.6;">
-            No Substrate wallet extension detected. Install
-            <a href="https://polkadot.js.org/extension/" target="_blank" rel="noopener" style="color:var(--brand-secondary);">Polkadot.js</a>,
-            Talisman or SubWallet, or use the address lookup option below to view any wallet.</div>`;
+        accountsEl.innerHTML = onMobile
+            ? `<div class="wallet-empty-msg">
+                No wallet is exposing accounts to this browser tab. If you're on a phone, open this URL inside a
+                mobile wallet's in-app browser using one of the options below. On desktop, install
+                <a href="https://polkadot.js.org/extension/" target="_blank" rel="noopener">Polkadot.js</a>,
+                Talisman or SubWallet.
+               </div>`
+            : `<div class="wallet-empty-msg">
+                No Substrate wallet extension detected. Install
+                <a href="https://polkadot.js.org/extension/" target="_blank" rel="noopener">Polkadot.js</a>,
+                Talisman or SubWallet — or, if your stash lives on your phone, use a mobile wallet's in-app
+                browser (see below).
+               </div>`;
+        if (mobileSection) mobileSection.style.display = 'block';
         return;
     }
     if (accounts.length === 0) {
-        accountsEl.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No accounts were shared. Authorise this site in your wallet extension and try again.</div>';
+        accountsEl.innerHTML = `<div class="wallet-empty-msg">
+            ${env ? stakingEscapeHtml(env.name) + ' is connected, but no accounts were shared.' : 'No accounts were shared.'}
+            Authorise this site in your wallet and try again.
+           </div>`;
+        if (mobileSection) mobileSection.style.display = onMobile ? 'block' : 'none';
         return;
     }
     accountsEl.innerHTML = accounts.map(a => `
@@ -2159,6 +2736,7 @@ async function renderWalletConnectPanel(root) {
     accountsEl.querySelectorAll('.wallet-account-btn').forEach(btn => {
         btn.addEventListener('click', () => selectWallet(btn.getAttribute('data-address')));
     });
+    if (mobileSection) mobileSection.style.display = onMobile ? 'block' : 'none';
 }
 
 // Animated, stepped loading state shown while the wallet dashboard is fetched.
@@ -2254,7 +2832,7 @@ function renderWalletDashboard(data, price) {
 
     const validatorsHtml = (staking.nominating && staking.nominating.length)
         ? staking.nominating.map(v => `
-            <a href="#validator/${encodeURIComponent(v.address)}" class="wallet-validator-row item-link">
+            <a href="/validator/${encodeURIComponent(v.address)}" class="wallet-validator-row item-link">
                 <span>${v.name && v.name !== 'Unknown' ? stakingEscapeHtml(v.name) : stakingShortAddress(v.address)}</span>
                 <i class='bx bx-chevron-right'></i>
             </a>`).join('')
@@ -2265,7 +2843,7 @@ function renderWalletDashboard(data, price) {
             const dir = t.from === data.address ? 'out' : 'in';
             const date = t.timestamp ? new Date(t.timestamp).toLocaleDateString('en-US') : '—';
             return `<tr>
-                <td><a href="#tx/${t.block}/${t.hash}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(t.hash)}</a></td>
+                <td><a href="/tx/${t.block}/${t.hash}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(t.hash)}</a></td>
                 <td><span class="reward-badge ${dir === 'out' ? 'unclaimed' : 'claimed'}">${dir === 'out' ? 'Sent' : 'Received'}</span></td>
                 <td>${stakingEscapeHtml(t.amount || '—')}</td>
                 <td style="white-space:nowrap;">${date}</td>
@@ -2290,12 +2868,12 @@ function renderWalletDashboard(data, price) {
             <div class="list-header">
                 <h2><i class='bx bx-wallet'></i> ${identity ? stakingEscapeHtml(identity) : 'Wallet Dashboard'}</h2>
                 <div style="display:flex; gap:14px; align-items:center;">
-                    <a href="#staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">Full reward history</a>
+                    <a href="/staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">Full reward history</a>
                     <button id="wallet-switch-btn" class="staking-download-btn">Switch wallet</button>
                 </div>
             </div>
             <div style="padding: 12px 24px 0;">
-                <a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--text-secondary);font-size:0.78rem;">${stakingEscapeHtml(data.address)}</a>
+                <a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--text-secondary);font-size:0.78rem;">${stakingEscapeHtml(data.address)}</a>
             </div>
             <div class="staking-summary-grid">
                 <div class="staking-summary-card"><div class="label">Total Balance</div><div class="value accent">${stakingFormatPDEX(balance.total)} PDEX</div></div>
@@ -2307,7 +2885,11 @@ function renderWalletDashboard(data, price) {
 
         ${isOwnWallet ? `
         <div class="wallet-action-bar">
-            <button class="wallet-action-btn primary" id="wallet-act-stake">
+            <button class="wallet-action-btn primary" id="wallet-act-send"${(getStakeableBalance(data) > 0) ? '' : ' disabled title="No transferable balance available."'}>
+                <i class='bx bx-paper-plane'></i>
+                <div><strong>Send PDEX</strong><span>Transfer to any Polkadex address</span></div>
+            </button>
+            <button class="wallet-action-btn" id="wallet-act-stake">
                 <i class='bx bx-plus-circle'></i>
                 <div><strong>Stake more</strong><span>Add bond &amp; choose validators</span></div>
             </button>
@@ -2348,7 +2930,7 @@ function renderWalletDashboard(data, price) {
                 <div style="padding: 8px 24px 20px;">${validatorsHtml}</div>
             </div>
             <div class="list-container glass">
-                <div class="list-header"><h2>Recent Staking Rewards</h2><a href="#staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View all</a></div>
+                <div class="list-header"><h2>Recent Staking Rewards</h2><a href="/staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View all</a></div>
                 <div class="table-responsive">
                     <table class="staking-rewards-table">
                         <thead><tr><th>Era</th><th>Amount</th><th>Date</th></tr></thead>
@@ -2359,7 +2941,7 @@ function renderWalletDashboard(data, price) {
         </div>
 
         <div class="list-container glass">
-            <div class="list-header"><h2>Recent Transactions</h2><a href="#account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View account</a></div>
+            <div class="list-header"><h2>Recent Transactions</h2><a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View account</a></div>
             <div class="table-responsive">
                 <table class="staking-rewards-table">
                     <thead><tr><th>Hash</th><th>Direction</th><th>Amount</th><th>Date</th></tr></thead>
@@ -2371,9 +2953,11 @@ function renderWalletDashboard(data, price) {
     const switchBtn = document.getElementById('wallet-switch-btn');
     if (switchBtn) switchBtn.addEventListener('click', disconnectWallet);
     if (isOwnWallet) {
+        const sendBtn = document.getElementById('wallet-act-send');
         const stakeBtn = document.getElementById('wallet-act-stake');
         const payoutBtn = document.getElementById('wallet-act-payout');
         const unstakeBtn = document.getElementById('wallet-act-unstake');
+        if (sendBtn && !sendBtn.disabled) sendBtn.addEventListener('click', openSendModal);
         if (stakeBtn) stakeBtn.addEventListener('click', openStakeModal);
         if (payoutBtn && !payoutBtn.disabled) payoutBtn.addEventListener('click', openPayoutModal);
         if (unstakeBtn && !unstakeBtn.disabled) unstakeBtn.addEventListener('click', openUnstakeModal);
@@ -2688,7 +3272,7 @@ function openPayoutModal() {
         if (submitBtn) submitBtn.disabled = true;
     } else {
         listEl.innerHTML = entries.map(e => `<div class="payout-entry">
-            <div><span class="payout-era">Era ${stakingFormatNumber(e.era)}</span> <a href="#validator/${encodeURIComponent(e.validator)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">${stakingShortAddress(e.validator)}</a></div>
+            <div><span class="payout-era">Era ${stakingFormatNumber(e.era)}</span> <a href="/validator/${encodeURIComponent(e.validator)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">${stakingShortAddress(e.validator)}</a></div>
             <div class="payout-amt">${stakingFormatPDEX(e.amount)} PDEX</div>
         </div>`).join('');
         if (submitBtn) submitBtn.disabled = false;
@@ -2765,6 +3349,197 @@ async function submitUnstakeTx() {
     });
 }
 
+// --- Send / Transfer modal -------------------------------------------------
+// Token transfer for the connected wallet. Uses balances.transferKeepAlive by
+// default (so the user can't accidentally reap their own account by undershooting
+// the existential deposit) and balances.transferAllowDeath if they explicitly
+// uncheck "Keep account alive". Falls back to balances.transfer on older
+// runtimes that don't expose the split variants. The fee is estimated via
+// `tx.paymentInfo(sender)` and refreshed as the recipient/amount changes.
+const SEND_FEE_BUFFER = 0.05; // PDEX held back from "Max" to cover fee + slippage.
+let sendFeeDebounce = null;
+let sendLastFeePDEX = null;     // last estimated fee in PDEX
+let sendValidRecipient = false; // cached so we don't re-validate on every keystroke
+
+function showSendError(msg) {
+    const el = document.getElementById('send-modal-error');
+    if (el) { el.textContent = msg; el.style.display = 'block'; }
+}
+function clearSendError() {
+    const el = document.getElementById('send-modal-error');
+    if (el) { el.textContent = ''; el.style.display = 'none'; }
+}
+
+// Build the transfer extrinsic, picking the best variant available on the
+// connected runtime. Newer Substrate splits the call into KeepAlive vs
+// AllowDeath; older versions only have balances.transfer.
+function buildTransferTx(api, dest, planckStr, keepAlive) {
+    const t = api.tx.balances;
+    if (!t) throw new Error('balances pallet is not available on this runtime.');
+    if (keepAlive && t.transferKeepAlive) return t.transferKeepAlive(dest, planckStr);
+    if (!keepAlive && t.transferAllowDeath) return t.transferAllowDeath(dest, planckStr);
+    if (t.transferAllowDeath) return t.transferAllowDeath(dest, planckStr);
+    if (t.transferKeepAlive) return t.transferKeepAlive(dest, planckStr);
+    if (t.transfer) return t.transfer(dest, planckStr);
+    throw new Error('No supported balances.transfer* call on this runtime.');
+}
+
+// Existential deposit (in PDEX) read from chain constants.
+function getExistentialDepositPDEX() {
+    try {
+        const ed = globalApi && globalApi.consts && globalApi.consts.balances && globalApi.consts.balances.existentialDeposit;
+        if (!ed) return 0;
+        return Number(BigInt(ed.toString())) / 1e12;
+    } catch (e) { return 0; }
+}
+
+// Re-estimate the network fee for the current recipient + amount and paint it
+// into the modal's summary row. Debounced so we don't spam the chain on every
+// keystroke. Falls back to a sensible buffer if estimation isn't available.
+function refreshSendFeeEstimate() {
+    if (sendFeeDebounce) clearTimeout(sendFeeDebounce);
+    sendFeeDebounce = setTimeout(async () => {
+        const data = currentWalletData;
+        const feeEl = document.getElementById('send-fee');
+        const amountPreviewEl = document.getElementById('send-amount-preview');
+        const recvPreviewEl = document.getElementById('send-recv-preview');
+        const toEl = document.getElementById('send-to-input');
+        const amtEl = document.getElementById('send-amount-input');
+        const keepAliveEl = document.getElementById('send-keep-alive');
+        if (!data || !globalApi || !feeEl) return;
+        const to = (toEl && toEl.value || '').trim();
+        const amtStr = (amtEl && amtEl.value || '').trim();
+        const amt = parseFloat(amtStr);
+        const validAmt = Number.isFinite(amt) && amt > 0;
+        if (amountPreviewEl) amountPreviewEl.textContent = validAmt ? (stakingFormatPDEX(amt) + ' PDEX') : '—';
+
+        if (!sendValidRecipient || !validAmt) {
+            feeEl.textContent = '—';
+            if (recvPreviewEl) recvPreviewEl.textContent = '—';
+            sendLastFeePDEX = null;
+            return;
+        }
+        try {
+            const tx = buildTransferTx(globalApi, to, pdexToPlanck(amtStr), !!(keepAliveEl && keepAliveEl.checked));
+            const info = await tx.paymentInfo(data.address);
+            const feePlanck = info && info.partialFee ? BigInt(info.partialFee.toString()) : 0n;
+            const feePDEX = Number(feePlanck) / 1e12;
+            sendLastFeePDEX = feePDEX;
+            feeEl.textContent = feePDEX > 0 ? (stakingFormatPDEX(feePDEX) + ' PDEX') : '~0';
+            if (recvPreviewEl) recvPreviewEl.textContent = stakingFormatPDEX(amt) + ' PDEX';
+        } catch (e) {
+            // paymentInfo can fail before a node connection is ready; show a
+            // conservative placeholder rather than blocking the flow.
+            feeEl.textContent = '≈ ' + stakingFormatPDEX(SEND_FEE_BUFFER) + ' PDEX (est.)';
+            sendLastFeePDEX = null;
+            if (recvPreviewEl) recvPreviewEl.textContent = stakingFormatPDEX(amt) + ' PDEX';
+        }
+    }, 250);
+}
+
+function validateSendRecipient() {
+    const toEl = document.getElementById('send-to-input');
+    const hintEl = document.getElementById('send-to-hint');
+    if (!toEl) return;
+    const v = (toEl.value || '').trim();
+    if (!v) {
+        sendValidRecipient = false;
+        if (hintEl) { hintEl.textContent = 'Paste a valid Polkadex (SS58 prefix 88) address.'; hintEl.style.color = ''; }
+        return;
+    }
+    if (!isValidPolkadexAddress(v)) {
+        sendValidRecipient = false;
+        if (hintEl) { hintEl.textContent = 'That address is not valid on Polkadex.'; hintEl.style.color = 'var(--error)'; }
+        return;
+    }
+    const data = currentWalletData;
+    if (data && isSameAddress(v, data.address)) {
+        sendValidRecipient = false;
+        if (hintEl) { hintEl.textContent = 'Cannot send to yourself.'; hintEl.style.color = 'var(--error)'; }
+        return;
+    }
+    sendValidRecipient = true;
+    if (hintEl) { hintEl.textContent = 'Address looks good.'; hintEl.style.color = 'var(--success, #2ecc71)'; }
+}
+
+function openSendModal() {
+    const data = currentWalletData;
+    if (!data) return alert('Wallet data is not loaded yet.');
+    if (!isSameAddress(getStoredWallet(), data.address)) return alert('Connect this wallet to send PDEX.');
+    const modal = document.getElementById('send-modal');
+    if (!modal) return;
+    clearSendError();
+    sendValidRecipient = false;
+    sendLastFeePDEX = null;
+
+    const toEl = document.getElementById('send-to-input');
+    const amtEl = document.getElementById('send-amount-input');
+    if (toEl) toEl.value = '';
+    if (amtEl) amtEl.value = '';
+    const hintEl = document.getElementById('send-to-hint');
+    if (hintEl) { hintEl.textContent = 'Paste a valid Polkadex (SS58 prefix 88) address.'; hintEl.style.color = ''; }
+
+    const available = getStakeableBalance(data);
+    const availEl = document.getElementById('send-available');
+    if (availEl) availEl.textContent = stakingFormatPDEX(available);
+    const feeEl = document.getElementById('send-fee');
+    if (feeEl) feeEl.textContent = '—';
+    const previewEl = document.getElementById('send-amount-preview');
+    if (previewEl) previewEl.textContent = '—';
+    const recvEl = document.getElementById('send-recv-preview');
+    if (recvEl) recvEl.textContent = '—';
+
+    modal.style.display = 'flex';
+    // Focus the recipient field for fast keyboard entry.
+    setTimeout(() => { if (toEl) toEl.focus(); }, 50);
+}
+
+async function submitSendTx() {
+    clearSendError();
+    const data = currentWalletData;
+    if (!data) return showSendError('Wallet data is not loaded.');
+    if (!isSameAddress(getStoredWallet(), data.address)) return showSendError('Connect this wallet to send PDEX.');
+
+    const to = (document.getElementById('send-to-input').value || '').trim();
+    const amtStr = (document.getElementById('send-amount-input').value || '').trim();
+    const keepAlive = !!document.getElementById('send-keep-alive').checked;
+
+    if (!to) return showSendError('Enter a recipient address.');
+    if (!isValidPolkadexAddress(to)) return showSendError('That recipient address is not valid on Polkadex.');
+    if (isSameAddress(to, data.address)) return showSendError('You cannot send to your own address.');
+    if (!isPositiveNumberInput(amtStr)) return showSendError('Enter an amount greater than zero.');
+    const amt = parseFloat(amtStr);
+    if (!Number.isFinite(amt) || amt <= 0) return showSendError('Enter a valid amount.');
+
+    const available = getStakeableBalance(data);
+    const feeBuffer = (sendLastFeePDEX != null) ? Math.max(sendLastFeePDEX * 1.2, SEND_FEE_BUFFER / 5) : SEND_FEE_BUFFER;
+    if (amt > available) return showSendError(`Amount exceeds your transferable balance (${stakingFormatPDEX(available)} PDEX).`);
+    if (amt > available - feeBuffer) return showSendError(`Keep at least ~${stakingFormatPDEX(feeBuffer)} PDEX free for the network fee. Try ${stakingFormatPDEX(Math.max(0, available - feeBuffer))} PDEX or less.`);
+
+    // Warn the user if sending below the existential deposit to a recipient
+    // that probably doesn't exist yet — the runtime will reject the transfer.
+    const ed = getExistentialDepositPDEX();
+    if (ed > 0 && amt < ed) {
+        return showSendError(`Amount must be at least the existential deposit (${stakingFormatPDEX(ed)} PDEX) when funding a new account.`);
+    }
+
+    await submitSignedTx({
+        buildTx: (api) => buildTransferTx(api, to, pdexToPlanck(amtStr), keepAlive),
+        label: 'Transfer',
+        button: document.getElementById('submit-send-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Send',
+        onError: showSendError,
+        onSuccess: () => {
+            const modal = document.getElementById('send-modal');
+            if (modal) modal.style.display = 'none';
+            // Refresh dashboard a beat later so the chain has finalized the
+            // new balances by the time we re-query.
+            setTimeout(() => fetchWalletDashboard(data.address), 2500);
+        }
+    });
+}
+
 // One-time wiring of the static modal controls (close buttons, max buttons, submit).
 (function wireWalletStakingModals() {
     const closeOn = (modalId, btnId) => {
@@ -2776,6 +3551,7 @@ async function submitUnstakeTx() {
     closeOn('stake-modal', 'close-stake-modal');
     closeOn('payout-modal', 'close-payout-modal');
     closeOn('unstake-modal', 'close-unstake-modal');
+    closeOn('send-modal', 'close-send-modal');
 
     const stakeMax = document.getElementById('stake-max-btn');
     if (stakeMax) stakeMax.addEventListener('click', () => {
@@ -2811,6 +3587,31 @@ async function submitUnstakeTx() {
 
     const payoutSubmit = document.getElementById('submit-payout-tx-btn');
     if (payoutSubmit) payoutSubmit.addEventListener('click', submitPayoutTx);
+
+    // Send modal: Max, submit, live validation, live fee estimate.
+    const sendMax = document.getElementById('send-max-btn');
+    if (sendMax) sendMax.addEventListener('click', () => {
+        const data = currentWalletData;
+        if (!data) return;
+        // Reserve a small fee buffer — refined to the actual estimated fee
+        // (×1.2 for safety) when paymentInfo has returned at least once.
+        const available = getStakeableBalance(data);
+        const buffer = (sendLastFeePDEX != null) ? Math.max(sendLastFeePDEX * 1.2, SEND_FEE_BUFFER / 5) : SEND_FEE_BUFFER;
+        const usable = Math.max(0, available - buffer);
+        const amtInput = document.getElementById('send-amount-input');
+        if (amtInput) {
+            amtInput.value = usable.toFixed(4);
+            refreshSendFeeEstimate();
+        }
+    });
+    const sendSubmit = document.getElementById('submit-send-tx-btn');
+    if (sendSubmit) sendSubmit.addEventListener('click', submitSendTx);
+    const sendTo = document.getElementById('send-to-input');
+    if (sendTo) sendTo.addEventListener('input', () => { validateSendRecipient(); refreshSendFeeEstimate(); });
+    const sendAmt = document.getElementById('send-amount-input');
+    if (sendAmt) sendAmt.addEventListener('input', refreshSendFeeEstimate);
+    const sendKeep = document.getElementById('send-keep-alive');
+    if (sendKeep) sendKeep.addEventListener('change', refreshSendFeeEstimate);
 })();
 
 // --- Donate Page ---
@@ -2965,7 +3766,7 @@ function renderThreadList(threads) {
             : '<span class="reward-badge unclaimed">Closed</span>';
         const meta = `${t.postCount} post${t.postCount === 1 ? '' : 's'}` +
             (t.status === 'closed' && t.closedReason ? ' · ' + stakingEscapeHtml(t.closedReason) : '');
-        return `<a class="discussion-thread-row" href="#discussions/${encodeURIComponent(t.id)}">
+        return `<a class="discussion-thread-row" href="/discussions/${encodeURIComponent(t.id)}">
             <div class="discussion-thread-main">
                 <span class="discussion-thread-title">${stakingEscapeHtml(t.title || t.id)}</span>
                 <span class="discussion-thread-meta">${meta}</span>
@@ -3013,7 +3814,7 @@ function renderThread(thread, posts) {
         ? posts.map(p => `
             <div class="discussion-post">
                 <div class="discussion-post-head">
-                    <a href="#account/${encodeURIComponent(p.author)}" class="item-link" style="color:var(--brand-secondary);font-weight:600;">${stakingEscapeHtml(p.authorName && p.authorName !== 'Unknown' ? p.authorName : stakingShortAddress(p.author))}</a>
+                    <a href="/account/${encodeURIComponent(p.author)}" class="item-link" style="color:var(--brand-secondary);font-weight:600;">${stakingEscapeHtml(p.authorName && p.authorName !== 'Unknown' ? p.authorName : stakingShortAddress(p.author))}</a>
                     <span style="color:var(--text-muted);font-size:0.75rem;">${new Date(p.createdAt).toLocaleString('en-US')}</span>
                 </div>
                 <div class="discussion-post-body">${stakingEscapeHtml(p.content).replace(/\n/g, '<br>')}</div>
@@ -3047,7 +3848,7 @@ function renderThread(thread, posts) {
         <div class="list-container glass">
             <div class="list-header">
                 <h2 style="display:flex;align-items:center;gap:10px;">${stakingEscapeHtml(thread.title || thread.id)} ${badge}</h2>
-                <a href="#discussions" class="item-link" style="color:var(--text-secondary);font-size:0.8rem;">All discussions</a>
+                <a href="/discussions" class="item-link" style="color:var(--text-secondary);font-size:0.8rem;">All discussions</a>
             </div>
             <div class="discussion-posts">${postsHtml}</div>
             ${composer}
@@ -3253,10 +4054,10 @@ function renderDemocracyProposals(d) {
         const who = p.proposerName && p.proposerName !== 'Unknown' ? p.proposerName : stakingShortAddress(p.proposer);
         rows += `<tr>
             <td>#${p.index}</td>
-            <td><a href="#account/${encodeURIComponent(p.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(who)}</a></td>
+            <td><a href="/account/${encodeURIComponent(p.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(who)}</a></td>
             <td style="text-align:right;">${stakingFormatPDEX(p.deposit)} PDEX</td>
             <td style="text-align:right;">${stakingFormatNumber(p.seconds)}</td>
-            <td style="text-align:right;"><a href="#discussions/proposal-${p.index}" class="item-link" style="color:var(--brand-secondary);">Discuss</a></td>
+            <td style="text-align:right;"><a href="/discussions/proposal-${p.index}" class="item-link" style="color:var(--brand-secondary);">Discuss</a></td>
         </tr>`;
     });
     return `<div class="table-responsive"><table class="data-table">
@@ -3534,7 +4335,7 @@ function renderCouncilMotions(data) {
         const voterList = (label, addrs) => {
             if (!addrs || !addrs.length) return '';
             return `<details class="motion-details"><summary>${label} (${addrs.length})</summary>
-                <div class="motion-voters">${addrs.map(a => `<a href="#account/${encodeURIComponent(a)}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(a)}</a>`).join('')}</div>
+                <div class="motion-voters">${addrs.map(a => `<a href="/account/${encodeURIComponent(a)}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(a)}</a>`).join('')}</div>
             </details>`;
         };
 
@@ -3595,7 +4396,7 @@ function renderResolvedMotions(data) {
         const idx = (m.motionIndex === null || m.motionIndex === undefined) ? '—' : ('#' + m.motionIndex);
         const call = (m.section && m.method) ? `${m.section}.${m.method}` : 'Council Motion';
         const proposer = m.proposer
-            ? `<a href="#account/${encodeURIComponent(m.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(m.proposerName, m.proposer))}</a>`
+            ? `<a href="/account/${encodeURIComponent(m.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(m.proposerName, m.proposer))}</a>`
             : '<span style="color:var(--text-muted);">—</span>';
         const tally = (m.ayes == null && m.nays == null) ? '—' : `${m.ayes || 0} / ${m.nays || 0}`;
         return `<tr>
@@ -3971,7 +4772,7 @@ function treasuryStatusBadge(status) {
 
 function treasuryPartyCell(name, address) {
     if (!address) return '<span style="color:var(--text-muted);">—</span>';
-    return `<a href="#account/${encodeURIComponent(address)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(name, address))}</a>`;
+    return `<a href="/account/${encodeURIComponent(address)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(name, address))}</a>`;
 }
 
 function renderTreasuryProposalRows(list, showStatus) {

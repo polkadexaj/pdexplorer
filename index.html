@@ -2,18 +2,159 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Polkadex Mainnet Explorer</title>
-    <meta name="description" content="Blocks, extrinsics, events, transactions, accounts, validators, staking, and real‑time analytics for the Polkadex network.">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- Primary SEO. Default values; script.js overrides per route. -->
+    <title>Polkadex Mainnet Explorer — Send PDEX, Stake, Validators & Governance</title>
+    <meta name="description" content="The Polkadex Mainnet block explorer and lightweight wallet. Send PDEX, stake to validators, claim rewards, and browse blocks, transactions, accounts, and on-chain governance — works on desktop with Polkadot.js / Talisman / SubWallet and on mobile with Nova Wallet and SubWallet in-app browsers.">
+    <meta name="keywords" content="Polkadex, PDEX, send PDEX, transfer PDEX, Polkadex wallet, Nova Wallet, SubWallet, Talisman, Polkadot.js, blockchain explorer, Substrate explorer, Polkadot ecosystem, validators, staking rewards, nominators, democracy, council, treasury, transactions, blocks, mobile crypto wallet, dapp browser">
+    <meta name="author" content="Polkadex Foundation">
+    <meta name="publisher" content="Polkadex Foundation">
+    <meta name="application-name" content="Polkadex Explorer">
+    <meta name="generator" content="Polkadex Explorer">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    <meta name="googlebot" content="index, follow">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <meta name="format-detection" content="telephone=no">
+    <meta name="rating" content="general">
+    <meta name="theme-color" content="#7c3aed" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#1a103d" media="(prefers-color-scheme: dark)">
+    <meta name="color-scheme" content="dark light">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Polkadex Explorer">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="canonical" href="https://explorer.polkadex.ee/">
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Polkadex Explorer">
+    <meta property="og:title" content="Polkadex Mainnet Explorer — Send PDEX, Stake, Governance">
+    <meta property="og:description" content="Send PDEX, stake to validators, claim rewards, and browse Polkadex Mainnet blocks, transactions and governance — desktop wallet extensions plus mobile wallets (Nova, SubWallet).">
+    <meta property="og:url" content="https://explorer.polkadex.ee/">
+    <meta property="og:image" content="https://explorer.polkadex.ee/og-image.png">
+    <meta property="og:image:secure_url" content="https://explorer.polkadex.ee/og-image.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Polkadex Mainnet Explorer">
+    <meta property="og:locale" content="en_US">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:site" content="@polkadex">
+    <meta name="twitter:creator" content="@polkadex">
+    <meta name="twitter:title" content="Polkadex Mainnet Explorer — Send PDEX, Stake, Governance">
+    <meta name="twitter:description" content="Send PDEX, stake to validators, claim rewards, and browse Polkadex Mainnet blocks, transactions and governance — desktop wallet extensions plus mobile wallets (Nova, SubWallet).">
+    <meta name="twitter:image" content="https://explorer.polkadex.ee/og-image.png">
+    <meta name="twitter:image:alt" content="Polkadex Mainnet Explorer">
+
+    <!-- Icons & PWA -->
+    <link rel="icon" type="image/png" href="favicon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="logo.png">
+    <link rel="apple-touch-icon" href="logo.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="logo.png">
+    <link rel="mask-icon" href="logo.png" color="#7c3aed">
+    <link rel="manifest" href="/manifest.webmanifest">
+
+    <!-- DNS prefetch / preconnect for third-party origins. preconnect opens the
+         TCP+TLS handshake early; dns-prefetch is a cheaper fallback for less
+         critical origins. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+    <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
+    <link rel="dns-prefetch" href="https://unpkg.com">
+    <link rel="preload" as="image" href="logo.png" fetchpriority="high">
+
+    <!-- Sitemap discovery for crawlers that read <link rel="sitemap">. -->
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml">
+    <link rel="alternate" type="application/rss+xml" title="Polkadex Explorer" href="https://explorer.polkadex.ee/">
+
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
-    <!-- Boxicons for modern icons -->
     <link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
-    <link rel="icon" type="image/png" href="favicon.png">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <!-- Defer third-party scripts so they don't block first paint; the SPA
+         only needs them after first interaction (chart on dashboard,
+         QR code on the donate page). -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
+
+    <!-- Structured data: WebSite + Organization + SiteNavigationElement. The
+         SearchAction hooks into Google's sitelink search box. -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://explorer.polkadex.ee/#website",
+          "url": "https://explorer.polkadex.ee/",
+          "name": "Polkadex Explorer",
+          "description": "Polkadex Mainnet block explorer — blocks, transactions, validators, staking, governance.",
+          "inLanguage": "en-US",
+          "publisher": { "@id": "https://explorer.polkadex.ee/#organization" },
+          "potentialAction": {
+            "@type": "SearchAction",
+            "target": {
+              "@type": "EntryPoint",
+              "urlTemplate": "https://explorer.polkadex.ee/search?q={search_term_string}"
+            },
+            "query-input": "required name=search_term_string"
+          }
+        },
+        {
+          "@type": "Organization",
+          "@id": "https://explorer.polkadex.ee/#organization",
+          "name": "Polkadex Foundation",
+          "url": "https://polkadex.ee",
+          "logo": {
+            "@type": "ImageObject",
+            "url": "https://explorer.polkadex.ee/logo.png",
+            "width": 256,
+            "height": 256
+          },
+          "sameAs": [
+            "https://twitter.com/polkadex",
+            "https://github.com/Polkadex-Substrate",
+            "https://www.youtube.com/c/Polkadex",
+            "https://polkadex.medium.com"
+          ]
+        },
+        {
+          "@type": "SoftwareApplication",
+          "@id": "https://explorer.polkadex.ee/#app",
+          "name": "Polkadex Explorer",
+          "alternateName": "PDEX Explorer",
+          "url": "https://explorer.polkadex.ee/",
+          "applicationCategory": "FinanceApplication",
+          "applicationSubCategory": "Blockchain Explorer & Wallet",
+          "operatingSystem": "Web, iOS (via Nova Wallet / SubWallet in-app browser), Android (via Nova Wallet / SubWallet in-app browser)",
+          "browserRequirements": "Requires JavaScript and a Substrate wallet (Polkadot.js, Talisman, SubWallet, Nova Wallet) for signing actions.",
+          "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+          "featureList": [
+            "Send PDEX to any Polkadex address with live fee estimation",
+            "Connect a Substrate wallet (Polkadot.js, Talisman, SubWallet)",
+            "Mobile wallet support via Nova Wallet and SubWallet in-app browsers",
+            "Stake to validators and update nominations",
+            "Claim accumulated staking rewards (batched payoutStakers)",
+            "Begin unbonding stake with on-chain unbonding period",
+            "Real-time block, transaction, and event feed",
+            "Validator era history with commission and stake charts",
+            "Top PDEX holder rankings",
+            "On-chain governance: democracy, council, treasury",
+            "Personal account dashboard with balances, staking, and rewards"
+          ],
+          "publisher": { "@id": "https://explorer.polkadex.ee/#organization" },
+          "isAccessibleForFree": true,
+          "inLanguage": "en-US"
+        }
+      ]
+    }
+    </script>
 </head>
 <body>
     <div class="app-container">
@@ -27,19 +168,22 @@
                 <button class="mobile-toggle sidebar-close" onclick="document.getElementById('sidebar').classList.remove('open')"><i class='bx bx-x'></i></button>
             </div>
             <nav class="sidebar-nav">
-                <a href="#home" class="nav-item active" data-target="home"><i class='bx bx-grid-alt'></i> Home</a>
-                <a href="#holders" class="nav-item" data-target="holders"><i class='bx bx-user-pin'></i> Top Holders</a>
-                <a href="#transactions" class="nav-item" data-target="transactions"><i class='bx bx-transfer'></i> Transactions</a>
-                <a href="#blocks" class="nav-item" data-target="blocks"><i class='bx bx-cube'></i> Blocks</a>
-                <a href="#events" class="nav-item" data-target="events"><i class='bx bx-calendar-event'></i> Events</a>
-                <a href="#validators" class="nav-item" data-target="validators"><i class='bx bx-check-shield'></i> Validators</a>
-                <a href="#staking-rewards" class="nav-item" data-target="staking-rewards"><i class='bx bx-coin-stack'></i> Staking Rewards <span class="badge">NEW</span></a>
-                
+                <a href="/" class="nav-item active" data-target="home"><i class='bx bx-grid-alt'></i> Home</a>
+                <a href="/holders" class="nav-item" data-target="holders"><i class='bx bx-user-pin'></i> Top Holders</a>
+                <a href="/transactions" class="nav-item" data-target="transactions"><i class='bx bx-transfer'></i> Transactions</a>
+                <a href="/blocks" class="nav-item" data-target="blocks"><i class='bx bx-cube'></i> Blocks</a>
+                <a href="/events" class="nav-item" data-target="events"><i class='bx bx-calendar-event'></i> Events</a>
+                <a href="/validators" class="nav-item" data-target="validators"><i class='bx bx-check-shield'></i> Validators</a>
+                <a href="/staking-rewards" class="nav-item" data-target="staking-rewards"><i class='bx bx-coin-stack'></i> Staking Rewards <span class="badge">NEW</span></a>
+
+                <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">My Wallet</div>
+                <a href="/wallet" class="nav-item" data-target="wallet" id="nav-my-account"><i class='bx bx-user-circle'></i> My Account</a>
+
                 <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Governance</div>
-                <a href="#democracy" class="nav-item" data-target="democracy"><i class='bx bx-book-content'></i> Democracy</a>
-                <a href="#council" class="nav-item" data-target="council"><i class='bx bx-group'></i> Council</a>
-                <a href="#treasury" class="nav-item" data-target="treasury"><i class='bx bx-wallet'></i> Treasury</a>
-                <a href="#discussions" class="nav-item" data-target="discussions"><i class='bx bx-chat'></i> Discussions</a>
+                <a href="/democracy" class="nav-item" data-target="democracy"><i class='bx bx-book-content'></i> Democracy</a>
+                <a href="/council" class="nav-item" data-target="council"><i class='bx bx-group'></i> Council</a>
+                <a href="/treasury" class="nav-item" data-target="treasury"><i class='bx bx-wallet'></i> Treasury</a>
+                <a href="/discussions" class="nav-item" data-target="discussions"><i class='bx bx-chat'></i> Discussions</a>
                 
                 <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Community Projects</div>
                 <a href="https://buypdex.com" target="_blank" rel="noopener" class="nav-item"><i class='bx bx-shopping-bag'></i> Buy PDEX</a>
@@ -74,14 +218,17 @@
                     <span class="status-text">Polkadex Mainnet</span>
                 </div>
                 <div class="header-actions" style="display: flex; align-items: center; gap: 12px;">
-                    <a href="#donate" id="donate-btn" class="donate-btn" title="Support the Polkadex Explorer">
+                    <a href="/donate" id="donate-btn" class="donate-btn" title="Support the Polkadex Explorer">
                         <i class='bx bx-heart'></i>
                         <span>Donate</span>
                     </a>
                     <div class="wallet-btn-group">
                         <button id="connect-wallet-btn" class="connect-wallet-btn" title="Connect your Substrate wallet to view balances and sign staking actions">
                             <i class='bx bx-wallet'></i>
-                            <span id="connect-wallet-label">Connect Wallet</span>
+                            <span class="connect-wallet-text">
+                                <span id="connect-wallet-label">Connect Wallet</span>
+                                <span id="connect-wallet-sub" class="connect-wallet-sub" style="display: none;"></span>
+                            </span>
                         </button>
                         <button id="disconnect-wallet-btn" class="disconnect-wallet-btn" title="Disconnect wallet" style="display: none;">
                             <i class='bx bx-x'></i>
@@ -150,7 +297,7 @@
                     <div class="list-container glass">
                         <div class="list-header">
                             <h2>Recent Blocks</h2>
-                            <a href="#blocks" class="view-all">View all <i class='bx bx-right-arrow-alt'></i></a>
+                            <a href="/blocks" class="view-all">View all <i class='bx bx-right-arrow-alt'></i></a>
                         </div>
                         <div class="list-content" id="blocks-list">
                             <!-- Blocks populated by JS -->
@@ -161,7 +308,7 @@
                     <div class="list-container glass">
                         <div class="list-header">
                             <h2>Recent Transactions</h2>
-                            <a href="#transactions" class="view-all">View all <i class='bx bx-right-arrow-alt'></i></a>
+                            <a href="/transactions" class="view-all">View all <i class='bx bx-right-arrow-alt'></i></a>
                         </div>
                         <div class="list-content" id="transactions-list">
                             <!-- Transactions populated by JS -->
@@ -506,6 +653,42 @@
 
                     <div id="payout-modal-error" class="staking-error" style="display: none; margin-top: 12px;"></div>
                     <button id="submit-payout-tx-btn" class="modal-submit-btn">Sign &amp; Pay Out</button>
+                </div>
+            </div>
+
+            <!-- Send PDEX Modal -->
+            <div id="send-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass" style="width: 100%; max-width: 540px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
+                    <button id="close-send-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Send PDEX</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Transfer PDEX from the connected wallet to any Polkadex address. The transaction is signed and submitted by your wallet extension.</p>
+
+                    <label class="stake-label">Recipient address</label>
+                    <div class="stake-amount-wrap">
+                        <input type="text" id="send-to-input" placeholder="es… Polkadex address" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="stake-hint" id="send-to-hint" style="margin-bottom: 14px;">Paste a valid Polkadex (SS58 prefix 88) address.</div>
+
+                    <label class="stake-label">Amount (PDEX)</label>
+                    <div class="stake-amount-wrap">
+                        <input type="number" id="send-amount-input" placeholder="0.0" step="0.0001" min="0" inputmode="decimal">
+                        <button type="button" id="send-max-btn" class="stake-max-btn">Max</button>
+                    </div>
+                    <div class="stake-hint">Available: <span id="send-available">--</span> PDEX. A small buffer is reserved for the network fee.</div>
+
+                    <div class="stake-summary" id="send-summary" style="margin-top: 18px;">
+                        <div><span>Estimated fee</span><strong id="send-fee">—</strong></div>
+                        <div><span>You'll send</span><strong id="send-amount-preview">—</strong></div>
+                        <div><span>Recipient receives</span><strong id="send-recv-preview">—</strong></div>
+                    </div>
+
+                    <label style="display:flex; align-items:flex-start; gap:10px; margin-top:16px; cursor:pointer; font-size:0.85rem; color:var(--text-secondary);">
+                        <input type="checkbox" id="send-keep-alive" checked style="margin-top:3px;">
+                        <span>Keep my account alive — fail the transfer if it would drop my balance below the existential deposit. Uncheck only if you intend to empty this account.</span>
+                    </label>
+
+                    <div id="send-modal-error" class="staking-error" style="display: none; margin-top: 16px;"></div>
+                    <button id="submit-send-tx-btn" class="modal-submit-btn">Sign &amp; Send</button>
                 </div>
             </div>
 

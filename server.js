@@ -574,6 +574,138 @@ async function loadValidatorHistory(address) {
     return { history, triggers };
 }
 
+// --- SEO endpoints (robots, sitemap) -----------------------------------------
+// These are served by the backend so the sitemap can be generated dynamically
+// from the SQLite index (top validators, recent blocks, top holders). nginx
+// is configured to forward /robots.txt and /sitemap.xml here.
+const SITE_URL = (process.env.SITE_URL || 'https://explorer.polkadex.ee').replace(/\/+$/, '');
+const SITEMAP_STATIC_ROUTES = [
+    { path: '/',                  changefreq: 'always',  priority: '1.0' },
+    { path: '/blocks',            changefreq: 'always',  priority: '0.9' },
+    { path: '/transactions',      changefreq: 'always',  priority: '0.9' },
+    { path: '/events',            changefreq: 'always',  priority: '0.8' },
+    { path: '/validators',        changefreq: 'hourly',  priority: '0.9' },
+    { path: '/holders',           changefreq: 'hourly',  priority: '0.7' },
+    { path: '/staking-rewards',   changefreq: 'hourly',  priority: '0.8' },
+    { path: '/democracy',         changefreq: 'daily',   priority: '0.7' },
+    { path: '/council',           changefreq: 'daily',   priority: '0.6' },
+    { path: '/treasury',          changefreq: 'daily',   priority: '0.6' },
+    { path: '/discussions',       changefreq: 'daily',   priority: '0.5' },
+    // /wallet (no address) is the public connect-wallet landing — covers
+    // "connect Polkadex wallet" / "send PDEX" / "Nova Wallet" search intent.
+    // /wallet/:addr is intentionally not listed (personal).
+    { path: '/wallet',            changefreq: 'monthly', priority: '0.6' },
+    { path: '/donate',            changefreq: 'monthly', priority: '0.3' }
+];
+const SITEMAP_TOP_VALIDATORS = readPositiveInteger(process.env.SITEMAP_TOP_VALIDATORS, 100);
+const SITEMAP_RECENT_BLOCKS  = readPositiveInteger(process.env.SITEMAP_RECENT_BLOCKS, 200);
+const SITEMAP_TOP_HOLDERS    = readPositiveInteger(process.env.SITEMAP_TOP_HOLDERS, 100);
+// Don't recompute the sitemap on every crawler hit — they tend to come in
+// bursts. Cache the rendered XML for a few minutes.
+const SITEMAP_CACHE_TTL_MS = readPositiveInteger(process.env.SITEMAP_CACHE_TTL_MS, 5 * 60 * 1000);
+let sitemapCache = { xml: null, at: 0 };
+
+function xmlEscape(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function buildSitemapXml() {
+    const now = new Date().toISOString();
+    const urls = [];
+
+    for (const r of SITEMAP_STATIC_ROUTES) {
+        urls.push({ loc: SITE_URL + r.path, lastmod: now, changefreq: r.changefreq, priority: r.priority });
+    }
+
+    // Top validators by stake — deep pages that benefit from indexing.
+    try {
+        const v = db.getValidators();
+        const list = Array.isArray(v) ? v : (v && Array.isArray(v.validators) ? v.validators : []);
+        const top = list
+            .slice()
+            .sort((a, b) => (Number(b.totalStake) || 0) - (Number(a.totalStake) || 0))
+            .slice(0, SITEMAP_TOP_VALIDATORS);
+        for (const val of top) {
+            if (val && val.address) {
+                urls.push({ loc: SITE_URL + '/validator/' + encodeURIComponent(val.address), lastmod: now, changefreq: 'daily', priority: '0.6' });
+            }
+        }
+    } catch (e) { /* tolerate missing tables before first sync */ }
+
+    // Recent blocks — useful when a search engine is looking at "polkadex block <n>".
+    try {
+        const blocks = db.getRecentBlocks(SITEMAP_RECENT_BLOCKS) || [];
+        for (const b of blocks) {
+            if (b && b.number != null) {
+                const lastmod = b.timestamp ? new Date(Number(b.timestamp)).toISOString() : now;
+                urls.push({ loc: SITE_URL + '/block/' + b.number, lastmod, changefreq: 'never', priority: '0.4' });
+            }
+        }
+    } catch (e) { /* ignore */ }
+
+    // Top holders — public ranking pages.
+    try {
+        const h = db.getHolders();
+        const list = h && Array.isArray(h.holders) ? h.holders : [];
+        for (const holder of list.slice(0, SITEMAP_TOP_HOLDERS)) {
+            if (holder && holder.address) {
+                urls.push({ loc: SITE_URL + '/account/' + encodeURIComponent(holder.address), lastmod: now, changefreq: 'weekly', priority: '0.4' });
+            }
+        }
+    } catch (e) { /* ignore */ }
+
+    const items = urls.map(u => {
+        return '  <url>\n' +
+               '    <loc>' + xmlEscape(u.loc) + '</loc>\n' +
+               (u.lastmod ? '    <lastmod>' + xmlEscape(u.lastmod) + '</lastmod>\n' : '') +
+               (u.changefreq ? '    <changefreq>' + u.changefreq + '</changefreq>\n' : '') +
+               (u.priority ? '    <priority>' + u.priority + '</priority>\n' : '') +
+               '  </url>';
+    }).join('\n');
+
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+           items + '\n' +
+           '</urlset>\n';
+}
+
+app.get('/sitemap.xml', (req, res) => {
+    const now = Date.now();
+    if (!sitemapCache.xml || (now - sitemapCache.at) > SITEMAP_CACHE_TTL_MS) {
+        try {
+            sitemapCache = { xml: buildSitemapXml(), at: now };
+        } catch (err) {
+            return res.status(500).type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>\n');
+        }
+    }
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300');
+    res.type('application/xml').send(sitemapCache.xml);
+});
+
+app.get('/robots.txt', (req, res) => {
+    const lines = [
+        'User-agent: *',
+        'Allow: /',
+        // /wallet (bare) is a public connect-wallet landing; only the personal
+        // /wallet/:addr dashboard is blocked. Note that "Disallow: /wallet/"
+        // matches "/wallet/anything" but not "/wallet" itself.
+        'Allow: /wallet',
+        'Disallow: /wallet/',
+        'Disallow: /search',
+        'Disallow: /api/',
+        '',
+        'Sitemap: ' + SITE_URL + '/sitemap.xml',
+        ''
+    ];
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.type('text/plain').send(lines.join('\n'));
+});
+
 // --- LIST ENDPOINTS (served from SQLite) ---
 app.get('/api/validators', (req, res) => {
     try { res.json(db.getValidators()); }

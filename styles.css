@@ -1070,6 +1070,125 @@ h1, h2, h3 { font-weight: 600; }
 .connect-wallet-btn:active { transform: scale(0.98); }
 .connect-wallet-btn i { font-size: 1.05rem; }
 
+/* Stacked "My Account" / address label. Layout collapses to a single line
+   when no sub-label is present (disconnected state). */
+.connect-wallet-btn .connect-wallet-text {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    line-height: 1.15;
+    text-align: left;
+}
+.connect-wallet-btn .connect-wallet-sub {
+    font-size: 0.7rem;
+    font-weight: 500;
+    opacity: 0.78;
+    letter-spacing: 0.2px;
+    margin-top: 1px;
+    font-variant-numeric: tabular-nums;
+}
+/* Connected look: switch to a lighter "outline-pill" so the button reads as
+   identity rather than a CTA, and the wallet icon turns into a check-style
+   indicator via the brand secondary color. */
+.connect-wallet-btn.is-connected {
+    background: rgba(124, 58, 237, 0.12);
+    color: var(--text-primary);
+    border: 1px solid rgba(124, 58, 237, 0.45);
+    padding: 7px 14px;
+}
+.connect-wallet-btn.is-connected i { color: var(--brand-secondary, #00E676); }
+.connect-wallet-btn.is-connected:hover { background: rgba(124, 58, 237, 0.20); }
+
+/* --- Mobile wallet connect cards --- */
+.wallet-env-banner {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(0, 230, 118, 0.08);
+    border: 1px solid rgba(0, 230, 118, 0.35);
+    color: var(--text-primary);
+    padding: 10px 14px;
+    border-radius: var(--radius-sm, 8px);
+    margin-bottom: 14px;
+    font-size: 0.85rem;
+}
+.wallet-env-banner i { color: var(--brand-secondary, #00E676); font-size: 1.15rem; }
+.wallet-empty-msg {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+.wallet-empty-msg a { color: var(--brand-secondary, #00E676); }
+.mobile-wallet-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.mobile-wallet-card {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: rgba(255,255,255,0.02);
+}
+.mobile-wallet-head { display: flex; flex-direction: column; gap: 2px; }
+.mobile-wallet-head strong { font-size: 0.95rem; }
+.mobile-wallet-head span { color: var(--text-muted); font-size: 0.75rem; }
+.mobile-wallet-cta {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 8px 12px;
+    background: var(--brand-primary, #7c3aed);
+    color: #fff;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.82rem;
+}
+.mobile-wallet-cta:hover { opacity: 0.92; }
+.mobile-wallet-cta.secondary {
+    background: rgba(124, 58, 237, 0.12);
+    color: var(--text-primary);
+    border: 1px solid rgba(124, 58, 237, 0.4);
+}
+.mobile-wallet-storelinks { display: flex; gap: 8px; }
+.mobile-wallet-storelinks a {
+    flex: 1;
+    text-align: center;
+    padding: 7px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    text-decoration: none;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.mobile-wallet-storelinks a:hover { background: rgba(255,255,255,0.04); color: var(--text-primary); }
+.mobile-wallet-copyrow {
+    display: flex; gap: 8px; margin-top: 8px;
+}
+.mobile-wallet-copyrow input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    background: rgba(255,255,255,0.03);
+    color: var(--text-primary);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+}
+.mobile-wallet-copyrow button {
+    padding: 8px 12px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    display: inline-flex; align-items: center; gap: 6px;
+}
+.mobile-wallet-copyrow button:hover { background: rgba(255,255,255,0.04); }
+
 /* --- Wallet dashboard --- */
 .wallet-page { gap: 20px; }
 #wallet-dashboard {
