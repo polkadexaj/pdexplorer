@@ -1902,21 +1902,27 @@ h1, h2, h3 { font-weight: 600; }
     flex-shrink: 0;
 }
 
-/* --- Wallet staking action bar + modals (stake / payout / unstake) --- */
+/* --- Wallet action bar + modals (send / stake / payout / unstake) --- */
+/* Four equal columns so Send, Stake more, Pay out rewards, and Unstake all
+   sit in a single row on desktop. Tablet widths drop to two columns; narrow
+   phones collapse to one button per row. */
 .wallet-action-bar {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
     margin: 0 0 4px;
 }
-@media (max-width: 760px) {
+@media (max-width: 1100px) {
+    .wallet-action-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
     .wallet-action-bar { grid-template-columns: 1fr; }
 }
 .wallet-action-btn {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 14px 18px;
+    gap: 12px;
+    padding: 14px 16px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
@@ -1925,6 +1931,9 @@ h1, h2, h3 { font-weight: 600; }
     font-family: inherit;
     text-align: left;
     transition: border-color var(--transition-fast), background var(--transition-fast);
+    /* Each tile must be able to shrink to fit; the inner text column does the
+       truncating so labels stay on a single visual line at narrow widths. */
+    min-width: 0;
 }
 .wallet-action-btn:hover:not(:disabled) {
     border-color: var(--border-hover);
@@ -1945,8 +1954,21 @@ h1, h2, h3 { font-weight: 600; }
     gap: 2px;
     min-width: 0;
 }
-.wallet-action-btn strong { font-size: 0.9rem; font-weight: 600; }
-.wallet-action-btn span { font-size: 0.74rem; color: var(--text-secondary); }
+.wallet-action-btn strong {
+    font-size: 0.9rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.wallet-action-btn span {
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
 .wallet-action-btn.primary {
     background: rgba(230, 0, 122, 0.08);
     border-color: rgba(230, 0, 122, 0.35);
