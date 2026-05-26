@@ -441,6 +441,98 @@
                 </div>
             </div>
 
+            <!-- Stake / Nominate Modal -->
+            <div id="stake-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass stake-modal-body">
+                    <button id="close-stake-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Stake &amp; Nominate</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Add to your bond and pick the validators you want to back. Your nomination set is replaced with whatever appears in the &ldquo;Selected&rdquo; box on submit.</p>
+
+                    <div class="stake-row">
+                        <div>
+                            <label class="stake-label">Additional amount to bond (PDEX)</label>
+                            <div class="stake-amount-wrap">
+                                <input type="number" id="stake-amount-input" placeholder="0.0" step="0.0001" min="0">
+                                <button type="button" id="stake-max-btn" class="stake-max-btn">Max</button>
+                            </div>
+                            <div class="stake-hint">Available: <span id="stake-available">--</span> PDEX. Leave at 0 to only update nominations.</div>
+                        </div>
+                        <div class="stake-summary" id="stake-summary">
+                            <div><span>Currently staked</span><strong id="stake-current">--</strong></div>
+                            <div><span>Minimum stake</span><strong id="stake-minimum">--</strong></div>
+                            <div><span>Nominations chosen</span><strong id="stake-chosen-count">0 / 16</strong></div>
+                        </div>
+                    </div>
+
+                    <div class="stake-pickers">
+                        <div class="stake-picker">
+                            <div class="stake-picker-head">
+                                <span>Available validators</span>
+                                <input type="text" id="stake-validator-search" placeholder="Search by name or address" autocomplete="off">
+                            </div>
+                            <div id="stake-validator-list" class="stake-picker-list">
+                                <div class="stake-empty">Loading validators…</div>
+                            </div>
+                        </div>
+                        <div class="stake-picker">
+                            <div class="stake-picker-head">
+                                <span>Selected <span id="stake-selected-count" style="color:var(--text-muted);font-weight:400;font-size:0.78rem;margin-left:6px;">0 / 16</span></span>
+                                <button type="button" id="stake-clear-btn" class="stake-clear-btn">Clear</button>
+                            </div>
+                            <div id="stake-selected-list" class="stake-picker-list">
+                                <div class="stake-empty">Pick validators from the list on the left.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="stake-modal-error" class="staking-error" style="display: none; margin-top: 16px;"></div>
+                    <button id="submit-stake-tx-btn" class="modal-submit-btn">Sign &amp; Submit</button>
+                </div>
+            </div>
+
+            <!-- Payout Rewards Modal -->
+            <div id="payout-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass" style="width: 100%; max-width: 540px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
+                    <button id="close-payout-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Pay Out Rewards</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Triggers <code>staking.payoutStakers</code> for every unclaimed (era, validator) pair in one batch. Anyone can trigger a payout; the rewards always go to the nominator's stash regardless of who signs.</p>
+
+                    <div class="payout-summary">
+                        <div><span>Unclaimed entries</span><strong id="payout-count">--</strong></div>
+                        <div><span>Total to claim</span><strong id="payout-total" style="color:var(--brand-secondary);">--</strong></div>
+                    </div>
+
+                    <div id="payout-entries" class="payout-entries"></div>
+
+                    <div id="payout-modal-error" class="staking-error" style="display: none; margin-top: 12px;"></div>
+                    <button id="submit-payout-tx-btn" class="modal-submit-btn">Sign &amp; Pay Out</button>
+                </div>
+            </div>
+
+            <!-- Unstake Modal -->
+            <div id="unstake-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass" style="width: 100%; max-width: 500px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
+                    <button id="close-unstake-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Unstake (Unbond)</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Begin unbonding the amount below. Funds stay locked for the unbonding period, then become withdrawable from your wallet extension.</p>
+
+                    <div class="stake-summary" id="unstake-summary" style="margin-bottom: 18px;">
+                        <div><span>Active bond</span><strong id="unstake-active">--</strong></div>
+                        <div><span>Already unbonding</span><strong id="unstake-unlocking">--</strong></div>
+                        <div><span>Unbonding period</span><strong id="unstake-period">--</strong></div>
+                    </div>
+
+                    <label class="stake-label">Amount to unbond (PDEX)</label>
+                    <div class="stake-amount-wrap">
+                        <input type="number" id="unstake-amount-input" placeholder="0.0" step="0.0001" min="0">
+                        <button type="button" id="unstake-max-btn" class="stake-max-btn">Max</button>
+                    </div>
+
+                    <div id="unstake-modal-error" class="staking-error" style="display: none; margin-top: 12px;"></div>
+                    <button id="submit-unstake-tx-btn" class="modal-submit-btn">Sign &amp; Unstake</button>
+                </div>
+            </div>
+
             <!-- Discussions Page -->
             <div class="discussions-page page-section" data-page="discussions" style="display: none;">
                 <div id="discussions-content"></div>

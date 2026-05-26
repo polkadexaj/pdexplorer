@@ -1153,7 +1153,11 @@ app.get('/api/wallet/:address', async (req, res) => {
                 unpaidTotal,
                 unpaidCount: unclaimed.length,
                 unclaimedFresh,
-                recentClaimed: claimed.slice(0, 10)
+                recentClaimed: claimed.slice(0, 10),
+                // Per-validator/era unpaid entries — the frontend needs these to
+                // build the staking.payoutStakers(validator, era) calls for the
+                // "Pay out rewards" action.
+                unpaidEntries: unclaimed.slice(0, 200)
             },
             recentTransactions: db.getTransactionsByAddress(address, 10),
             network: {

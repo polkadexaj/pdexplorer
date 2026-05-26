@@ -2227,6 +2227,8 @@ async function fetchWalletDashboard(address) {
 function renderWalletDashboard(data, price) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
+    currentWalletData = data;
+    const isOwnWallet = getStoredWallet() === data.address;
     const identity = data.identity && data.identity !== 'Unknown' ? data.identity : null;
     const staking = data.staking || {};
     const rewards = data.rewards || {};
@@ -2286,6 +2288,22 @@ function renderWalletDashboard(data, price) {
             </div>
         </div>
 
+        ${isOwnWallet ? `
+        <div class="wallet-action-bar">
+            <button class="wallet-action-btn primary" id="wallet-act-stake">
+                <i class='bx bx-plus-circle'></i>
+                <div><strong>Stake more</strong><span>Add bond &amp; choose validators</span></div>
+            </button>
+            <button class="wallet-action-btn" id="wallet-act-payout"${(rewards.unpaidCount || 0) ? '' : ' disabled title="No unclaimed rewards to pay out."'}>
+                <i class='bx bx-gift'></i>
+                <div><strong>Pay out rewards</strong><span>${stakingFormatNumber(rewards.unpaidCount || 0)} unclaimed entr${(rewards.unpaidCount || 0) === 1 ? 'y' : 'ies'}</span></div>
+            </button>
+            <button class="wallet-action-btn" id="wallet-act-unstake"${((staking.activeStaked || 0) > 0) ? '' : ' disabled title="No active bond to unstake."'}>
+                <i class='bx bx-minus-circle'></i>
+                <div><strong>Unstake</strong><span>Begin the unbonding period</span></div>
+            </button>
+        </div>` : ''}
+
         <div class="wallet-grid">
             <div class="list-container glass">
                 <div class="list-header"><h2>PDEX Price (30d)</h2>${latestPrice ? `<span style="color:var(--brand-secondary);font-size:0.85rem;">$${Number(latestPrice.price).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>` : ''}</div>
@@ -2335,6 +2353,14 @@ function renderWalletDashboard(data, price) {
 
     const switchBtn = document.getElementById('wallet-switch-btn');
     if (switchBtn) switchBtn.addEventListener('click', disconnectWallet);
+    if (isOwnWallet) {
+        const stakeBtn = document.getElementById('wallet-act-stake');
+        const payoutBtn = document.getElementById('wallet-act-payout');
+        const unstakeBtn = document.getElementById('wallet-act-unstake');
+        if (stakeBtn) stakeBtn.addEventListener('click', openStakeModal);
+        if (payoutBtn && !payoutBtn.disabled) payoutBtn.addEventListener('click', openPayoutModal);
+        if (unstakeBtn && !unstakeBtn.disabled) unstakeBtn.addEventListener('click', openUnstakeModal);
+    }
     if (priceHistory.length) renderWalletPriceChart(priceHistory);
 }
 
@@ -2371,6 +2397,385 @@ function renderWalletPriceChart(history) {
         }
     });
 }
+
+// --- Wallet staking actions: stake more, pay out rewards, unstake ---
+// `currentWalletData` is the most recently rendered wallet payload; it's the
+// data backing each modal so users see live numbers without an extra fetch.
+let currentWalletData = null;
+let validatorsCache = null;
+let validatorsCacheAt = 0;
+const VALIDATORS_CACHE_TTL = 60 * 1000;
+let stakeSelected = new Map(); // address -> { address, name }
+let stakeValidators = [];
+
+async function loadValidatorsForPicker() {
+    if (validatorsCache && Date.now() - validatorsCacheAt < VALIDATORS_CACHE_TTL) return validatorsCache;
+    const res = await fetch('/api/validators');
+    const data = await res.json();
+    validatorsCache = Array.isArray(data.validators) ? data.validators.slice() : [];
+    // Sort by total stake desc so the top validators surface first.
+    validatorsCache.sort((a, b) => (Number(b.totalStake) || 0) - (Number(a.totalStake) || 0));
+    validatorsCacheAt = Date.now();
+    return validatorsCache;
+}
+
+// PDEX has 12 decimals. Parse a decimal string into Planck units as a string
+// so we never lose precision through Number.
+function pdexToPlanck(value) {
+    const s = String(value || '0').trim();
+    if (!s) return '0';
+    const neg = s.startsWith('-');
+    const abs = neg ? s.slice(1) : s;
+    const [intPart, decPart = ''] = abs.split('.');
+    const decPadded = (decPart + '000000000000').slice(0, 12);
+    const result = BigInt(intPart || '0') * 1000000000000n + BigInt(decPadded || '0');
+    return (neg ? -result : result).toString();
+}
+
+function isPositiveNumberInput(str) {
+    if (str == null || String(str).trim() === '') return false;
+    const n = parseFloat(str);
+    return Number.isFinite(n) && n > 0;
+}
+
+// Some Substrate runtimes use batch / batchAll / forceBatch under utility.
+function batchTx(api, calls) {
+    if (calls.length === 1) return calls[0];
+    if (api.tx.utility && api.tx.utility.batchAll) return api.tx.utility.batchAll(calls);
+    if (api.tx.utility && api.tx.utility.batch) return api.tx.utility.batch(calls);
+    throw new Error('utility.batch / batchAll is not available on this runtime.');
+}
+
+// staking.bond signature varies: legacy is (controller, value, payee), modern
+// is (value, payee). Detect from extrinsic metadata.
+function buildBondOrExtra(api, planckStr, stash, hasBond) {
+    if (hasBond) return api.tx.staking.bondExtra(planckStr);
+    const argCount = (api.tx.staking.bond && api.tx.staking.bond.meta && api.tx.staking.bond.meta.args) ? api.tx.staking.bond.meta.args.length : 2;
+    if (argCount >= 3) return api.tx.staking.bond(stash, planckStr, 'Staked');
+    return api.tx.staking.bond(planckStr, 'Staked');
+}
+
+// Newer staking pallets only expose payoutStakersByPage; older only payoutStakers.
+function buildPayoutCall(api, validator, era) {
+    if (api.tx.staking.payoutStakers) return api.tx.staking.payoutStakers(validator, era);
+    if (api.tx.staking.payoutStakersByPage) return api.tx.staking.payoutStakersByPage(validator, era, 0);
+    throw new Error('staking.payoutStakers is not available on this runtime.');
+}
+
+// --- Stake / Nominate modal ---
+function showStakeError(msg) {
+    const el = document.getElementById('stake-modal-error');
+    if (el) { el.textContent = msg; el.style.display = 'block'; }
+}
+function clearStakeError() {
+    const el = document.getElementById('stake-modal-error');
+    if (el) { el.textContent = ''; el.style.display = 'none'; }
+}
+
+async function openStakeModal() {
+    const data = currentWalletData;
+    if (!data) return alert('Wallet data is not loaded yet.');
+    const modal = document.getElementById('stake-modal');
+    if (!modal) return;
+    clearStakeError();
+    const amtInput = document.getElementById('stake-amount-input');
+    if (amtInput) amtInput.value = '';
+
+    document.getElementById('stake-available').textContent = stakingFormatPDEX(data.balance && data.balance.free);
+    document.getElementById('stake-current').textContent = stakingFormatPDEX(data.staking && data.staking.totalStaked) + ' PDEX';
+    document.getElementById('stake-minimum').textContent = stakingFormatPDEX(data.network && data.network.minStake) + ' PDEX';
+
+    // Pre-fill selected with the current nominations so the user can curate.
+    stakeSelected = new Map();
+    for (const v of (data.staking && data.staking.nominating) || []) {
+        stakeSelected.set(v.address, { address: v.address, name: v.name });
+    }
+    renderStakeSelected();
+    modal.style.display = 'flex';
+
+    const listEl = document.getElementById('stake-validator-list');
+    if (listEl) listEl.innerHTML = '<div class="stake-empty">Loading validators…</div>';
+    try {
+        stakeValidators = await loadValidatorsForPicker();
+    } catch (e) {
+        if (listEl) listEl.innerHTML = '<div class="stake-empty">Could not load validators.</div>';
+        return;
+    }
+    renderStakeValidatorList('');
+    const searchEl = document.getElementById('stake-validator-search');
+    if (searchEl) {
+        searchEl.value = '';
+        searchEl.oninput = () => renderStakeValidatorList(searchEl.value);
+    }
+}
+
+function renderStakeValidatorList(filterStr) {
+    const listEl = document.getElementById('stake-validator-list');
+    if (!listEl) return;
+    const f = (filterStr || '').trim().toLowerCase();
+    const filtered = stakeValidators.filter(v => {
+        if (!f) return true;
+        return (v.name || '').toLowerCase().includes(f) || (v.address || '').toLowerCase().includes(f);
+    });
+    if (!filtered.length) {
+        listEl.innerHTML = '<div class="stake-empty">No matching validators.</div>';
+        return;
+    }
+    listEl.innerHTML = filtered.map(v => {
+        const isSelected = stakeSelected.has(v.address);
+        const name = v.name && v.name !== 'Unknown' ? v.name : stakingShortAddress(v.address);
+        const commission = (Number(v.commission) || 0).toFixed(1);
+        return `<div class="stake-validator-item${isSelected ? ' selected' : ''}" data-addr="${stakingEscapeHtml(v.address)}">
+            <div class="stake-val-info">
+                <div class="stake-val-name">${stakingEscapeHtml(name)}</div>
+                <div class="stake-val-meta">${stakingFormatPDEX(v.totalStake)} PDEX &middot; ${commission}% comm</div>
+            </div>
+            <button type="button" class="stake-val-add" ${isSelected ? 'disabled aria-label="Already selected"' : 'aria-label="Add to selection"'}>${isSelected ? '✓' : '+'}</button>
+        </div>`;
+    }).join('');
+    listEl.querySelectorAll('.stake-validator-item').forEach(item => {
+        const addr = item.getAttribute('data-addr');
+        const addBtn = item.querySelector('.stake-val-add');
+        if (addBtn) addBtn.addEventListener('click', (e) => { e.stopPropagation(); addStakeValidator(addr); });
+        item.addEventListener('click', () => addStakeValidator(addr));
+    });
+}
+
+function addStakeValidator(address) {
+    if (stakeSelected.has(address)) return;
+    if (stakeSelected.size >= 16) { showStakeError('You can nominate at most 16 validators per transaction.'); return; }
+    const v = stakeValidators.find(x => x.address === address) || { address, name: null };
+    stakeSelected.set(address, { address, name: v.name });
+    renderStakeSelected();
+    const searchEl = document.getElementById('stake-validator-search');
+    renderStakeValidatorList(searchEl ? searchEl.value : '');
+    clearStakeError();
+}
+function removeStakeValidator(address) {
+    stakeSelected.delete(address);
+    renderStakeSelected();
+    const searchEl = document.getElementById('stake-validator-search');
+    renderStakeValidatorList(searchEl ? searchEl.value : '');
+}
+
+function renderStakeSelected() {
+    const el = document.getElementById('stake-selected-list');
+    const countEl = document.getElementById('stake-selected-count');
+    const headerCountEl = document.getElementById('stake-chosen-count');
+    const n = stakeSelected.size;
+    if (countEl) countEl.textContent = `${n} / 16`;
+    if (headerCountEl) headerCountEl.textContent = `${n} / 16`;
+    if (!el) return;
+    if (!n) { el.innerHTML = '<div class="stake-empty">Pick validators from the list on the left.</div>'; return; }
+    el.innerHTML = Array.from(stakeSelected.values()).map(v => {
+        const name = v.name && v.name !== 'Unknown' ? v.name : stakingShortAddress(v.address);
+        return `<div class="stake-validator-item selected" data-addr="${stakingEscapeHtml(v.address)}">
+            <div class="stake-val-info">
+                <div class="stake-val-name">${stakingEscapeHtml(name)}</div>
+                <div class="stake-val-meta">${stakingShortAddress(v.address)}</div>
+            </div>
+            <button type="button" class="stake-val-remove" aria-label="Remove">×</button>
+        </div>`;
+    }).join('');
+    el.querySelectorAll('.stake-val-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const addr = btn.closest('.stake-validator-item').getAttribute('data-addr');
+            removeStakeValidator(addr);
+        });
+    });
+}
+
+async function submitStakeTx() {
+    clearStakeError();
+    const data = currentWalletData;
+    if (!data) return showStakeError('Wallet data is not loaded.');
+    if (getStoredWallet() !== data.address) return showStakeError('Connect this wallet to perform staking actions.');
+
+    const amtStr = (document.getElementById('stake-amount-input').value || '').trim();
+    const targets = Array.from(stakeSelected.keys());
+    const hasAmount = amtStr !== '' && parseFloat(amtStr) > 0;
+
+    if (!targets.length) return showStakeError('Select at least one validator before submitting.');
+    if (targets.length > 16) return showStakeError('At most 16 validators can be nominated.');
+
+    const free = Number((data.balance && data.balance.free) || 0);
+    const hasBond = ((data.staking && data.staking.totalStaked) || 0) > 0;
+
+    if (hasAmount) {
+        const amt = parseFloat(amtStr);
+        if (!Number.isFinite(amt) || amt <= 0) return showStakeError('Enter a valid amount.');
+        if (amt > free) return showStakeError(`Amount exceeds your available balance (${stakingFormatPDEX(free)} PDEX).`);
+        if (amt > free - 0.01) return showStakeError(`Keep at least 0.01 PDEX free for the transaction fee. Try ${stakingFormatPDEX(Math.max(0, free - 0.01))} PDEX or less.`);
+        if (!hasBond) {
+            const minStake = Number((data.network && data.network.minStake) || 0);
+            if (minStake > 0 && amt < minStake) {
+                return showStakeError(`A first-time bond must be at least the minimum stake (${stakingFormatPDEX(minStake)} PDEX).`);
+            }
+        }
+    } else if (!hasBond) {
+        return showStakeError('You have no existing bond — enter an amount to bond as well.');
+    }
+
+    await submitSignedTx({
+        buildTx: (api) => {
+            const calls = [];
+            if (hasAmount) calls.push(buildBondOrExtra(api, pdexToPlanck(amtStr), data.address, hasBond));
+            calls.push(api.tx.staking.nominate(targets));
+            return batchTx(api, calls);
+        },
+        label: 'Stake & nominate',
+        button: document.getElementById('submit-stake-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Submit',
+        onError: showStakeError,
+        onSuccess: () => {
+            const modal = document.getElementById('stake-modal');
+            if (modal) modal.style.display = 'none';
+            setTimeout(() => fetchWalletDashboard(data.address), 2500);
+        }
+    });
+}
+
+// --- Pay out rewards modal ---
+function openPayoutModal() {
+    const data = currentWalletData;
+    if (!data) return alert('Wallet data is not loaded yet.');
+    const entries = (data.rewards && data.rewards.unpaidEntries) || [];
+    const total = (data.rewards && data.rewards.unpaidTotal) || 0;
+    document.getElementById('payout-count').textContent = stakingFormatNumber(entries.length);
+    document.getElementById('payout-total').textContent = stakingFormatPDEX(total) + ' PDEX';
+    const errEl = document.getElementById('payout-modal-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    const listEl = document.getElementById('payout-entries');
+    const submitBtn = document.getElementById('submit-payout-tx-btn');
+    if (!entries.length) {
+        listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:0.85rem;">No unclaimed rewards available to pay out. The indexer recomputes unpaid rewards in the background; try again in a minute.</div>';
+        if (submitBtn) submitBtn.disabled = true;
+    } else {
+        listEl.innerHTML = entries.map(e => `<div class="payout-entry">
+            <div><span class="payout-era">Era ${stakingFormatNumber(e.era)}</span> <a href="#validator/${encodeURIComponent(e.validator)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">${stakingShortAddress(e.validator)}</a></div>
+            <div class="payout-amt">${stakingFormatPDEX(e.amount)} PDEX</div>
+        </div>`).join('');
+        if (submitBtn) submitBtn.disabled = false;
+    }
+    document.getElementById('payout-modal').style.display = 'flex';
+}
+
+async function submitPayoutTx() {
+    const errEl = document.getElementById('payout-modal-error');
+    const fail = (m) => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    const data = currentWalletData;
+    if (!data) return fail('Wallet data is not loaded.');
+    const entries = (data.rewards && data.rewards.unpaidEntries) || [];
+    if (!entries.length) return fail('Nothing to claim right now.');
+    // Cap at 30 per tx to stay well under per-block weight limits; user can re-trigger.
+    const batch = entries.slice(0, 30);
+    const truncated = entries.length > batch.length;
+    await submitSignedTx({
+        buildTx: (api) => batchTx(api, batch.map(e => buildPayoutCall(api, e.validator, e.era))),
+        label: 'Payout rewards' + (truncated ? ` (${batch.length} of ${entries.length})` : ''),
+        button: document.getElementById('submit-payout-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Pay Out',
+        onError: fail,
+        onSuccess: () => {
+            const modal = document.getElementById('payout-modal');
+            if (modal) modal.style.display = 'none';
+            setTimeout(() => fetchWalletDashboard(data.address), 2500);
+        }
+    });
+}
+
+// --- Unstake modal ---
+function openUnstakeModal() {
+    const data = currentWalletData;
+    if (!data) return alert('Wallet data is not loaded yet.');
+    const errEl = document.getElementById('unstake-modal-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    const amtInput = document.getElementById('unstake-amount-input');
+    if (amtInput) amtInput.value = '';
+    const s = data.staking || {};
+    document.getElementById('unstake-active').textContent = stakingFormatPDEX(s.activeStaked) + ' PDEX';
+    document.getElementById('unstake-unlocking').textContent = stakingFormatPDEX(s.unlocking) + ' PDEX';
+    document.getElementById('unstake-period').textContent = formatDuration(data.network && data.network.unbondingMs);
+    document.getElementById('unstake-modal').style.display = 'flex';
+}
+
+async function submitUnstakeTx() {
+    const errEl = document.getElementById('unstake-modal-error');
+    const fail = (m) => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    const data = currentWalletData;
+    if (!data) return fail('Wallet data is not loaded.');
+    if (getStoredWallet() !== data.address) return fail('Connect this wallet to perform staking actions.');
+    const amtStr = (document.getElementById('unstake-amount-input').value || '').trim();
+    if (!isPositiveNumberInput(amtStr)) return fail('Enter an amount greater than zero.');
+    const amt = parseFloat(amtStr);
+    const active = Number((data.staking && data.staking.activeStaked) || 0);
+    if (active <= 0) return fail('You have no active bonded stake to unbond.');
+    if (amt > active) return fail(`Amount exceeds your active bonded stake (${stakingFormatPDEX(active)} PDEX).`);
+    await submitSignedTx({
+        buildTx: (api) => api.tx.staking.unbond(pdexToPlanck(amtStr)),
+        label: 'Unstake',
+        button: document.getElementById('submit-unstake-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Unstake',
+        onError: fail,
+        onSuccess: () => {
+            const modal = document.getElementById('unstake-modal');
+            if (modal) modal.style.display = 'none';
+            setTimeout(() => fetchWalletDashboard(data.address), 2500);
+        }
+    });
+}
+
+// One-time wiring of the static modal controls (close buttons, max buttons, submit).
+(function wireWalletStakingModals() {
+    const closeOn = (modalId, btnId) => {
+        const modal = document.getElementById(modalId);
+        const btn = document.getElementById(btnId);
+        if (btn && modal) btn.addEventListener('click', () => { modal.style.display = 'none'; });
+        if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+    };
+    closeOn('stake-modal', 'close-stake-modal');
+    closeOn('payout-modal', 'close-payout-modal');
+    closeOn('unstake-modal', 'close-unstake-modal');
+
+    const stakeMax = document.getElementById('stake-max-btn');
+    if (stakeMax) stakeMax.addEventListener('click', () => {
+        const data = currentWalletData;
+        if (!data) return;
+        const free = Number((data.balance && data.balance.free) || 0);
+        const usable = Math.max(0, free - 0.01);
+        const amtInput = document.getElementById('stake-amount-input');
+        if (amtInput) amtInput.value = usable.toFixed(4);
+    });
+    const stakeClear = document.getElementById('stake-clear-btn');
+    if (stakeClear) stakeClear.addEventListener('click', () => {
+        stakeSelected.clear();
+        renderStakeSelected();
+        const searchEl = document.getElementById('stake-validator-search');
+        renderStakeValidatorList(searchEl ? searchEl.value : '');
+    });
+    const stakeSubmit = document.getElementById('submit-stake-tx-btn');
+    if (stakeSubmit) stakeSubmit.addEventListener('click', submitStakeTx);
+
+    const unstakeMax = document.getElementById('unstake-max-btn');
+    if (unstakeMax) unstakeMax.addEventListener('click', () => {
+        const data = currentWalletData;
+        if (!data) return;
+        const active = Number((data.staking && data.staking.activeStaked) || 0);
+        const amtInput = document.getElementById('unstake-amount-input');
+        if (amtInput) amtInput.value = active.toFixed(4);
+    });
+    const unstakeSubmit = document.getElementById('submit-unstake-tx-btn');
+    if (unstakeSubmit) unstakeSubmit.addEventListener('click', submitUnstakeTx);
+
+    const payoutSubmit = document.getElementById('submit-payout-tx-btn');
+    if (payoutSubmit) payoutSubmit.addEventListener('click', submitPayoutTx);
+})();
 
 // --- Donate Page ---
 const DONATION_ADDRESSES = [
