@@ -1,5 +1,18 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
-import { decodeAddress } from '@polkadot/util-crypto';
+import { decodeAddress, encodeAddress } from '@polkadot/util-crypto';
+
+// Polkadex chain SS58 prefix. Addresses encoded with this prefix all start
+// with the character "e", which is what we want to show the user — even
+// though wallet extensions hand back addresses in their own native format
+// (typically prefix 0 "1…" for Polkadot or prefix 42 "5…" for generic
+// Substrate). All display sites run through toPolkadexAddress() so the UI
+// shows the chain-specific form consistently.
+const POLKADEX_SS58 = 88;
+function toPolkadexAddress(addr) {
+    if (!addr) return '';
+    try { return encodeAddress(decodeAddress(addr), POLKADEX_SS58); }
+    catch (e) { return addr; }
+}
 
 // Utility to generate human readable relative time
 function timeAgo(timestamp) {
@@ -2404,12 +2417,25 @@ function downloadStakingRewardsJSON() {
 
 // --- Wallet Connect + Dashboard ---
 function getStoredWallet() {
-    try { return localStorage.getItem(WALLET_STORAGE_KEY) || ''; }
-    catch (e) { return ''; }
+    try {
+        const v = localStorage.getItem(WALLET_STORAGE_KEY) || '';
+        if (!v) return '';
+        // Legacy installs may have a generic Polkadot/Substrate address in
+        // storage from before we normalised on write — coerce on read and
+        // rewrite so the rest of the UI sees the Polkadex form.
+        const pdex = toPolkadexAddress(v);
+        if (pdex && pdex !== v) {
+            try { localStorage.setItem(WALLET_STORAGE_KEY, pdex); } catch (e) { /* ignore quota */ }
+            return pdex;
+        }
+        return v;
+    } catch (e) { return ''; }
 }
 function setStoredWallet(addr) {
-    try { if (addr) localStorage.setItem(WALLET_STORAGE_KEY, addr); else localStorage.removeItem(WALLET_STORAGE_KEY); }
-    catch (e) { }
+    try {
+        if (addr) localStorage.setItem(WALLET_STORAGE_KEY, toPolkadexAddress(addr));
+        else localStorage.removeItem(WALLET_STORAGE_KEY);
+    } catch (e) { }
 }
 function refreshConnectWalletButton() {
     const btn = document.getElementById('connect-wallet-btn');
@@ -2519,6 +2545,12 @@ const MOBILE_WALLETS = [
 // Enumerate accounts from installed Substrate wallet extensions / mobile
 // in-app browsers. The retry loop helps mobile wallets that inject
 // `window.injectedWeb3` slightly after `DOMContentLoaded`.
+// Each account is returned with two address fields:
+//   `address`    — the Polkadex-prefixed form (starts with "e…") for display
+//                  and for everything the user/UI persists.
+//   `rawAddress` — the extension's native SS58 form (often "1…" or "5…")
+//                  needed by the wallet's `signAndSend` so the injected
+//                  signer recognises the account.
 async function getInjectedAccounts({ retries = 6, retryDelayMs = 250 } = {}) {
     // Wait briefly for late injection on mobile wallet in-app browsers.
     for (let i = 0; i < retries; i++) {
@@ -2535,7 +2567,10 @@ async function getInjectedAccounts({ retries = 6, retryDelayMs = 250 } = {}) {
             const ext = await provider.enable('Polkadex Explorer');
             if (ext && ext.accounts && typeof ext.accounts.get === 'function') {
                 const accs = await ext.accounts.get();
-                for (const a of accs) accounts.push({ address: a.address, name: a.name || key, source: key });
+                for (const a of accs) {
+                    const pdex = toPolkadexAddress(a.address);
+                    accounts.push({ address: pdex, rawAddress: a.address, name: a.name || key, source: key });
+                }
             }
         } catch (e) { /* user rejected this extension */ }
     }
@@ -2548,9 +2583,12 @@ function connectWallet() {
 }
 function selectWallet(address) {
     if (!isValidPolkadexAddress(address)) return;
-    setStoredWallet(address);
+    // Always store + route with the Polkadex-prefixed form so the URL bar,
+    // localStorage, and dashboard all show the chain-specific "e…" address.
+    const pdex = toPolkadexAddress(address);
+    setStoredWallet(pdex);
     refreshConnectWalletButton();
-    navigateTo('wallet/' + address);
+    navigateTo('wallet/' + pdex);
 }
 function disconnectWallet() {
     setStoredWallet('');
@@ -2571,6 +2609,17 @@ function initWalletPage(address) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
     if (address) {
+        // If the URL still contains a generic Polkadot/Substrate address from
+        // an older link or a wallet extension's native format, rewrite it to
+        // the Polkadex-prefixed form so the address bar (and any subsequent
+        // share / bookmark) matches what the dashboard shows.
+        if (isValidPolkadexAddress(address)) {
+            const pdex = toPolkadexAddress(address);
+            if (pdex && pdex !== address) {
+                try { history.replaceState(null, '', '/wallet/' + pdex); } catch (e) { /* ignore */ }
+                address = pdex;
+            }
+        }
         // Personal dashboard: noindex and no route JSON-LD (PII / dynamic).
         updateSeoMeta('wallet', {
             title: 'My Account — Polkadex Explorer',
