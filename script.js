@@ -2479,6 +2479,19 @@ function buildPayoutCall(api, validator, era) {
     throw new Error('staking.payoutStakers is not available on this runtime.');
 }
 
+// Available balance for staking: `free` from the API includes already-bonded
+// tokens (they're locked, not reserved), so we subtract `totalStaked` to get
+// the amount the user can actually bond on top of their existing stake.
+// Prefers the server-computed `transferable` when present, falls back to
+// computing it client-side for resilience.
+function getStakeableBalance(data) {
+    if (!data || !data.balance) return 0;
+    if (typeof data.balance.transferable === 'number') return Math.max(0, data.balance.transferable);
+    const free = Number(data.balance.free || 0);
+    const staked = Number((data.staking && data.staking.totalStaked) || 0);
+    return Math.max(0, free - staked);
+}
+
 // --- Stake / Nominate modal ---
 function showStakeError(msg) {
     const el = document.getElementById('stake-modal-error');
@@ -2498,7 +2511,11 @@ async function openStakeModal() {
     const amtInput = document.getElementById('stake-amount-input');
     if (amtInput) amtInput.value = '';
 
-    document.getElementById('stake-available').textContent = stakingFormatPDEX(data.balance && data.balance.free);
+    // Use `transferable` (free - totalStaked) so the hint reflects what's
+    // actually available to bond, not the raw free balance which still
+    // counts tokens already locked in staking.
+    const stakeableBalance = getStakeableBalance(data);
+    document.getElementById('stake-available').textContent = stakingFormatPDEX(stakeableBalance);
     document.getElementById('stake-current').textContent = stakingFormatPDEX(data.staking && data.staking.totalStaked) + ' PDEX';
     document.getElementById('stake-minimum').textContent = stakingFormatPDEX(data.network && data.network.minStake) + ' PDEX';
 
@@ -2616,14 +2633,14 @@ async function submitStakeTx() {
     if (!targets.length) return showStakeError('Select at least one validator before submitting.');
     if (targets.length > 16) return showStakeError('At most 16 validators can be nominated.');
 
-    const free = Number((data.balance && data.balance.free) || 0);
+    const available = getStakeableBalance(data);
     const hasBond = ((data.staking && data.staking.totalStaked) || 0) > 0;
 
     if (hasAmount) {
         const amt = parseFloat(amtStr);
         if (!Number.isFinite(amt) || amt <= 0) return showStakeError('Enter a valid amount.');
-        if (amt > free) return showStakeError(`Amount exceeds your available balance (${stakingFormatPDEX(free)} PDEX).`);
-        if (amt > free - 0.01) return showStakeError(`Keep at least 0.01 PDEX free for the transaction fee. Try ${stakingFormatPDEX(Math.max(0, free - 0.01))} PDEX or less.`);
+        if (amt > available) return showStakeError(`Amount exceeds your available balance (${stakingFormatPDEX(available)} PDEX).`);
+        if (amt > available - 0.01) return showStakeError(`Keep at least 0.01 PDEX free for the transaction fee. Try ${stakingFormatPDEX(Math.max(0, available - 0.01))} PDEX or less.`);
         if (!hasBond) {
             const minStake = Number((data.network && data.network.minStake) || 0);
             if (minStake > 0 && amt < minStake) {
@@ -2764,8 +2781,10 @@ async function submitUnstakeTx() {
     if (stakeMax) stakeMax.addEventListener('click', () => {
         const data = currentWalletData;
         if (!data) return;
-        const free = Number((data.balance && data.balance.free) || 0);
-        const usable = Math.max(0, free - 0.01);
+        // Max button should propose the transferable balance (free minus
+        // already-bonded tokens), keeping a small fee buffer.
+        const available = getStakeableBalance(data);
+        const usable = Math.max(0, available - 0.01);
         const amtInput = document.getElementById('stake-amount-input');
         if (amtInput) amtInput.value = usable.toFixed(4);
     });

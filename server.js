@@ -1137,7 +1137,11 @@ app.get('/api/wallet/:address', async (req, res) => {
         res.json({
             address,
             identity,
-            balance: { free, reserved, total: free + reserved },
+            // `free` is the non-reserved balance, but on Substrate it still
+            // includes bonded/staked tokens (they're locked, not reserved).
+            // `transferable` excludes the staked amount so the staking UI can
+            // show what's actually available to bond on top of the current stake.
+            balance: { free, reserved, total: free + reserved, transferable: Math.max(0, free - totalStaked) },
             staking: {
                 isStaker: totalStaked > 0,
                 isValidator: sessionValAddrs.includes(address),
