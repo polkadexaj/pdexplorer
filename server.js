@@ -35,7 +35,7 @@ const GOV_BACKFILL_CHUNK = readPositiveInteger(process.env.GOV_BACKFILL_CHUNK, 1
 const GOV_FORWARD_MAX = readPositiveInteger(process.env.GOV_FORWARD_MAX, 50000);
 const GOV_MIN_BLOCK = readPositiveInteger(process.env.GOV_MIN_BLOCK, 1);
 // Wallet dashboard / price chart / unpaid-reward tuning.
-const CMC_API_KEY = process.env.CMC_API_KEY || '';
+const CMC_API_KEY = process.env.CMC_API_KEY || 'ee98717bf0924ab88d749ca613cd7f86';
 const CMC_SYMBOL = process.env.CMC_SYMBOL || 'PDEX';
 const PRICE_SYNC_INTERVAL = readPositiveInteger(process.env.PRICE_SYNC_INTERVAL_MS, 10 * 60 * 1000);
 const UNCLAIMED_TTL = readPositiveInteger(process.env.UNCLAIMED_TTL_MS, 20 * 60 * 1000);
