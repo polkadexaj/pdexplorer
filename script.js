@@ -2484,6 +2484,16 @@ function isMobileDevice() {
     return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
 }
 
+// Cheap synchronous check: is *any* Substrate wallet currently injecting
+// accounts into this tab? Used to gate the wallet-dashboard action bar so
+// users who arrived in view-only mode (typed-in address) or whose wallet
+// session has ended don't see signing buttons that lead to a dead-end error.
+function hasInjectedWalletNow() {
+    return !!(typeof window !== 'undefined'
+        && window.injectedWeb3
+        && Object.keys(window.injectedWeb3).length > 0);
+}
+
 // Identify the in-app wallet browser hosting us (if any) so the panel can
 // greet the user by name. `window.injectedWeb3` key names are stable identifiers
 // each wallet self-declares.
@@ -2933,23 +2943,26 @@ function renderWalletDashboard(data, price) {
         </div>
 
         ${isOwnWallet ? `
-        <div class="wallet-action-bar">
-            <button class="wallet-action-btn primary" id="wallet-act-send"${(getStakeableBalance(data) > 0) ? '' : ' disabled title="No transferable balance available."'}>
-                <i class='bx bx-paper-plane'></i>
-                <div><strong>Send PDEX</strong><span>Transfer to any Polkadex address</span></div>
-            </button>
-            <button class="wallet-action-btn" id="wallet-act-stake">
-                <i class='bx bx-plus-circle'></i>
-                <div><strong>Stake more</strong><span>Add bond &amp; choose validators</span></div>
-            </button>
-            <button class="wallet-action-btn" id="wallet-act-payout"${(rewards.unpaidCount || 0) ? '' : ' disabled title="No unclaimed rewards to pay out."'}>
-                <i class='bx bx-gift'></i>
-                <div><strong>Pay out rewards</strong><span>${stakingFormatNumber(rewards.unpaidCount || 0)} unclaimed entr${(rewards.unpaidCount || 0) === 1 ? 'y' : 'ies'}</span></div>
-            </button>
-            <button class="wallet-action-btn" id="wallet-act-unstake"${((staking.activeStaked || 0) > 0) ? '' : ' disabled title="No active bond to unstake."'}>
-                <i class='bx bx-minus-circle'></i>
-                <div><strong>Unstake</strong><span>Begin the unbonding period</span></div>
-            </button>
+        <div id="wallet-actions-slot">
+            ${hasInjectedWalletNow() ? `
+            <div class="wallet-action-bar" id="wallet-action-bar">
+                <button class="wallet-action-btn primary" id="wallet-act-send"${(getStakeableBalance(data) > 0) ? '' : ' disabled title="No transferable balance available."'}>
+                    <i class='bx bx-paper-plane'></i>
+                    <div><strong>Send PDEX</strong><span>Transfer to any Polkadex address</span></div>
+                </button>
+                <button class="wallet-action-btn" id="wallet-act-stake">
+                    <i class='bx bx-plus-circle'></i>
+                    <div><strong>Stake more</strong><span>Add bond &amp; choose validators</span></div>
+                </button>
+                <button class="wallet-action-btn" id="wallet-act-payout"${(rewards.unpaidCount || 0) ? '' : ' disabled title="No unclaimed rewards to pay out."'}>
+                    <i class='bx bx-gift'></i>
+                    <div><strong>Pay out rewards</strong><span>${stakingFormatNumber(rewards.unpaidCount || 0)} unclaimed entr${(rewards.unpaidCount || 0) === 1 ? 'y' : 'ies'}</span></div>
+                </button>
+                <button class="wallet-action-btn" id="wallet-act-unstake"${((staking.activeStaked || 0) > 0) ? '' : ' disabled title="No active bond to unstake."'}>
+                    <i class='bx bx-minus-circle'></i>
+                    <div><strong>Unstake</strong><span>Begin the unbonding period</span></div>
+                </button>
+            </div>` : buildViewOnlyCallout()}
         </div>` : ''}
 
         <div class="wallet-grid">
@@ -3002,16 +3015,134 @@ function renderWalletDashboard(data, price) {
     const switchBtn = document.getElementById('wallet-switch-btn');
     if (switchBtn) switchBtn.addEventListener('click', disconnectWallet);
     if (isOwnWallet) {
-        const sendBtn = document.getElementById('wallet-act-send');
-        const stakeBtn = document.getElementById('wallet-act-stake');
-        const payoutBtn = document.getElementById('wallet-act-payout');
-        const unstakeBtn = document.getElementById('wallet-act-unstake');
-        if (sendBtn && !sendBtn.disabled) sendBtn.addEventListener('click', openSendModal);
-        if (stakeBtn) stakeBtn.addEventListener('click', openStakeModal);
-        if (payoutBtn && !payoutBtn.disabled) payoutBtn.addEventListener('click', openPayoutModal);
-        if (unstakeBtn && !unstakeBtn.disabled) unstakeBtn.addEventListener('click', openUnstakeModal);
+        bindWalletActionHandlers();
+        bindViewOnlyCalloutHandlers();
+        // Mobile wallet WebViews sometimes inject `window.injectedWeb3` a
+        // beat after the page settles. If we rendered the view-only callout
+        // because nothing was injected at first paint, schedule a couple of
+        // re-checks that swap the action bar in once injection lands. We
+        // also do the reverse — if the user's wallet session has gone away
+        // while the page is open, swap the action bar out for the callout.
+        scheduleWalletSigningRechecks(data);
     }
     if (priceHistory.length) renderWalletPriceChart(priceHistory);
+}
+
+// Wire up the four wallet action buttons. Idempotent — re-binding after a
+// re-render of the action bar is safe because each new node has fresh listeners.
+function bindWalletActionHandlers() {
+    const sendBtn = document.getElementById('wallet-act-send');
+    const stakeBtn = document.getElementById('wallet-act-stake');
+    const payoutBtn = document.getElementById('wallet-act-payout');
+    const unstakeBtn = document.getElementById('wallet-act-unstake');
+    if (sendBtn && !sendBtn.disabled) sendBtn.addEventListener('click', openSendModal);
+    if (stakeBtn) stakeBtn.addEventListener('click', openStakeModal);
+    if (payoutBtn && !payoutBtn.disabled) payoutBtn.addEventListener('click', openPayoutModal);
+    if (unstakeBtn && !unstakeBtn.disabled) unstakeBtn.addEventListener('click', openUnstakeModal);
+}
+
+// Wire up the "copy URL" affordance inside the read-only callout. The mobile
+// wallet deep-link cards are plain anchors so they don't need handlers.
+function bindViewOnlyCalloutHandlers() {
+    const copyBtn = document.getElementById('wallet-readonly-copy-btn');
+    const copyInput = document.getElementById('wallet-readonly-copy-url');
+    if (copyBtn && copyInput) copyBtn.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(copyInput.value);
+            copyBtn.innerHTML = "<i class='bx bx-check'></i> Copied!";
+            setTimeout(() => { copyBtn.innerHTML = "<i class='bx bx-copy'></i> Copy URL"; }, 1500);
+        } catch (e) {
+            copyInput.select();
+            try { document.execCommand('copy'); } catch (e2) { /* nothing more to try */ }
+        }
+    });
+}
+
+// Build the "read-only mode" callout shown in place of the action bar when
+// the dashboard belongs to the user but no wallet extension / mobile wallet
+// is currently injecting accounts. Surfaces the same mobile-wallet deep
+// links the connect panel uses so the user can hop into a wallet's in-app
+// browser in one tap and come back signing-capable.
+function buildViewOnlyCallout() {
+    const onMobile = isMobileDevice();
+    const currentUrl = (typeof location !== 'undefined') ? location.href : 'https://explorer.polkadex.ee/wallet';
+    const intro = onMobile
+        ? `You're viewing this account in <strong>read-only</strong> mode. To send PDEX, stake, claim rewards, or unbond, open this page inside a mobile wallet's in-app browser so it can sign transactions.`
+        : `You're viewing this account in <strong>read-only</strong> mode. To send PDEX, stake, claim rewards, or unbond, connect a Substrate browser extension (Polkadot.js, Talisman, SubWallet) — or open this page in a mobile wallet's in-app browser.`;
+    return `<div class="wallet-readonly-callout">
+        <div class="wallet-readonly-head">
+            <i class='bx bx-show'></i>
+            <div>
+                <strong>Read-only mode</strong>
+                <p>${intro}</p>
+            </div>
+        </div>
+        ${renderMobileWalletCards(currentUrl)}
+        <div class="mobile-wallet-copyrow" style="margin-top:8px;">
+            <input id="wallet-readonly-copy-url" type="text" readonly value="${stakingEscapeHtml(currentUrl)}">
+            <button id="wallet-readonly-copy-btn" type="button"><i class='bx bx-copy'></i> Copy URL</button>
+        </div>
+    </div>`;
+}
+
+// Re-check whether a wallet is currently injected and, if the on-screen state
+// is stale, swap the action bar in/out without re-rendering the rest of the
+// dashboard. Runs a small bounded sequence of checks so we cover the typical
+// 100–1500 ms window in which mobile WebViews inject late.
+let _walletSigningRecheckTimer = null;
+function scheduleWalletSigningRechecks(data) {
+    if (_walletSigningRecheckTimer) { clearTimeout(_walletSigningRecheckTimer); _walletSigningRecheckTimer = null; }
+    const delays = [400, 1000, 2000];
+    let i = 0;
+    const tick = () => {
+        const slot = document.getElementById('wallet-actions-slot');
+        // If the dashboard was navigated away from, stop polling.
+        if (!slot || !isSameAddress(getStoredWallet(), data.address)) return;
+        const hasInjection = hasInjectedWalletNow();
+        const hasBar = !!document.getElementById('wallet-action-bar');
+        const needsBar = hasInjection && !hasBar;
+        const needsCallout = !hasInjection && hasBar;
+        if (needsBar) {
+            slot.innerHTML = buildWalletActionBarMarkup(data);
+            bindWalletActionHandlers();
+        } else if (needsCallout) {
+            slot.innerHTML = buildViewOnlyCallout();
+            bindViewOnlyCalloutHandlers();
+        }
+        if (i < delays.length) {
+            _walletSigningRecheckTimer = setTimeout(tick, delays[i++]);
+        }
+    };
+    _walletSigningRecheckTimer = setTimeout(tick, delays[i++]);
+}
+
+// Build only the action-bar HTML (used by scheduleWalletSigningRechecks when
+// it needs to swap the slot's contents). Mirrors the inline markup in
+// renderWalletDashboard so layout/copy stays consistent.
+function buildWalletActionBarMarkup(data) {
+    const staking = data.staking || {};
+    const rewards = data.rewards || {};
+    const stakeable = getStakeableBalance(data);
+    const unpaid = rewards.unpaidCount || 0;
+    const active = staking.activeStaked || 0;
+    return `<div class="wallet-action-bar" id="wallet-action-bar">
+        <button class="wallet-action-btn primary" id="wallet-act-send"${stakeable > 0 ? '' : ' disabled title="No transferable balance available."'}>
+            <i class='bx bx-paper-plane'></i>
+            <div><strong>Send PDEX</strong><span>Transfer to any Polkadex address</span></div>
+        </button>
+        <button class="wallet-action-btn" id="wallet-act-stake">
+            <i class='bx bx-plus-circle'></i>
+            <div><strong>Stake more</strong><span>Add bond &amp; choose validators</span></div>
+        </button>
+        <button class="wallet-action-btn" id="wallet-act-payout"${unpaid ? '' : ' disabled title="No unclaimed rewards to pay out."'}>
+            <i class='bx bx-gift'></i>
+            <div><strong>Pay out rewards</strong><span>${stakingFormatNumber(unpaid)} unclaimed entr${unpaid === 1 ? 'y' : 'ies'}</span></div>
+        </button>
+        <button class="wallet-action-btn" id="wallet-act-unstake"${active > 0 ? '' : ' disabled title="No active bond to unstake."'}>
+            <i class='bx bx-minus-circle'></i>
+            <div><strong>Unstake</strong><span>Begin the unbonding period</span></div>
+        </button>
+    </div>`;
 }
 
 function renderWalletPriceChart(history) {
@@ -4659,13 +4790,17 @@ async function submitSignedTx({ buildTx, label, button, busyText, idleText, onEr
     let injected;
     try { injected = await getInjectedAccounts(); }
     catch (e) { return fail('Could not access your wallet extension.'); }
-    if (!injected || !injected.length) return fail('No Substrate wallet extension found. Install Polkadot.js, Talisman or SubWallet.');
+    if (!injected || !injected.length) {
+        return fail(isMobileDevice()
+            ? "You're in read-only mode — no wallet is connected to this browser tab. Open this page inside Nova Wallet or SubWallet's in-app browser to sign transactions, then come back to this action."
+            : 'No Substrate wallet extension found. Install Polkadot.js, Talisman or SubWallet (desktop) — or open this page in a mobile wallet\'s in-app browser.');
+    }
 
     // Match by underlying public key so an SS58-prefix mismatch between the
     // extension (often prefix 42) and the stored address (Polkadex prefix 88)
     // doesn't make the account look missing.
     const account = injected.find(a => isSameAddress(a.address, address));
-    if (!account) return fail('The connected account was not found in your wallet extension. Please reconnect.');
+    if (!account) return fail("This account isn't available in your connected wallet. Switch to the right account in your wallet extension (or reconnect) and try again.");
 
     let signer;
     try {

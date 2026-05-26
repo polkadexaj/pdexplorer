@@ -1189,6 +1189,43 @@ h1, h2, h3 { font-weight: 600; }
 }
 .mobile-wallet-copyrow button:hover { background: rgba(255,255,255,0.04); }
 
+/* --- Wallet dashboard "read-only" callout --- */
+/* Replaces the Send / Stake / Pay out / Unstake action bar on a user's own
+   wallet page when no Substrate wallet is currently injected — so the
+   signing affordances aren't shown leading to a dead-end error. */
+.wallet-readonly-callout {
+    background: rgba(255, 165, 0, 0.06);
+    border: 1px solid rgba(255, 165, 0, 0.35);
+    border-radius: var(--radius-md, 12px);
+    padding: 16px 18px;
+    margin: 0 0 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.wallet-readonly-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+.wallet-readonly-head > i {
+    font-size: 1.5rem;
+    color: #f5a623;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.wallet-readonly-head strong {
+    display: block;
+    font-size: 0.95rem;
+    margin-bottom: 4px;
+}
+.wallet-readonly-head p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.55;
+}
+
 /* --- Wallet dashboard --- */
 .wallet-page { gap: 20px; }
 #wallet-dashboard {
