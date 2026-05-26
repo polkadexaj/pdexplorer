@@ -1689,6 +1689,21 @@ function isValidPolkadexAddress(addr) {
     try { decodeAddress(addr); return true; }
     catch (e) { return false; }
 }
+// Compare two SS58 addresses by their underlying public key bytes. Wallet
+// extensions often hand back addresses in the generic Substrate format
+// (prefix 42) while the backend normalizes them to Polkadex's prefix 88,
+// so a raw string comparison incorrectly says they differ.
+function isSameAddress(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    try {
+        const ax = decodeAddress(a);
+        const bx = decodeAddress(b);
+        if (ax.length !== bx.length) return false;
+        for (let i = 0; i < ax.length; i++) if (ax[i] !== bx[i]) return false;
+        return true;
+    } catch (e) { return false; }
+}
 function formatDuration(ms) {
     if (!ms || ms <= 0) return '—';
     const hours = ms / 3600000;
@@ -2011,7 +2026,7 @@ function downloadStakingRewardsJSON() {
     downloadStakingBlob(`staking-rewards-${stakingRewardsData.address || 'address'}.json`, JSON.stringify(payload, null, 2), 'application/json');
 }
 
-// --- Read-only Wallet Connect + Dashboard ---
+// --- Wallet Connect + Dashboard ---
 function getStoredWallet() {
     try { return localStorage.getItem(WALLET_STORAGE_KEY) || ''; }
     catch (e) { return ''; }
@@ -2028,7 +2043,7 @@ function refreshConnectWalletButton() {
     if (disconnectBtn) disconnectBtn.style.display = stored ? 'inline-flex' : 'none';
 }
 
-// Enumerate accounts from installed Substrate wallet extensions (read-only).
+// Enumerate accounts from installed Substrate wallet extensions.
 async function getInjectedAccounts() {
     const injected = window.injectedWeb3;
     if (!injected || Object.keys(injected).length === 0) return null;
@@ -2086,17 +2101,19 @@ function initWalletPage(address) {
 async function renderWalletConnectPanel(root) {
     root.innerHTML = `
         <div class="list-container glass">
-            <div class="list-header"><h2>Connect Wallet</h2><span style="color:var(--text-secondary);font-size:0.78rem;">Read-only mode</span></div>
+            <div class="list-header"><h2>Connect Wallet</h2></div>
             <div style="padding: 24px;">
                 <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 16px; line-height: 1.6;">
-                    Connect a Substrate wallet extension to open your dashboard. The explorer only reads your
-                    address — it can never request a signature or move funds.
+                    Connect a Substrate wallet extension to open your dashboard. You'll be able to view your
+                    balance and sign staking actions — bond more, nominate validators, pay out rewards or unbond.
+                    Every transaction needs your explicit approval in the wallet extension; the explorer can
+                    never move funds without it.
                 </p>
                 <div id="wallet-accounts" style="display:flex; flex-direction:column; gap:10px;">
                     <div style="color: var(--text-muted); font-size: 0.85rem;">Looking for wallet extensions…</div>
                 </div>
                 <div style="margin-top: 22px; border-top: 1px solid var(--border-color); padding-top: 18px;">
-                    <p style="color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 10px;">…or view any address in read-only mode:</p>
+                    <p style="color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 10px;">…or look up any address without connecting (view-only):</p>
                     <div class="staking-search-bar">
                         <input type="text" id="wallet-manual-input" placeholder="Polkadex address" autocomplete="off" spellcheck="false">
                         <button id="wallet-manual-btn"><i class='bx bx-search'></i> View</button>
@@ -2127,7 +2144,7 @@ async function renderWalletConnectPanel(root) {
         accountsEl.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.6;">
             No Substrate wallet extension detected. Install
             <a href="https://polkadot.js.org/extension/" target="_blank" rel="noopener" style="color:var(--brand-secondary);">Polkadot.js</a>,
-            Talisman or SubWallet, or use the read-only address option below.</div>`;
+            Talisman or SubWallet, or use the address lookup option below to view any wallet.</div>`;
         return;
     }
     if (accounts.length === 0) {
@@ -2228,7 +2245,7 @@ function renderWalletDashboard(data, price) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
     currentWalletData = data;
-    const isOwnWallet = getStoredWallet() === data.address;
+    const isOwnWallet = isSameAddress(getStoredWallet(), data.address);
     const identity = data.identity && data.identity !== 'Unknown' ? data.identity : null;
     const staking = data.staking || {};
     const rewards = data.rewards || {};
@@ -2590,7 +2607,7 @@ async function submitStakeTx() {
     clearStakeError();
     const data = currentWalletData;
     if (!data) return showStakeError('Wallet data is not loaded.');
-    if (getStoredWallet() !== data.address) return showStakeError('Connect this wallet to perform staking actions.');
+    if (!isSameAddress(getStoredWallet(), data.address)) return showStakeError('Connect this wallet to perform staking actions.');
 
     const amtStr = (document.getElementById('stake-amount-input').value || '').trim();
     const targets = Array.from(stakeSelected.keys());
@@ -2709,7 +2726,7 @@ async function submitUnstakeTx() {
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
     const data = currentWalletData;
     if (!data) return fail('Wallet data is not loaded.');
-    if (getStoredWallet() !== data.address) return fail('Connect this wallet to perform staking actions.');
+    if (!isSameAddress(getStoredWallet(), data.address)) return fail('Connect this wallet to perform staking actions.');
     const amtStr = (document.getElementById('unstake-amount-input').value || '').trim();
     if (!isPositiveNumberInput(amtStr)) return fail('Enter an amount greater than zero.');
     const amt = parseFloat(amtStr);
@@ -3040,7 +3057,7 @@ async function getWalletSigner(address) {
             const ext = await provider.enable('Polkadex Explorer');
             if (ext && ext.accounts && ext.accounts.get && ext.signer && ext.signer.signRaw) {
                 const accs = await ext.accounts.get();
-                if (accs.some(a => a.address === address)) return ext.signer;
+                if (accs.some(a => isSameAddress(a.address, address))) return ext.signer;
             }
         } catch (e) { /* user rejected this extension */ }
     }
@@ -3678,20 +3695,20 @@ async function submitCouncilCandidacy() {
         const injected = await getInjectedAccounts();
         if (!injected || injected.length === 0) return alert('No wallet extension found. Please install Polkadot.js or Talisman.');
         
-        const account = injected.find(a => a.address === address);
+        const account = injected.find(a => isSameAddress(a.address, address));
         if (!account) return alert('Connected account not found in wallet extension. Please reconnect.');
-        
+
         const provider = window.injectedWeb3[account.source];
         const ext = await provider.enable('Polkadex Explorer');
-        
+
         document.getElementById('submit-candidacy-tx-btn').innerText = 'Signing...';
-        
+
         const response = await fetch('/api/council');
         const data = await response.json();
         const candidateCount = (data.candidates || []).length;
 
         const unsub = await globalApi.tx[councilPalletName].submitCandidacy(candidateCount)
-            .signAndSend(address, { signer: ext.signer }, ({ status }) => {
+            .signAndSend(account.address, { signer: ext.signer }, ({ status }) => {
                 if (status.isInBlock) {
                     alert(`Transaction included at blockHash ${status.asInBlock}`);
                     candidacyModal.style.display = 'none';
@@ -3732,16 +3749,16 @@ async function submitCouncilVote() {
         const injected = await getInjectedAccounts();
         if (!injected || injected.length === 0) return alert('No wallet extension found.');
         
-        const account = injected.find(a => a.address === address);
+        const account = injected.find(a => isSameAddress(a.address, address));
         if (!account) return alert('Connected account not found in wallet extension.');
-        
+
         const provider = window.injectedWeb3[account.source];
         const ext = await provider.enable('Polkadex Explorer');
-        
+
         document.getElementById('submit-vote-tx-btn').innerText = 'Signing...';
-        
+
         const unsub = await globalApi.tx[councilPalletName].vote(candidates, stakePlanck.toString())
-            .signAndSend(address, { signer: ext.signer }, ({ status }) => {
+            .signAndSend(account.address, { signer: ext.signer }, ({ status }) => {
                 if (status.isInBlock) {
                     alert(`Transaction included at blockHash ${status.asInBlock}`);
                     voteModal.style.display = 'none';
@@ -3775,7 +3792,10 @@ async function submitSignedTx({ buildTx, label, button, busyText, idleText, onEr
     catch (e) { return fail('Could not access your wallet extension.'); }
     if (!injected || !injected.length) return fail('No Substrate wallet extension found. Install Polkadot.js, Talisman or SubWallet.');
 
-    const account = injected.find(a => a.address === address);
+    // Match by underlying public key so an SS58-prefix mismatch between the
+    // extension (often prefix 42) and the stored address (Polkadex prefix 88)
+    // doesn't make the account look missing.
+    const account = injected.find(a => isSameAddress(a.address, address));
     if (!account) return fail('The connected account was not found in your wallet extension. Please reconnect.');
 
     let signer;
@@ -3791,7 +3811,9 @@ async function submitSignedTx({ buildTx, label, button, busyText, idleText, onEr
     setBusy();
     try {
         const tx = buildTx(globalApi);
-        const unsub = await tx.signAndSend(address, { signer }, (result) => {
+        // Sign with the extension's address (its native SS58 format) so the
+        // injected signer recognizes the account.
+        const unsub = await tx.signAndSend(account.address, { signer }, (result) => {
             const { status, dispatchError } = result;
             if (dispatchError) {
                 let msg = dispatchError.toString();
