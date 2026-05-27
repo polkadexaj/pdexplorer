@@ -6,6 +6,29 @@ import { u8aWrapBytes, stringToU8a, u8aConcat } from '@polkadot/util';
 import path from 'path';
 import * as db from './db.js';
 
+// --- Timestamped logging ---------------------------------------------------
+// Prefix every console.* line with an ISO-8601 UTC timestamp so raw stdout
+// (and `docker logs` without -t, journald, or a serial console) is always
+// self-describing. Patching the global console here means all call sites in
+// this file AND in db.js (console is process-global) pick it up automatically,
+// without touching 50+ individual log statements. The `level` tag makes it
+// easy to grep (e.g. `docker logs backend | grep ' ERROR '`).
+(function installTimestampedConsole() {
+    const native = {
+        log: console.log.bind(console),
+        info: console.info.bind(console),
+        warn: console.warn.bind(console),
+        error: console.error.bind(console),
+        debug: console.debug ? console.debug.bind(console) : console.log.bind(console)
+    };
+    const stamp = (level, fn) => (...args) => fn(`${new Date().toISOString()} ${level}`, ...args);
+    console.log = stamp('INFO ', native.log);
+    console.info = stamp('INFO ', native.info);
+    console.warn = stamp('WARN ', native.warn);
+    console.error = stamp('ERROR', native.error);
+    console.debug = stamp('DEBUG', native.debug);
+})();
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '64kb' }));
@@ -2461,12 +2484,13 @@ async function syncStakingRewards() {
     }
 }
 
-async function start() {
-    db.initDb(DATA_DIR);
-
-    // Build the WS provider with a real endpoint list and auto-reconnect.
-    // Listen for connection-state events so sync loops can skip ticks while
-    // we're disconnected (otherwise every 30-second timer logs a stack trace).
+// Connect to the chain in the BACKGROUND. This must never block `start()` or
+// throw out of it — otherwise an unreachable node at boot (very common right
+// after a host reboot, before networking/DNS settles) would either hang the
+// process before app.listen() or crash it into a restart loop. WsProvider
+// keeps retrying on its own; the 'connected' handler flips rpcConnected and
+// the sync loops (which gate on isRpcReady) resume automatically.
+async function connectRpc() {
     const wsProvider = new WsProvider(RPC_ENDPOINTS.length > 1 ? RPC_ENDPOINTS : RPC_ENDPOINTS[0], RPC_AUTO_RECONNECT_MS);
     wsProvider.on('connected', () => {
         rpcConnected = true;
@@ -2480,7 +2504,15 @@ async function start() {
         console.warn('[RPC] provider error:', err && err.message ? err.message : err);
     });
 
-    globalApi = await ApiPromise.create({ provider: wsProvider });
+    try {
+        globalApi = await ApiPromise.create({ provider: wsProvider });
+    } catch (err) {
+        // ApiPromise.create only rejects on hard errors (bad metadata, etc.);
+        // transient connect failures are handled by WsProvider's retry loop.
+        // Either way we must not crash — log and let the provider keep trying.
+        console.error('[RPC] ApiPromise.create failed; provider will keep retrying:', err && err.message ? err.message : err);
+        return;
+    }
     // ApiPromise also emits these on top of WsProvider — useful when a single
     // request times out and the api lib decides to flag itself disconnected
     // before the underlying socket closes.
@@ -2492,10 +2524,31 @@ async function start() {
     if (globalApi.registry && globalApi.registry.chainSS58 != null) {
         chainSS58 = globalApi.registry.chainSS58;
     }
+    // Kick the syncs immediately on (re)connect instead of waiting for the
+    // next interval tick.
+    syncBlocks(); syncTransactions(); syncEvents(); syncData(); syncHolders();
+    syncStakingRewards(); syncCouncil(); syncTreasury(); syncDemocracy(); syncGovernance();
+}
 
+async function start() {
+    // DB init can throw (corrupt SQLite / unwritable bind mount after an
+    // unclean reboot). Catch it so the process doesn't exit-loop under
+    // `restart: unless-stopped`; the operator can then exec in and inspect.
+    try {
+        db.initDb(DATA_DIR);
+    } catch (err) {
+        console.error('FATAL: database init failed at ' + DATA_DIR + ' — serving may be degraded:', err && err.message ? err.message : err);
+    }
+
+    // Start the HTTP server FIRST so the API is reachable (serving cached
+    // SQLite data, and so nginx's /api proxy gets 200s instead of 502s) even
+    // while the chain RPC is still connecting in the background.
     app.listen(PORT, () => {
         console.log(`Backend indexer listening on port ${PORT}`);
     });
+
+    // Non-blocking: connect to the chain in the background.
+    connectRpc().catch(err => console.error('[RPC] connect bootstrap error:', err && err.message ? err.message : err));
 
     syncBlocks();
     syncTransactions();
