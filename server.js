@@ -47,6 +47,23 @@ const DISPLAY_NAME_OVERRIDES = new Map([
 // pallet-id derivation is unavailable on the connected runtime.
 const TREASURY_ACCOUNT = process.env.TREASURY_ACCOUNT || 'esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew';
 
+// Comma-separated list of WebSocket RPC endpoints. WsProvider will rotate
+// across them on failure and reconnect with exponential-ish backoff. Set
+// POLKADEX_WS to a comma-separated list (your private node first, plus any
+// public fallbacks) when the default endpoint is rate-limiting — that's the
+// single biggest cause of `WebSocket is not connected`.
+const RPC_ENDPOINTS = (process.env.POLKADEX_WS || 'wss://so.polkadex.ee')
+    .split(',').map(s => s.trim()).filter(Boolean);
+const RPC_AUTO_RECONNECT_MS = readPositiveInteger(process.env.POLKADEX_WS_RECONNECT_MS, 2500);
+let rpcConnected = false;
+
+// True only when both the `WsProvider` thinks it's connected *and* the
+// ApiPromise reports `isConnected`. Background sync loops should skip ticks
+// when this is false instead of throwing `WebSocket is not connected`.
+function isRpcReady() {
+    return rpcConnected && !!globalApi && globalApi.isConnected;
+}
+
 let isSyncing = false;
 let isSyncingHolders = false;
 let isSyncingTx = false;
@@ -1757,7 +1774,7 @@ async function applyGovernanceRecords(treasury, motions) {
 // One crawl pass: index new blocks (forward) and walk a resumable chunk of
 // older history (backfill).
 async function syncGovernance() {
-    if (isSyncingGovernance || !globalApi) return;
+    if (isSyncingGovernance || !isRpcReady()) return;
     isSyncingGovernance = true;
     try {
         const collectiveName = ['council', 'councilCollective', 'generalCouncil']
@@ -1828,7 +1845,7 @@ async function syncGovernance() {
 // Indexes the democracy pallet: referenda (status + vote tally), active public
 // proposals, the queued external proposal, and launch-period progress.
 async function syncDemocracy() {
-    if (isSyncingDemocracy || !globalApi) return;
+    if (isSyncingDemocracy || !isRpcReady()) return;
     isSyncingDemocracy = true;
     try {
         const dem = globalApi.query.democracy;
@@ -1953,7 +1970,7 @@ async function syncDemocracy() {
 }
 
 async function syncData() {
-    if (isSyncing || !globalApi) return;
+    if (isSyncing || !isRpcReady()) return;
     isSyncing || (isSyncing = true);
     try {
         console.log("Starting validator indexer sync...");
@@ -1983,7 +2000,7 @@ async function syncData() {
 }
 
 async function syncHolders() {
-    if (isSyncingHolders || !globalApi) return;
+    if (isSyncingHolders || !isRpcReady()) return;
     isSyncingHolders = true;
     try {
         console.log("Starting holder indexer sync...");
@@ -2008,7 +2025,7 @@ async function syncHolders() {
 }
 
 async function syncBlocks() {
-    if (isSyncingBlocks || !globalApi) return;
+    if (isSyncingBlocks || !isRpcReady()) return;
     isSyncingBlocks = true;
     try {
         let currentHash = await globalApi.rpc.chain.getBlockHash();
@@ -2040,7 +2057,7 @@ async function syncBlocks() {
 }
 
 async function syncTransactions() {
-    if (isSyncingTx || !globalApi) return;
+    if (isSyncingTx || !isRpcReady()) return;
     isSyncingTx = true;
     try {
         const state = db.getSyncState('transactions');
@@ -2085,7 +2102,7 @@ async function syncTransactions() {
 }
 
 async function syncEvents() {
-    if (isSyncingEvents || !globalApi) return;
+    if (isSyncingEvents || !isRpcReady()) return;
     isSyncingEvents = true;
     try {
         let currentHash = await globalApi.rpc.chain.getBlockHash();
@@ -2378,7 +2395,7 @@ async function syncPrice() {
 // One crawl pass: index new blocks (forward) and walk a resumable chunk of
 // older history (backfill). Runs once per interval and appends every time.
 async function syncStakingRewards() {
-    if (isSyncingStakingRewards || !globalApi) return;
+    if (isSyncingStakingRewards || !isRpcReady()) return;
     isSyncingStakingRewards = true;
     try {
         const state = db.getSyncState('staking_rewards');
@@ -2446,9 +2463,32 @@ async function syncStakingRewards() {
 
 async function start() {
     db.initDb(DATA_DIR);
-    const wsProvider = new WsProvider('wss://so.polkadex.ee');
+
+    // Build the WS provider with a real endpoint list and auto-reconnect.
+    // Listen for connection-state events so sync loops can skip ticks while
+    // we're disconnected (otherwise every 30-second timer logs a stack trace).
+    const wsProvider = new WsProvider(RPC_ENDPOINTS.length > 1 ? RPC_ENDPOINTS : RPC_ENDPOINTS[0], RPC_AUTO_RECONNECT_MS);
+    wsProvider.on('connected', () => {
+        rpcConnected = true;
+        console.log('[RPC] connected to Polkadex node');
+    });
+    wsProvider.on('disconnected', () => {
+        rpcConnected = false;
+        console.warn('[RPC] disconnected — auto-reconnect every ' + RPC_AUTO_RECONNECT_MS + ' ms');
+    });
+    wsProvider.on('error', (err) => {
+        console.warn('[RPC] provider error:', err && err.message ? err.message : err);
+    });
+
     globalApi = await ApiPromise.create({ provider: wsProvider });
-    console.log("Connected to Polkadex RPC");
+    // ApiPromise also emits these on top of WsProvider — useful when a single
+    // request times out and the api lib decides to flag itself disconnected
+    // before the underlying socket closes.
+    globalApi.on('disconnected', () => { rpcConnected = false; console.warn('[RPC] api disconnected'); });
+    globalApi.on('connected',    () => { rpcConnected = true;  console.log('[RPC] api connected'); });
+    globalApi.on('error',        (err) => { console.warn('[RPC] api error:', err && err.message ? err.message : err); });
+    rpcConnected = globalApi.isConnected;
+    console.log('Connected to Polkadex RPC at ' + RPC_ENDPOINTS.join(', '));
     if (globalApi.registry && globalApi.registry.chainSS58 != null) {
         chainSS58 = globalApi.registry.chainSS58;
     }
@@ -2488,5 +2528,14 @@ async function start() {
     setInterval(syncGovernance, THIRTY_SECONDS);
     setInterval(syncPrice, PRICE_SYNC_INTERVAL);
 }
+
+// Surface anything that escapes a sync's try/catch so we never see a
+// silent "WebSocket is not connected" trail again.
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled promise rejection:', err && err.stack ? err.stack : err);
+});
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err && err.stack ? err.stack : err);
+});
 
 start();
