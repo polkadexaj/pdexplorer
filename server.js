@@ -40,6 +40,9 @@ const FIVE_MINUTES = 5 * 60 * 1000;
 const THIRTY_MINUTES = 30 * 60 * 1000;
 const THIRTY_SECONDS = 30 * 1000;
 const RECENT_SYNC_INTERVAL = 12 * 1000;
+// Network-info cache pre-warm cadence — comfortably inside FIVE_MINUTES (the
+// cache TTL) so the home page panel is always served from a warm cache.
+const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 3 * 60 * 1000);
 const TX_CACHE_LIMIT = readPositiveInteger(process.env.TX_CACHE_LIMIT, 500);
 const TX_INITIAL_SCAN_BLOCKS = readPositiveInteger(process.env.TX_INITIAL_SCAN_BLOCKS, 20000);
 const TX_OLDER_SCAN_BLOCKS = readPositiveInteger(process.env.TX_OLDER_SCAN_BLOCKS, TX_INITIAL_SCAN_BLOCKS);
@@ -159,11 +162,45 @@ async function getEraValidatorStake(api, era, address) {
     return totalStake && totalStake.unwrap ? totalStake.unwrap() : totalStake;
 }
 
+// In-flight dedupe: a cold request and the background pre-warm should share a
+// single expensive computation rather than each hammering the RPC node with
+// the per-validator queries + full ledger scan.
+let networkInfoInFlight = null;
+
+// Stale-while-revalidate read used by the API endpoints. Returns whatever is
+// cached immediately — even slightly stale — and kicks a background refresh so
+// the *next* read is fresh. Only a genuinely cold cache (nothing stored yet)
+// blocks the caller on a full computation. This is what keeps the home page's
+// "Network Information" panel from occasionally eating a multi-second recompute.
 async function getNetworkInfo() {
     if (!globalApi) throw new Error('API not ready');
     const cacheData = db.getKv('network_info') || { networkInfo: null, lastSync: 0, status: 'Initializing' };
-    if (cacheData.networkInfo && Date.now() - cacheData.lastSync < FIVE_MINUTES) return cacheData;
+    const fresh = cacheData.networkInfo && (Date.now() - cacheData.lastSync < FIVE_MINUTES);
+    if (fresh) return cacheData;
+    if (cacheData.networkInfo) {
+        // Stale but usable: serve now, refresh behind the scenes.
+        refreshNetworkInfoInBackground();
+        return { ...cacheData, status: 'Stale' };
+    }
+    // Cold cache (fresh process, never computed): compute once and wait.
+    return await computeNetworkInfo();
+}
 
+// Fire-and-forget refresh. Safe to call frequently — it's deduped by the
+// in-flight promise and gated on the RPC being connected.
+function refreshNetworkInfoInBackground() {
+    if (!isRpcReady()) return;
+    computeNetworkInfo().catch(err => console.warn('[network-info] background refresh failed:', err && err.message ? err.message : err));
+}
+
+// The heavy computation (dozens of validator queries + a full staking.ledger
+// scan). Always writes the result to the `network_info` cache key. Concurrent
+// callers share one run via networkInfoInFlight.
+async function computeNetworkInfo() {
+    if (!globalApi) throw new Error('API not ready');
+    if (networkInfoInFlight) return networkInfoInFlight;
+    networkInfoInFlight = (async () => {
+    try {
     const activeEraOption = await globalApi.query.staking.activeEra();
     const activeEra = activeEraOption.isSome ? activeEraOption.unwrap().index.toNumber() : 0;
     const previousEra = Math.max(activeEra - 1, 0);
@@ -245,6 +282,11 @@ async function getNetworkInfo() {
     };
     db.setKv('network_info', nextCacheData);
     return nextCacheData;
+    } finally {
+        networkInfoInFlight = null;
+    }
+    })();
+    return networkInfoInFlight;
 }
 
 function formatIdentityName(rawStr) {
@@ -2525,9 +2567,11 @@ async function connectRpc() {
         chainSS58 = globalApi.registry.chainSS58;
     }
     // Kick the syncs immediately on (re)connect instead of waiting for the
-    // next interval tick.
+    // next interval tick. Pre-warm the network-info cache too so the home
+    // page's "Network Information" panel is hot the moment the chain is up.
     syncBlocks(); syncTransactions(); syncEvents(); syncData(); syncHolders();
     syncStakingRewards(); syncCouncil(); syncTreasury(); syncDemocracy(); syncGovernance();
+    refreshNetworkInfoInBackground();
 }
 
 async function start() {
@@ -2561,6 +2605,7 @@ async function start() {
     syncTreasury();
     syncDemocracy();
     syncGovernance();
+    refreshNetworkInfoInBackground();
 
     // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
     setInterval(() => {
@@ -2573,6 +2618,9 @@ async function start() {
     setInterval(syncTreasury, FIVE_MINUTES);
     setInterval(syncDemocracy, FIVE_MINUTES);
     setInterval(syncTransactions, THIRTY_SECONDS);
+    // Pre-warm the network-info cache well inside its 5-minute TTL so the
+    // home page panel is always a cache hit (never a cold recompute).
+    setInterval(refreshNetworkInfoInBackground, NETWORK_INFO_REFRESH_MS);
     // Staking rewards indexer: continuously appends new payouts each era and
     // resumably backfills older history.
     setInterval(syncStakingRewards, THIRTY_SECONDS);

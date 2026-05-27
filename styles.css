@@ -81,8 +81,17 @@ h1, h2, h3 { font-weight: 600; }
     flex-direction: column;
     position: fixed;
     height: 100vh;
+    /* Scroll internally when the nav is taller than the viewport (short
+       screens / 6-inch phones) so content stays inside the painted
+       background box instead of spilling out with a transparent backdrop. */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     z-index: 100;
 }
+/* Let the nav shrink and scroll within the flex column instead of forcing
+   the sidebar past its height (min-height:0 overrides the default
+   min-height:auto that prevents flex items from shrinking below content). */
+.sidebar-nav { min-height: 0; }
 
 .sidebar-header {
     padding: 24px;
@@ -688,13 +697,20 @@ h1, h2, h3 { font-weight: 600; }
 @media (max-width: 900px) {
     .main-content { margin-left: 0; }
     .topbar { width: 100%; justify-content: space-between; }
-    .sidebar { 
-        width: 260px; 
-        transform: translateX(-100%); 
+    .sidebar {
+        width: 260px;
+        transform: translateX(-100%);
         transition: transform 0.3s ease;
         background: var(--bg-dark) !important;
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
+        /* `dvh` tracks the *visible* viewport on iOS Safari (excludes the
+           address bar), so the footer/background reach the true bottom edge.
+           `100vh` stays as the fallback for browsers without dvh support. */
+        height: 100vh;
+        height: 100dvh;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
     }
     .sidebar.open { 
         transform: translateX(0); 
