@@ -40,9 +40,37 @@ const FIVE_MINUTES = 5 * 60 * 1000;
 const THIRTY_MINUTES = 30 * 60 * 1000;
 const THIRTY_SECONDS = 30 * 1000;
 const RECENT_SYNC_INTERVAL = 12 * 1000;
-// Network-info cache pre-warm cadence — comfortably inside FIVE_MINUTES (the
-// cache TTL) so the home page panel is always served from a warm cache.
-const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 3 * 60 * 1000);
+// Network-info cache pre-warm cadence. Bumped from 3 → 10 minutes because the
+// underlying compute does a `staking.ledger.entries()` scan over every staker
+// on the chain, which is one of our heaviest RPC operations. The TTL on
+// getNetworkInfo() is still 5 minutes, so the endpoint serves stale data for
+// at most ~5 minutes while the background refresh catches up.
+const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 10 * 60 * 1000);
+
+// --- Chain index tuning (blocks + events combined indexer) ----------------
+// The chain indexer keeps two watermarks: latestScannedBlock (forward, head)
+// and backfillCursor (descending, genesis-ward), so a missed window during an
+// RPC outage is automatically filled in on subsequent ticks. A third "gap
+// fill" pass re-attempts any block numbers missing within the indexed range
+// (RPC blips that previously left holes).
+const BLOCKS_FORWARD_MAX = readPositiveInteger(process.env.BLOCKS_FORWARD_MAX, 500);
+const BLOCKS_BACKFILL_CHUNK = readPositiveInteger(process.env.BLOCKS_BACKFILL_CHUNK, 200);
+const BLOCKS_GAP_FILL_CHUNK = readPositiveInteger(process.env.BLOCKS_GAP_FILL_CHUNK, 100);
+const BLOCKS_MIN_BLOCK = readPositiveInteger(process.env.BLOCKS_MIN_BLOCK, 1);
+// Per-tick parallelism for block fetches. Each Promise.all batch hits the RPC
+// node with this many concurrent block-hash + derived-block requests. Higher
+// = faster catch-up but more RPC load; lower = gentler but slower. 8 is a
+// good trade-off for a typical Polkadex node; lower it under stress.
+const BLOCKS_FETCH_CONCURRENCY = readPositiveInteger(process.env.BLOCKS_FETCH_CONCURRENCY, 8);
+// When any sync function throws, skip the next ticks for this long. Prevents
+// the load-amplification spiral where a timing-out RPC causes every 12s/30s
+// sync timer to stack up parallel hung promises.
+const SYNC_BACKOFF_MS = readPositiveInteger(process.env.SYNC_BACKOFF_MS, 60 * 1000);
+// How long the cached `totalUnlocking` figure (sum of all unbonding stake on
+// the chain) is considered fresh. The underlying query — a full scan of
+// staking.ledger.entries() — is the single most expensive RPC in this app,
+// so we run it rarely and serve the cached value from the network-info path.
+const TOTAL_UNLOCKING_TTL_MS = readPositiveInteger(process.env.TOTAL_UNLOCKING_TTL_MS, 30 * 60 * 1000);
 const TX_CACHE_LIMIT = readPositiveInteger(process.env.TX_CACHE_LIMIT, 500);
 const TX_INITIAL_SCAN_BLOCKS = readPositiveInteger(process.env.TX_INITIAL_SCAN_BLOCKS, 20000);
 const TX_OLDER_SCAN_BLOCKS = readPositiveInteger(process.env.TX_OLDER_SCAN_BLOCKS, TX_INITIAL_SCAN_BLOCKS);
@@ -193,6 +221,31 @@ function refreshNetworkInfoInBackground() {
     computeNetworkInfo().catch(err => console.warn('[network-info] background refresh failed:', err && err.message ? err.message : err));
 }
 
+// Separate, slow refresher for `totalUnlocking`. Reads every staking ledger
+// on the chain to sum unbonding amounts — the heaviest single RPC operation
+// in the app — and stores it in its own KV cache so computeNetworkInfo can
+// reuse the result without re-running the scan each time. Deduped + gated.
+let isRefreshingTotalUnlocking = false;
+async function refreshTotalUnlockingInBackground() {
+    if (isRefreshingTotalUnlocking || !isRpcReady()) return;
+    isRefreshingTotalUnlocking = true;
+    try {
+        const ledgerEntries = await globalApi.query.staking.ledger.entries();
+        let totalUnlocking = 0;
+        for (const [, ledgerOpt] of ledgerEntries) {
+            const ledger = ledgerOpt.isSome ? ledgerOpt.unwrap() : ledgerOpt;
+            for (const unlocking of ledger.unlocking || []) {
+                totalUnlocking += formatPDEX(unlocking.value);
+            }
+        }
+        db.setKv('network_totalUnlocking', { value: totalUnlocking, lastSync: Date.now() });
+    } catch (err) {
+        console.warn('[network-info] totalUnlocking refresh failed:', err && err.message ? err.message : err);
+    } finally {
+        isRefreshingTotalUnlocking = false;
+    }
+}
+
 // The heavy computation (dozens of validator queries + a full staking.ledger
 // scan). Always writes the result to the `network_info` cache key. Concurrent
 // callers share one run via networkInfoInFlight.
@@ -241,13 +294,17 @@ async function computeNetworkInfo() {
         }
     }
 
-    let totalUnlocking = 0;
-    const ledgerEntries = await globalApi.query.staking.ledger.entries();
-    for (const [, ledgerOpt] of ledgerEntries) {
-        const ledger = ledgerOpt.isSome ? ledgerOpt.unwrap() : ledgerOpt;
-        for (const unlocking of ledger.unlocking || []) {
-            totalUnlocking += formatPDEX(unlocking.value);
-        }
+    // `totalUnlocking` requires scanning every staking.ledger on the chain
+    // (potentially thousands of entries) which is by far the most expensive
+    // RPC operation in this function. It changes slowly, so we cache it
+    // separately and let a dedicated background timer refresh it on a much
+    // slower cadence — this single change reduces per-tick load dramatically
+    // when getNetworkInfo runs.
+    const cachedUnlocking = db.getKv('network_totalUnlocking') || { value: 0, lastSync: 0 };
+    let totalUnlocking = Number(cachedUnlocking.value) || 0;
+    // Kick the background refresh if the value is stale; we never block on it.
+    if (Date.now() - (cachedUnlocking.lastSync || 0) > TOTAL_UNLOCKING_TTL_MS) {
+        refreshTotalUnlockingInBackground();
     }
 
     const totalIssuance = formatPDEX(totalIssuanceRaw);
@@ -1839,7 +1896,7 @@ async function applyGovernanceRecords(treasury, motions) {
 // One crawl pass: index new blocks (forward) and walk a resumable chunk of
 // older history (backfill).
 async function syncGovernance() {
-    if (isSyncingGovernance || !isRpcReady()) return;
+    if (isSyncingGovernance || !isRpcReady() || inBackoff('governance')) return;
     isSyncingGovernance = true;
     try {
         const collectiveName = ['council', 'councilCollective', 'generalCouncil']
@@ -1902,6 +1959,7 @@ async function syncGovernance() {
     } catch (err) {
         console.error('Governance sync error:', err.message);
         db.setSyncState('governance', { ...db.getSyncState('governance'), status: 'Error', error: err.message });
+        noteSyncError('governance');
     } finally {
         isSyncingGovernance = false;
     }
@@ -2089,6 +2147,183 @@ async function syncHolders() {
     } finally { isSyncingHolders = false; }
 }
 
+// --- Per-sync backoff -----------------------------------------------------
+// When an RPC call times out it can take seconds before the WebSocket gives
+// up. With many sync timers, those slow failures stack up and the load
+// average climbs (Node event loop saturated + SQLite WAL writes queueing on
+// flaky storage). After ANY sync error we skip that sync's next ticks for
+// SYNC_BACKOFF_MS. Keys are arbitrary strings; one bucket per sync.
+const syncBackoffUntil = new Map();
+function inBackoff(key) {
+    const until = syncBackoffUntil.get(key) || 0;
+    return Date.now() < until;
+}
+function noteSyncError(key) {
+    syncBackoffUntil.set(key, Date.now() + SYNC_BACKOFF_MS);
+}
+
+// --- Combined chain indexer (blocks + events) ------------------------------
+// Replaces the old syncBlocks + syncEvents pair, which each made their own
+// per-block RPC calls (wasted RPC budget) and stopped on the first error
+// (left permanent gaps after RPC outages). The new design:
+//   1. ONE `derive.chain.getBlock(hash)` per block yields both block data
+//      AND events in a single round-trip.
+//   2. Forward pass: scan latestScannedBlock+1..head, capped by BLOCKS_FORWARD_MAX.
+//   3. Backfill pass: walk one chunk further from backfillCursor toward genesis.
+//   4. Gap-fill pass: query DB for any holes within the indexed range and
+//      re-attempt one chunk per tick. Catches blocks lost to mid-walk RPC blips.
+//   5. Per-block try/catch + N-concurrent batches — one bad block doesn't
+//      abort the rest of the range.
+let isSyncingChain = false;
+
+// Fetch a single block by number, returning { block, events } records ready
+// for db.insertBlocks / db.insertEvents. Throws on RPC failure so the caller
+// can decide whether to mark as a gap.
+async function scanSingleBlock(blockNumber) {
+    const hash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+    const derived = await globalApi.derive.chain.getBlock(hash);
+    if (!derived) return null;
+    const blockHash = derived.block.header.hash.toHex();
+    const timestamp = getBlockTimestamp(derived);
+    const authorAddr = derived.author ? derived.author.toString() : 'System';
+    const block = {
+        number: blockNumber,
+        hash: blockHash,
+        authorAddress: authorAddr,
+        authorName: await getIdentity(globalApi, authorAddr),
+        extrinsicsCount: derived.block.extrinsics.length,
+        eventsCount: derived.events ? derived.events.length : 0,
+        timestamp
+    };
+    const events = [];
+    const allEvents = derived.events || [];
+    for (let eventIndex = 0; eventIndex < allEvents.length; eventIndex++) {
+        const record = allEvents[eventIndex];
+        const eventId = `${blockHash}-${eventIndex}`;
+        const extrinsicIndex = record.phase.isApplyExtrinsic ? record.phase.asApplyExtrinsic.toNumber() : null;
+        const extrinsic = extrinsicIndex !== null ? derived.block.extrinsics[extrinsicIndex] : null;
+        const signerAddress = extrinsic && extrinsic.isSigned ? extrinsic.signer.toString() : 'System';
+        const txHash = extrinsic ? extrinsic.hash.toHex() : '';
+        const status = record.event.section === 'system' && record.event.method === 'ExtrinsicFailed' ? 'failed' : 'success';
+        const signerName = signerAddress !== 'System' ? await getIdentity(globalApi, signerAddress) : 'System';
+        events.push({
+            hash: eventId, txHash, blockHash, block: blockNumber, eventIndex, extrinsicIndex,
+            section: record.event.section, method: record.event.method,
+            data: record.event.data.toHuman(), signerAddress, signerName, timestamp, status
+        });
+    }
+    return { block, events };
+}
+
+// Scan an inclusive numeric range, processing blocks in parallel batches.
+// Returns { blocks, events, attempts, succeeded, failedNumbers }.
+async function scanChainRange(startBlock, endBlock, maxAttempts) {
+    const top = Math.max(startBlock, endBlock);
+    const bottom = Math.min(startBlock, endBlock);
+    const total = Math.min(top - bottom + 1, maxAttempts);
+    // Build the descending list of numbers to attempt; capped at total.
+    const numbers = [];
+    for (let n = top; numbers.length < total && n >= bottom; n--) numbers.push(n);
+
+    const blocks = [];
+    const events = [];
+    const failedNumbers = [];
+    let succeeded = 0;
+
+    for (let i = 0; i < numbers.length; i += BLOCKS_FETCH_CONCURRENCY) {
+        const chunk = numbers.slice(i, i + BLOCKS_FETCH_CONCURRENCY);
+        const results = await Promise.all(chunk.map(n => scanSingleBlock(n).catch(err => {
+            console.warn(`[chain-index] block ${n} fetch failed: ${err && err.message ? err.message : err}`);
+            return { __error: true, n };
+        })));
+        for (let j = 0; j < results.length; j++) {
+            const r = results[j];
+            if (r && !r.__error) {
+                blocks.push(r.block);
+                for (const e of r.events) events.push(e);
+                succeeded++;
+            } else {
+                failedNumbers.push(chunk[j]);
+            }
+        }
+    }
+    return { blocks, events, attempts: numbers.length, succeeded, failedNumbers };
+}
+
+async function syncChainIndex() {
+    if (isSyncingChain || !isRpcReady() || inBackoff('chain_index')) return;
+    isSyncingChain = true;
+    try {
+        const state = db.getSyncState('chain_index');
+        const head = (await globalApi.rpc.chain.getHeader()).number.toNumber();
+        let initialized = !!state.initialized;
+        let latestScannedBlock = Number(state.latestScannedBlock) || 0;
+        let oldestScannedBlock = Number(state.oldestScannedBlock) || 0;
+        let backfillCursor = Number(state.backfillCursor) || 0;
+        let backfillComplete = !!state.backfillComplete;
+
+        // First run: anchor watermarks to the current head; backfill will then
+        // walk everything below it toward genesis on subsequent ticks.
+        if (!initialized) {
+            initialized = true;
+            latestScannedBlock = head;
+            oldestScannedBlock = head;
+            backfillCursor = head - 1;
+            backfillComplete = (head - 1) < BLOCKS_MIN_BLOCK;
+        }
+
+        // 1) FORWARD PASS — index everything new since the last tick.
+        if (head > latestScannedBlock) {
+            if (head - latestScannedBlock > BLOCKS_FORWARD_MAX) {
+                console.warn(`[chain-index] forward gap ${head - latestScannedBlock} exceeds cap; scanning newest ${BLOCKS_FORWARD_MAX} this tick — remainder will be picked up by gap-fill.`);
+            }
+            const forward = await scanChainRange(latestScannedBlock + 1, head, BLOCKS_FORWARD_MAX);
+            if (forward.blocks.length) db.insertBlocks(forward.blocks);
+            if (forward.events.length) db.insertEvents(forward.events);
+            // Advance the watermark to head even if individual blocks failed —
+            // the gap-fill pass will pick those up by name on subsequent ticks.
+            latestScannedBlock = head;
+            if (oldestScannedBlock === 0) oldestScannedBlock = head;
+            db.setSyncState('chain_index', { initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete, lastSync: Date.now(), status: 'Syncing' });
+        }
+
+        // 2) BACKFILL PASS — extend coverage one chunk toward genesis.
+        if (!backfillComplete && backfillCursor >= BLOCKS_MIN_BLOCK) {
+            const stop = Math.max(backfillCursor - BLOCKS_BACKFILL_CHUNK + 1, BLOCKS_MIN_BLOCK);
+            const back = await scanChainRange(stop, backfillCursor, BLOCKS_BACKFILL_CHUNK);
+            if (back.blocks.length) db.insertBlocks(back.blocks);
+            if (back.events.length) db.insertEvents(back.events);
+            oldestScannedBlock = Math.min(oldestScannedBlock || backfillCursor, stop);
+            backfillCursor = stop - 1;
+            if (backfillCursor < BLOCKS_MIN_BLOCK) backfillComplete = true;
+        }
+
+        // 3) GAP-FILL PASS — repair holes inside the indexed range. The DB
+        // query returns newest gaps first, which is what users care about most.
+        const gaps = db.getBlockGaps(1);
+        if (gaps.length) {
+            const g = gaps[0];
+            const chunkEnd = g.gapEnd;
+            const chunkStart = Math.max(g.gapStart, g.gapEnd - BLOCKS_GAP_FILL_CHUNK + 1);
+            const fill = await scanChainRange(chunkStart, chunkEnd, BLOCKS_GAP_FILL_CHUNK);
+            if (fill.blocks.length) db.insertBlocks(fill.blocks);
+            if (fill.events.length) db.insertEvents(fill.events);
+            console.log(`[chain-index] gap-fill ${chunkStart}-${chunkEnd} (gap of ${g.gapSize}): ${fill.succeeded}/${fill.attempts} repaired`);
+        }
+
+        db.setSyncState('chain_index', { initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete, lastSync: Date.now(), status: 'Synced' });
+        if (gaps.length || !backfillComplete) {
+            console.log(`[chain-index] head=${head} indexed=${oldestScannedBlock}-${latestScannedBlock} (${db.countBlocks()} blocks), backfill=${backfillComplete ? 'complete' : 'in progress'}, known gaps=${gaps.length}`);
+        }
+    } catch (err) {
+        console.error('Chain index sync error:', err && err.message ? err.message : err);
+        db.setSyncState('chain_index', { ...db.getSyncState('chain_index'), status: 'Error', error: err && err.message ? err.message : String(err) });
+        noteSyncError('chain_index');
+    } finally {
+        isSyncingChain = false;
+    }
+}
+
 async function syncBlocks() {
     if (isSyncingBlocks || !isRpcReady()) return;
     isSyncingBlocks = true;
@@ -2122,7 +2357,7 @@ async function syncBlocks() {
 }
 
 async function syncTransactions() {
-    if (isSyncingTx || !isRpcReady()) return;
+    if (isSyncingTx || !isRpcReady() || inBackoff('transactions')) return;
     isSyncingTx = true;
     try {
         const state = db.getSyncState('transactions');
@@ -2163,6 +2398,7 @@ async function syncTransactions() {
     } catch (err) {
         console.error("Transaction sync error:", err);
         db.setSyncState('transactions', { ...db.getSyncState('transactions'), status: 'Error', error: err.message });
+        noteSyncError('transactions');
     } finally { isSyncingTx = false; }
 }
 
@@ -2460,7 +2696,7 @@ async function syncPrice() {
 // One crawl pass: index new blocks (forward) and walk a resumable chunk of
 // older history (backfill). Runs once per interval and appends every time.
 async function syncStakingRewards() {
-    if (isSyncingStakingRewards || !isRpcReady()) return;
+    if (isSyncingStakingRewards || !isRpcReady() || inBackoff('staking_rewards')) return;
     isSyncingStakingRewards = true;
     try {
         const state = db.getSyncState('staking_rewards');
@@ -2521,6 +2757,7 @@ async function syncStakingRewards() {
     } catch (err) {
         console.error("Staking rewards sync error:", err);
         db.setSyncState('staking_rewards', { ...db.getSyncState('staking_rewards'), status: 'Error', error: err.message });
+        noteSyncError('staking_rewards');
     } finally {
         isSyncingStakingRewards = false;
     }
@@ -2567,11 +2804,14 @@ async function connectRpc() {
         chainSS58 = globalApi.registry.chainSS58;
     }
     // Kick the syncs immediately on (re)connect instead of waiting for the
-    // next interval tick. Pre-warm the network-info cache too so the home
+    // next interval tick. Pre-warm the network-info caches too so the home
     // page's "Network Information" panel is hot the moment the chain is up.
-    syncBlocks(); syncTransactions(); syncEvents(); syncData(); syncHolders();
+    // (The old syncBlocks/syncEvents calls are now subsumed by syncChainIndex,
+    // which does one RPC fetch per block and yields both blocks AND events.)
+    syncChainIndex(); syncTransactions(); syncData(); syncHolders();
     syncStakingRewards(); syncCouncil(); syncTreasury(); syncDemocracy(); syncGovernance();
     refreshNetworkInfoInBackground();
+    refreshTotalUnlockingInBackground();
 }
 
 async function start() {
@@ -2594,24 +2834,27 @@ async function start() {
     // Non-blocking: connect to the chain in the background.
     connectRpc().catch(err => console.error('[RPC] connect bootstrap error:', err && err.message ? err.message : err));
 
-    syncBlocks();
+    // Stagger initial kicks so the RPC node isn't slammed by every sync in the
+    // same second of startup — that pile-up alone can spike load. The first
+    // call still happens immediately so the home page has data quickly; the
+    // rest are spread across the first ~10 seconds.
+    syncChainIndex();
     syncTransactions();
-    syncEvents();
-    syncData();
-    syncHolders();
-    syncStakingRewards();
-    syncPrice();
-    syncCouncil();
-    syncTreasury();
-    syncDemocracy();
-    syncGovernance();
     refreshNetworkInfoInBackground();
+    refreshTotalUnlockingInBackground();
+    setTimeout(syncData,         1500);
+    setTimeout(syncHolders,      3000);
+    setTimeout(syncStakingRewards, 4500);
+    setTimeout(syncCouncil,      6000);
+    setTimeout(syncTreasury,     7000);
+    setTimeout(syncDemocracy,    8000);
+    setTimeout(syncGovernance,   9000);
+    setTimeout(syncPrice,        10000);
 
-    // Recent-chain caches follow block production. Validator and holder rankings are heavier and run less often.
+    // Recent-chain indexing — the combined blocks + events crawler.
     setInterval(() => {
-        syncBlocks();
+        syncChainIndex();
         syncTransactions();
-        syncEvents();
     }, RECENT_SYNC_INTERVAL);
     setInterval(syncHolders, THIRTY_MINUTES);
     setInterval(syncCouncil, FIVE_MINUTES);
@@ -2621,6 +2864,10 @@ async function start() {
     // Pre-warm the network-info cache well inside its 5-minute TTL so the
     // home page panel is always a cache hit (never a cold recompute).
     setInterval(refreshNetworkInfoInBackground, NETWORK_INFO_REFRESH_MS);
+    // Refresh the totalUnlocking figure on its own slower cadence — it's the
+    // expensive `staking.ledger.entries()` scan that the network-info compute
+    // used to do every time.
+    setInterval(refreshTotalUnlockingInBackground, TOTAL_UNLOCKING_TTL_MS);
     // Staking rewards indexer: continuously appends new payouts each era and
     // resumably backfills older history.
     setInterval(syncStakingRewards, THIRTY_SECONDS);

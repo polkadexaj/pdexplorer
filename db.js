@@ -307,6 +307,35 @@ export function countBlocks() {
     return db.prepare('SELECT COUNT(*) AS c FROM blocks').get().c;
 }
 
+// Smallest and largest indexed block numbers (NULL on an empty table).
+// Used by the chain indexer to compute coverage and decide whether to
+// extend backwards (backfill) or forward (catch-up).
+export function getBlocksMinMax() {
+    const row = db.prepare('SELECT MIN(number) AS min, MAX(number) AS max, COUNT(*) AS count FROM blocks').get();
+    return row || { min: null, max: null, count: 0 };
+}
+
+// Return ranges of missing block numbers WITHIN the indexed range. Uses
+// SQLite's LEAD() window function (available since 3.25) to find every
+// pair of adjacent rows whose `number` differs by more than one and reports
+// the implied gap. Ordered newest-first so the gap-fill pass works on the
+// freshest missing blocks first (most useful to users browsing recent
+// activity), then walks back over time.
+export function getBlockGaps(limit = 50) {
+    return db.prepare(`
+        SELECT (number + 1) AS gapStart,
+               (next_num - 1) AS gapEnd,
+               (next_num - number - 1) AS gapSize
+        FROM (
+            SELECT number, LEAD(number) OVER (ORDER BY number) AS next_num
+            FROM blocks
+        )
+        WHERE next_num IS NOT NULL AND next_num - number > 1
+        ORDER BY number DESC
+        LIMIT ?
+    `).all(limit);
+}
+
 // --- events ---
 function mapEventRow(r) {
     let data = null;
