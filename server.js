@@ -30,7 +30,18 @@ import * as db from './db.js';
 })();
 
 const app = express();
-app.use(cors());
+// Restrict CORS to known origins instead of the default wildcard. Same-origin
+// requests (no Origin header) are always allowed. Override the list via
+// ALLOWED_ORIGINS env (comma-separated).
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://explorer.polkadex.ee,http://localhost:3000')
+    .split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+        return callback(new Error('Origin not allowed by CORS: ' + origin));
+    },
+    credentials: false
+}));
 app.use(express.json({ limit: '64kb' }));
 
 // Use dedicated data directory for Docker volumes
@@ -89,7 +100,10 @@ const GOV_BACKFILL_CHUNK = readPositiveInteger(process.env.GOV_BACKFILL_CHUNK, 1
 const GOV_FORWARD_MAX = readPositiveInteger(process.env.GOV_FORWARD_MAX, 50000);
 const GOV_MIN_BLOCK = readPositiveInteger(process.env.GOV_MIN_BLOCK, 1);
 // Wallet dashboard / price chart / unpaid-reward tuning.
-const CMC_API_KEY = process.env.CMC_API_KEY || 'ee98717bf0924ab88d749ca613cd7f86';
+// CMC API key for the PDEX/USD price feed. Never hardcode — supply via .env
+// (the previous in-source default was committed to git and is now considered
+// compromised; rotate it at CoinMarketCap if you haven't already).
+const CMC_API_KEY = process.env.CMC_API_KEY || '';
 const CMC_SYMBOL = process.env.CMC_SYMBOL || 'PDEX';
 const PRICE_SYNC_INTERVAL = readPositiveInteger(process.env.PRICE_SYNC_INTERVAL_MS, 10 * 60 * 1000);
 const UNCLAIMED_TTL = readPositiveInteger(process.env.UNCLAIMED_TTL_MS, 20 * 60 * 1000);
