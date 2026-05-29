@@ -308,7 +308,15 @@ deploy_app() {
     cd "$DEPLOY_DIR"
 
     log "Preparing data directory (chown to uid 1000 for the rootless container)"
-    install -d -m 0750 -o 1000 -g 1000 "$DEPLOY_DIR/data"
+    # mkdir + chown rather than `install -o 1000 -g 1000` because on a fresh
+    # cloud image there's usually no *named* user at uid 1000 yet, and some
+    # `install` builds reject the numeric form with "invalid user: '1000'".
+    # `chown 1000:1000` accepts a bare numeric id; the `+1000:+1000` fallback
+    # forces the numeric interpretation on stricter chown variants.
+    mkdir -p "$DEPLOY_DIR/data"
+    chmod 0750 "$DEPLOY_DIR/data"
+    chown 1000:1000 "$DEPLOY_DIR/data" 2>/dev/null \
+        || chown '+1000:+1000' "$DEPLOY_DIR/data"
     install -d -m 0755 "$DEPLOY_DIR/certbot/conf"
     install -d -m 0755 "$DEPLOY_DIR/certbot/www"
 
