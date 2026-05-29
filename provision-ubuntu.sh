@@ -32,11 +32,17 @@
 #      can validate it via HTTP-01).
 #
 # What this script will NOT do:
-#   * Restore data from the previous (compromised) host. That's deliberate.
-#     The new server re-indexes from the Polkadex RPC; gap-fill backfills any
-#     missing history automatically.
-#   * Migrate any /etc, /opt, or ~/ files from the old server. Anything you
-#     bring across has to be re-verified against an authoritative source.
+#   * Auto-import data from the previous (compromised) host. That's deliberate.
+#     If you skip the import, the new server simply re-indexes from the
+#     Polkadex RPC; the gap-fill code backfills missing history automatically
+#     (slower start, but provably clean state).
+#     If you DO want to seed the new server from a backup, see step 3 of the
+#     post-deploy notes below — you can safely drop the explorer.db file (the
+#     SQLite index of public blockchain data) into /opt/pdexplorer/data/.
+#     Don't copy anything else from the old host.
+#   * Migrate any /etc, /opt, or ~/ configuration files from the old server.
+#     Anything beyond the .db file has to be re-verified against an
+#     authoritative source (this repo on git) before you trust it.
 # =============================================================================
 
 set -euo pipefail
@@ -401,8 +407,11 @@ Next steps:
   2. Set up an external uptime monitor on https://$DOMAIN/api/network-info
      (UptimeRobot / BetterStack free tier).
   3. If you bring data over from the old (compromised) box, copy ONLY
-     ./data/*.sqlite — do not copy any other files, dotfiles, or scripts.
-     Verify ownership: 'chown -R 1000:1000 $DEPLOY_DIR/data' afterwards.
+     ./data/explorer.db (and its -shm / -wal sidecars if present) — no
+     other files, dotfiles, or scripts. The cleanest way is a snapshot
+     taken via:  sqlite3 explorer.db ".backup explorer.bak.db"
+     Verify ownership after copying:
+       chown -R 1000:1000 $DEPLOY_DIR/data
   4. Watch the backend warm up:
        docker compose -f $DEPLOY_DIR/docker-compose.yml logs -f backend
   5. Confirm certificate is valid:

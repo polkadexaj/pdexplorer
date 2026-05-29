@@ -207,10 +207,10 @@ Roll out via `Content-Security-Policy-Report-Only` first to catch violations bef
 
 **Risk.** A future incident with data damage means re-indexing from scratch (hours for the full backfill).
 
-**Fix.** Add a nightly cron that snapshots `./data/*.sqlite` to off-host storage (S3, Backblaze B2, rsync.net). Sample:
+**Fix.** Add a nightly cron that snapshots `./data/explorer.db` to off-host storage (S3, Backblaze B2, rsync.net). Use SQLite's `.backup` command so the snapshot is a consistent single file even while the indexer is writing in WAL mode:
 
 ```bash
-0 3 * * * docker compose -f /opt/pdexplorer/docker-compose.yml exec backend sqlite3 /app/data/explorer.sqlite ".backup /app/data/explorer.bak.sqlite" && rsync -a /opt/pdexplorer/data/*.bak.sqlite backup-host:/backups/pdexplorer/$(date +\%Y-\%m-\%d)/
+0 3 * * * docker compose -f /opt/pdexplorer/docker-compose.yml exec -T backend sqlite3 /app/data/explorer.db ".backup /app/data/explorer.bak.db" && rsync -a /opt/pdexplorer/data/explorer.bak.db backup-host:/backups/pdexplorer/$(date +\%Y-\%m-\%d)/explorer.db
 ```
 
 ### LOW L-1 — `nginx:alpine` and other unpinned image tags
