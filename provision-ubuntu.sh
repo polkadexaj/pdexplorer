@@ -10,12 +10,15 @@
 # Usage:
 #   # Add your SSH public key to authorized_keys MANUALLY first
 #   # (the script disables SSH password auth and root login).
-#   sudo bash provision-ubuntu.sh
+#   sudo bash provision-ubuntu.sh                # all phases except cloudflare
+#   sudo bash provision-ubuntu.sh all+cf         # all phases including cloudflare
 #
 #   # Or just one phase at a time:
-#   sudo bash provision-ubuntu.sh harden     # OS hardening only
-#   sudo bash provision-ubuntu.sh docker     # Docker install only
-#   sudo bash provision-ubuntu.sh app        # App deploy only
+#   sudo bash provision-ubuntu.sh harden         # OS hardening only
+#   sudo bash provision-ubuntu.sh docker         # Docker install only
+#   sudo bash provision-ubuntu.sh app            # App deploy only
+#   sudo bash provision-ubuntu.sh cloudflare     # Restrict 80/443 to Cloudflare ranges
+#                                                # (run AFTER harden so UFW exists)
 #
 # Configuration (override via env or edit at top):
 #   DOMAIN              = TLS domain to issue a cert for
@@ -344,19 +347,38 @@ EOF
         ok ".env already present (preserving)"
     fi
 
+    log "Preparing TLS helper files (options-ssl-nginx.conf, ssl-dhparams.pem)"
+    # nginx.conf `include`s these from /etc/letsencrypt/. If they're missing
+    # nginx fails to start with "open() options-ssl-nginx.conf failed". They
+    # are normally created by certbot the first time it runs — bootstrap them
+    # here so nginx can come up before certbot has any cert at all.
+    install -d certbot/conf
+    if [ ! -s certbot/conf/options-ssl-nginx.conf ]; then
+        curl -fsSL https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
+            -o certbot/conf/options-ssl-nginx.conf \
+            || warn "Could not download options-ssl-nginx.conf; nginx may not start"
+    fi
+    if [ ! -s certbot/conf/ssl-dhparams.pem ]; then
+        curl -fsSL https://raw.githubusercontent.com/certbot/certbot/master/certbot/certbot/ssl-dhparams.pem \
+            -o certbot/conf/ssl-dhparams.pem \
+            || warn "Could not download ssl-dhparams.pem; nginx may not start"
+    fi
+
     log "Issuing Let's Encrypt cert for $DOMAIN (HTTP-01 challenge)"
     if [ ! -f "certbot/conf/live/$DOMAIN/fullchain.pem" ]; then
         if [ -x ./init-letsencrypt.sh ]; then
             ./init-letsencrypt.sh
-            ok "Cert issued via init-letsencrypt.sh"
+            ok "Cert bootstrapped via init-letsencrypt.sh"
         else
             warn "init-letsencrypt.sh missing — issuing a self-signed placeholder so nginx can start."
             install -d "certbot/conf/live/$DOMAIN"
-            openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+            openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
                 -keyout "certbot/conf/live/$DOMAIN/privkey.pem" \
                 -out "certbot/conf/live/$DOMAIN/fullchain.pem" \
                 -subj "/CN=$DOMAIN" >/dev/null 2>&1
-            warn "Replace with a real cert via certbot once the stack is up."
+            warn "Replace with a real cert via certbot once the stack is up:"
+            warn "  docker compose run --rm certbot certonly --webroot -w /var/www/certbot -d $DOMAIN -m $LETSENCRYPT_EMAIL --agree-tos --non-interactive"
+            warn "  docker compose exec frontend nginx -s reload"
         fi
     else
         ok "Cert already present at certbot/conf/live/$DOMAIN/"
@@ -380,6 +402,130 @@ EOF
     docker image prune -f >/dev/null || true
 
     log "Phase 3 complete."
+}
+
+# ---- Phase 4 (optional): Cloudflare-only firewall --------------------------
+# When the site is fronted by Cloudflare's proxy, only Cloudflare's edge nodes
+# should be able to reach 80/443 on the origin. Direct hits to the VPS IP
+# (bypassing Cloudflare's WAF / rate limits / DDoS protection) get dropped.
+setup_cloudflare_only() {
+    log "Phase 4: Cloudflare-only firewall"
+
+    local cf_dir=/etc/cloudflare
+    install -d -m 0755 "$cf_dir"
+
+    log "Fetching Cloudflare IP ranges (https://www.cloudflare.com/ips-v4 and -v6)"
+    curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v4 -o "$cf_dir/ips-v4" \
+        || die "Could not fetch ips-v4 — aborting (host firewall would lock you out of port 80/443)."
+    curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v6 -o "$cf_dir/ips-v6" \
+        || die "Could not fetch ips-v6."
+    ok "Got $(wc -l <"$cf_dir/ips-v4") IPv4 + $(wc -l <"$cf_dir/ips-v6") IPv6 ranges"
+
+    log "Replacing generic UFW 80/443 rules with Cloudflare-only allow rules"
+    # Strip any existing 80/443 rules (numbered, so iterate from the bottom up
+    # to keep the rule numbers stable as we delete).
+    ufw status numbered 2>/dev/null \
+        | awk -F'[][]' '/(^\[ *[0-9]+\] +80|^\[ *[0-9]+\] +443)/ {print $2}' \
+        | sort -rn \
+        | while read -r n; do yes | ufw delete "$n" >/dev/null 2>&1 || true; done
+
+    while IFS= read -r cidr; do
+        [ -z "$cidr" ] && continue
+        ufw allow proto tcp from "$cidr" to any port 80  comment 'Cloudflare proxy' >/dev/null
+        ufw allow proto tcp from "$cidr" to any port 443 comment 'Cloudflare proxy' >/dev/null
+    done < "$cf_dir/ips-v4"
+    while IFS= read -r cidr; do
+        [ -z "$cidr" ] && continue
+        ufw allow proto tcp from "$cidr" to any port 80  comment 'Cloudflare proxy v6' >/dev/null
+        ufw allow proto tcp from "$cidr" to any port 443 comment 'Cloudflare proxy v6' >/dev/null
+    done < "$cf_dir/ips-v6"
+    ufw reload >/dev/null
+    ok "UFW 80/443 now restricted to Cloudflare ranges only"
+
+    log "Installing weekly refresh systemd timer (Cloudflare publishes range changes occasionally)"
+    cat >/usr/local/sbin/cloudflare-ufw-refresh <<'EOF'
+#!/usr/bin/env bash
+# Refresh UFW rules with Cloudflare's current IP ranges. Runs weekly via
+# cloudflare-ufw-refresh.timer. Idempotent — no-op when ranges haven't changed.
+set -euo pipefail
+cf_dir=/etc/cloudflare
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v4 -o "$tmp/ips-v4"
+curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v6 -o "$tmp/ips-v6"
+[ -s "$tmp/ips-v4" ] && [ -s "$tmp/ips-v6" ] || { echo "empty Cloudflare lists, refusing"; exit 1; }
+if diff -q "$tmp/ips-v4" "$cf_dir/ips-v4" >/dev/null 2>&1 && \
+   diff -q "$tmp/ips-v6" "$cf_dir/ips-v6" >/dev/null 2>&1; then
+    exit 0   # no change
+fi
+# Drop old Cloudflare rules.
+ufw status numbered 2>/dev/null \
+    | awk -F'[][]' '/Cloudflare proxy/ {print $2}' \
+    | sort -rn \
+    | while read -r n; do yes | ufw delete "$n" >/dev/null 2>&1 || true; done
+# Add new.
+while IFS= read -r cidr; do
+    [ -z "$cidr" ] && continue
+    ufw allow proto tcp from "$cidr" to any port 80  comment 'Cloudflare proxy' >/dev/null
+    ufw allow proto tcp from "$cidr" to any port 443 comment 'Cloudflare proxy' >/dev/null
+done < "$tmp/ips-v4"
+while IFS= read -r cidr; do
+    [ -z "$cidr" ] && continue
+    ufw allow proto tcp from "$cidr" to any port 80  comment 'Cloudflare proxy v6' >/dev/null
+    ufw allow proto tcp from "$cidr" to any port 443 comment 'Cloudflare proxy v6' >/dev/null
+done < "$tmp/ips-v6"
+mv "$tmp/ips-v4" "$cf_dir/ips-v4"
+mv "$tmp/ips-v6" "$cf_dir/ips-v6"
+ufw reload >/dev/null
+logger -t cloudflare-ufw-refresh "Updated UFW with new Cloudflare ranges"
+EOF
+    chmod +x /usr/local/sbin/cloudflare-ufw-refresh
+
+    cat >/etc/systemd/system/cloudflare-ufw-refresh.service <<'EOF'
+[Unit]
+Description=Refresh UFW with current Cloudflare IP ranges
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cloudflare-ufw-refresh
+EOF
+    cat >/etc/systemd/system/cloudflare-ufw-refresh.timer <<'EOF'
+[Unit]
+Description=Weekly refresh of Cloudflare UFW rules
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now cloudflare-ufw-refresh.timer >/dev/null
+    ok "Weekly refresh timer enabled (next run: $(systemctl show -p NextElapseUSecRealtime --value cloudflare-ufw-refresh.timer 2>/dev/null || echo unknown))"
+
+    cat <<'EOF'
+
+  Reminder — Cloudflare-related operational notes:
+
+  * On Cloudflare's dashboard, the DNS record for this domain must be set to
+    "Proxied" (orange cloud) for this firewall posture to make sense. If it
+    is "DNS only" (grey cloud), the firewall will silently block all visitors.
+
+  * Let's Encrypt HTTP-01 challenges will NOT work while CF proxy is enabled,
+    because the challenge hits Cloudflare, not the origin. Three options:
+      (a) Temporarily set the DNS record to "DNS only" while certbot runs.
+      (b) Use DNS-01 challenge with the Cloudflare API plugin (recommended
+          for production — survives renewals unattended).
+      (c) Add a Page Rule that bypasses CF cache+proxy for
+          /.well-known/acme-challenge/* (works but is fragile).
+
+  * Cloudflare SSL mode should be "Full (Strict)" so CF validates the
+    origin's TLS cert. Anything else either disables encryption between CF
+    and origin, or accepts invalid certs.
+
+EOF
 }
 
 # ---- Final summary ---------------------------------------------------------
@@ -425,11 +571,13 @@ main() {
     require_root
     require_ubuntu
     case "${1:-all}" in
-        harden)  harden_system ;;
-        docker)  install_docker ;;
-        app)     deploy_app ;;
-        all)     harden_system; install_docker; deploy_app ;;
-        *)       die "Usage: $0 [harden|docker|app|all]" ;;
+        harden)     harden_system ;;
+        docker)     install_docker ;;
+        app)        deploy_app ;;
+        cloudflare) setup_cloudflare_only ;;
+        all)        harden_system; install_docker; deploy_app ;;
+        all+cf)     harden_system; install_docker; deploy_app; setup_cloudflare_only ;;
+        *)          die "Usage: $0 [harden|docker|app|cloudflare|all|all+cf]" ;;
     esac
     summary
 }

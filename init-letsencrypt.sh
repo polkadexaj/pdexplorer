@@ -2,13 +2,21 @@
 
 # Source variables from .env
 if [ -f .env ]; then
+  # shellcheck disable=SC1091
   source .env
 else
   echo "Error: .env file missing. Cannot proceed."
   exit 1
 fi
 
-domains=($DOMAIN_NAME)
+# Accept either DOMAIN (preferred, matches docker-compose convention and
+# provision-ubuntu.sh) or the legacy DOMAIN_NAME from earlier .env files.
+DOMAIN_VALUE="${DOMAIN:-${DOMAIN_NAME:-}}"
+if [ -z "$DOMAIN_VALUE" ]; then
+  echo "Error: neither DOMAIN nor DOMAIN_NAME is set in .env."
+  exit 1
+fi
+domains=($DOMAIN_VALUE)
 rsa_key_size=4096
 data_path="./certbot"
 email="$LETSENCRYPT_EMAIL" # Adding a valid address is strongly recommended
