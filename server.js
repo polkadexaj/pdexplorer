@@ -58,6 +58,26 @@ const RECENT_SYNC_INTERVAL = 12 * 1000;
 // at most ~5 minutes while the background refresh catches up.
 const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 10 * 60 * 1000);
 
+// Governance sync cadence (council motions, treasury proposals, democracy
+// referenda). These changed every 5 minutes by default historically;
+// override via GOVERNANCE_REFRESH_MS for all three at once, or use the
+// per-pallet vars to tune each independently. Note: governance state changes
+// over hours/days, not seconds — running these too often adds RPC load
+// without surfacing meaningfully fresher data.
+const GOVERNANCE_REFRESH_MS = readPositiveInteger(process.env.GOVERNANCE_REFRESH_MS, 5 * 60 * 1000);
+const COUNCIL_REFRESH_MS    = readPositiveInteger(process.env.COUNCIL_REFRESH_MS,    GOVERNANCE_REFRESH_MS);
+const TREASURY_REFRESH_MS   = readPositiveInteger(process.env.TREASURY_REFRESH_MS,   GOVERNANCE_REFRESH_MS);
+const DEMOCRACY_REFRESH_MS  = readPositiveInteger(process.env.DEMOCRACY_REFRESH_MS,  GOVERNANCE_REFRESH_MS);
+
+// Tick cadence for the resumable-backfill crawlers. Each tick does the forward
+// pass + one backfill chunk + (for chain-index) one gap-fill chunk. Lower
+// these to make backfill complete sooner — the forward pass is a no-op when
+// the head hasn't moved, so the extra ticks are essentially free. Total
+// per-second RPC load = chunk_size * fetch_concurrency / interval_seconds.
+const STAKING_REWARDS_INTERVAL_MS   = readPositiveInteger(process.env.STAKING_REWARDS_INTERVAL_MS,   30 * 1000);
+const GOVERNANCE_INDEXER_INTERVAL_MS = readPositiveInteger(process.env.GOVERNANCE_INDEXER_INTERVAL_MS, 30 * 1000);
+const CHAIN_INDEX_INTERVAL_MS       = readPositiveInteger(process.env.CHAIN_INDEX_INTERVAL_MS,       12 * 1000);
+
 // --- Chain index tuning (blocks + events combined indexer) ----------------
 // The chain indexer keeps two watermarks: latestScannedBlock (forward, head)
 // and backfillCursor (descending, genesis-ward), so a missed window during an
@@ -2865,15 +2885,16 @@ async function start() {
     setTimeout(syncGovernance,   9000);
     setTimeout(syncPrice,        10000);
 
-    // Recent-chain indexing — the combined blocks + events crawler.
+    // Recent-chain indexing — the combined blocks + events crawler. Cadence
+    // controlled by CHAIN_INDEX_INTERVAL_MS (default 12s).
     setInterval(() => {
         syncChainIndex();
         syncTransactions();
-    }, RECENT_SYNC_INTERVAL);
+    }, CHAIN_INDEX_INTERVAL_MS);
     setInterval(syncHolders, THIRTY_MINUTES);
-    setInterval(syncCouncil, FIVE_MINUTES);
-    setInterval(syncTreasury, FIVE_MINUTES);
-    setInterval(syncDemocracy, FIVE_MINUTES);
+    setInterval(syncCouncil,   COUNCIL_REFRESH_MS);
+    setInterval(syncTreasury,  TREASURY_REFRESH_MS);
+    setInterval(syncDemocracy, DEMOCRACY_REFRESH_MS);
     setInterval(syncTransactions, THIRTY_SECONDS);
     // Pre-warm the network-info cache well inside its 5-minute TTL so the
     // home page panel is always a cache hit (never a cold recompute).
@@ -2883,11 +2904,14 @@ async function start() {
     // used to do every time.
     setInterval(refreshTotalUnlockingInBackground, TOTAL_UNLOCKING_TTL_MS);
     // Staking rewards indexer: continuously appends new payouts each era and
-    // resumably backfills older history.
-    setInterval(syncStakingRewards, THIRTY_SECONDS);
+    // resumably backfills older history. Cadence: STAKING_REWARDS_INTERVAL_MS
+    // (default 30s). Lower this and/or raise STAKING_REWARDS_BACKFILL_CHUNK to
+    // make backfill complete sooner.
+    setInterval(syncStakingRewards, STAKING_REWARDS_INTERVAL_MS);
     // Governance history indexer: forward pass for new blocks + resumable
     // backfill of treasury proposals and council motions toward genesis.
-    setInterval(syncGovernance, THIRTY_SECONDS);
+    // Cadence: GOVERNANCE_INDEXER_INTERVAL_MS (default 30s).
+    setInterval(syncGovernance, GOVERNANCE_INDEXER_INTERVAL_MS);
     setInterval(syncPrice, PRICE_SYNC_INTERVAL);
 }
 
