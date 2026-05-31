@@ -8,6 +8,12 @@ services:
     restart: unless-stopped
     ports:
       - "3001:3001"
+    # Pass every variable from the project's .env through to the container.
+    # server.js reads all its knobs (POLKADEX_WS, CMC_API_KEY, BLOCKS_FORWARD_MAX,
+    # ALLOWED_ORIGINS, NETWORK_INFO_REFRESH_MS, etc.) via process.env.
+    # See .env.example for the full list and defaults.
+    env_file:
+      - .env
     volumes:
       # Host bind mount for the SQLite index (server.js DATA_DIR = /app/data).
       # A bind mount lives on the host filesystem, so the indexed data survives
