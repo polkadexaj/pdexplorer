@@ -1006,7 +1006,19 @@ const searchInput = document.getElementById('search-input');
 const searchResultsContainer = document.getElementById('search-results-container');
 const searchQueryDisplay = document.getElementById('search-query-display');
 const deepSearchBtn = document.getElementById('deep-search-btn');
+const searchCloseBtn = document.getElementById('search-close-btn');
 let currentSearchQuery = '';
+
+// Close-button on the search-results header. Sends the user back to the
+// inline empty-state prompt with the current query pre-filled so they can
+// edit it (e.g. fix a typo, change "12345" to "12346") rather than retyping
+// from scratch. The topbar input keeps the query as well.
+if (searchCloseBtn) {
+    searchCloseBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        renderSearchPrompt(undefined, currentSearchQuery);
+    });
+}
 
 if (searchInput) {
     searchInput.addEventListener('keydown', (e) => {
@@ -1051,16 +1063,20 @@ function setDeepSearchButtonMode(mode) {
 
 // Empty-state for /search: shows a prominent search box with paste + clear
 // affordances, focused and ready to type into. Triggered when the user lands
-// on /search via a page refresh (where currentSearchQuery has been lost), or
-// when they explicitly cleared a previous query. `note` is an optional banner
-// rendered above the input — used to explain why we got here (e.g. "type a
-// query before searching the network").
-function renderSearchPrompt(note) {
+// on /search via a page refresh (where currentSearchQuery has been lost),
+// when they explicitly cleared a previous query, or when they close a search
+// result via the header X. `note` is an optional banner above the input
+// (e.g. "type a query before searching the network"). `prefillQuery` is an
+// optional initial value for the input — set when the user closes a result
+// page so the query stays editable instead of disappearing.
+function renderSearchPrompt(note, prefillQuery) {
     if (!searchResultsContainer) return;
     if (searchQueryDisplay) searchQueryDisplay.textContent = '';
     // Hide the header text ("Search Results for: ") since there are no results.
     const header = document.querySelector('.search-page .list-header h2');
     if (header) header.style.display = 'none';
+    // Hide the close button in the prompt view — there's nothing to close.
+    if (searchCloseBtn) searchCloseBtn.style.display = 'none';
     setDeepSearchButtonMode('hidden');
 
     searchResultsContainer.innerHTML = `
@@ -1111,8 +1127,19 @@ function renderSearchPrompt(note) {
     if (submitBtn) submitBtn.addEventListener('click', submit);
     if (inputEl) {
         inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+        // Pre-fill from the previous query when the user closed a result via
+        // the header X, so they can tweak and re-submit instead of retyping.
+        if (prefillQuery) inputEl.value = prefillQuery;
         // Focus on next tick so the cursor lands in the field after layout settles.
-        setTimeout(() => inputEl.focus(), 30);
+        // When pre-filled, place the caret at the end of the existing text so the
+        // user can immediately append or correct it.
+        setTimeout(() => {
+            inputEl.focus();
+            if (prefillQuery) {
+                const end = inputEl.value.length;
+                try { inputEl.setSelectionRange(end, end); } catch (e) { /* ignore */ }
+            }
+        }, 30);
     }
     if (pasteBtn) pasteBtn.addEventListener('click', async () => {
         try {
@@ -1154,6 +1181,9 @@ async function performSearch(query) {
     // The empty-state prompt hides the page's H2 header; restore it.
     const header = document.querySelector('.search-page .list-header h2');
     if (header) header.style.display = '';
+    // Show the close (×) button so the user can return to the prompt with
+    // the query pre-filled for editing.
+    if (searchCloseBtn) searchCloseBtn.style.display = '';
     if (searchQueryDisplay) searchQueryDisplay.innerText = query;
     if (searchResultsContainer) searchResultsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Searching local indexer...</div>';
 
