@@ -1034,7 +1034,12 @@ app.get('/api/validator/:address', async (req, res) => {
 
 app.get('/api/search/:query', async (req, res) => {
     const q = req.params.query.trim();
-    if (!globalApi) return res.status(500).json({ error: 'API not ready' });
+    // Fail fast with a JSON error when the chain RPC isn't currently usable —
+    // otherwise the sequential getBlockHash/derive.chain.getBlock/system.account
+    // calls below can each stall for tens of seconds while the WsProvider is
+    // reconnecting, leaving nginx to time out at its proxy_read_timeout and
+    // return an HTML 504 page (which then breaks the frontend's JSON parser).
+    if (!isRpcReady()) return res.status(503).json({ error: 'Chain RPC is reconnecting — please retry in a few seconds.' });
     try {
         if (/^\d+$/.test(q)) {
             const hash = await globalApi.rpc.chain.getBlockHash(parseInt(q));

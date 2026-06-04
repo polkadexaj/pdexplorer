@@ -1074,17 +1074,44 @@ async function performSearch(query) {
     if (searchResultsContainer) searchResultsContainer.innerHTML = html;
 }
 
+// Parse a fetch Response that we *expect* to be JSON, but might not be when
+// the backend is timed out / restarting / errored at the nginx layer (nginx
+// returns its own HTML error pages on 502/504). Returns the JSON body on
+// success, or throws a friendly message instead of "Unexpected token '<'".
+async function parseJsonResponse(response, contextLabel) {
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+        // Body is text — most often nginx's "502 Bad Gateway" or "504 Gateway
+        // Timeout" HTML error page. Convert to a human-readable message.
+        const bodyPreview = (await response.text()).slice(0, 200).replace(/\s+/g, ' ').trim();
+        const hint = response.status === 502 ? 'backend is unreachable'
+                  : response.status === 504 ? 'backend timed out'
+                  : response.status >= 500   ? 'backend error'
+                  : 'unexpected non-JSON response';
+        throw new Error(`${contextLabel || 'Request'} failed: ${response.status} ${response.statusText} (${hint})${bodyPreview ? ' — ' + bodyPreview : ''}`);
+    }
+    return await response.json();
+}
+
 async function deepSearchNetwork(query) {
     if (searchResultsContainer) searchResultsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Querying Deep Network RPC...</div>';
     try {
         const response = await fetch(`/api/search/${encodeURIComponent(query)}`);
         if (!response.ok) {
-            const err = await response.json();
-            searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep Search Failed: ${err.error}</div>`;
+            // Try to read a JSON-shaped error message first; if the upstream
+            // returned an nginx-style HTML error page, parseJsonResponse
+            // converts it to a readable string instead of throwing
+            // "Unexpected token '<'".
+            try {
+                const err = await parseJsonResponse(response, 'Deep search');
+                searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep Search Failed: ${stakingEscapeHtml(err.error || 'unknown error')}</div>`;
+            } catch (e) {
+                searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep Search Failed: ${stakingEscapeHtml(e.message)}<br><span style="color:var(--text-secondary);font-size:0.85rem;">If this keeps happening, the chain RPC is likely timing out; try again in a minute.</span></div>`;
+            }
             return;
         }
 
-        const data = await response.json();
+        const data = await parseJsonResponse(response, 'Deep search');
         let html = '';
 
         if (data.type === 'block') {
@@ -1098,7 +1125,7 @@ async function deepSearchNetwork(query) {
         if (searchResultsContainer) searchResultsContainer.innerHTML = html;
 
     } catch (err) {
-        searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep search error: ${err.message}</div>`;
+        searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep search error: ${stakingEscapeHtml(err.message)}</div>`;
     }
 }
 
