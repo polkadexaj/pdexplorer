@@ -1034,12 +1034,99 @@ function setDeepSearchButtonMode(mode) {
         deepSearchBtn.innerHTML = "<i class='bx bx-arrow-back' style=\"vertical-align:middle;\"></i> Back to search";
         deepSearchBtn.style.borderColor = 'var(--border-color)';
         deepSearchBtn.style.background  = 'rgba(255,255,255,0.05)';
+        deepSearchBtn.style.display = '';
+    } else if (mode === 'hidden') {
+        // No query yet — the inline prompt below has its own Search button,
+        // so a second deep-search button down here would be redundant noise.
+        deepSearchBtn.dataset.mode = 'hidden';
+        deepSearchBtn.style.display = 'none';
     } else {
         deepSearchBtn.dataset.mode = 'deep';
         deepSearchBtn.textContent = 'Deep Search Network';
         deepSearchBtn.style.borderColor = 'var(--brand-primary)';
         deepSearchBtn.style.background  = 'rgba(229,0,122,0.1)';
+        deepSearchBtn.style.display = '';
     }
+}
+
+// Empty-state for /search: shows a prominent search box with paste + clear
+// affordances, focused and ready to type into. Triggered when the user lands
+// on /search via a page refresh (where currentSearchQuery has been lost), or
+// when they explicitly cleared a previous query. `note` is an optional banner
+// rendered above the input — used to explain why we got here (e.g. "type a
+// query before searching the network").
+function renderSearchPrompt(note) {
+    if (!searchResultsContainer) return;
+    if (searchQueryDisplay) searchQueryDisplay.textContent = '';
+    // Hide the header text ("Search Results for: ") since there are no results.
+    const header = document.querySelector('.search-page .list-header h2');
+    if (header) header.style.display = 'none';
+    setDeepSearchButtonMode('hidden');
+
+    searchResultsContainer.innerHTML = `
+        <div style="text-align: center; padding: 32px 16px;">
+            <h3 style="margin: 0 0 10px; font-size: 1.25rem;">Search the Polkadex Mainnet</h3>
+            <p style="color: var(--text-secondary); margin: 0 auto 22px; font-size: 0.88rem; max-width: 540px; line-height: 1.55;">
+                Look up a block number, block hash, transaction hash, or account address. The local index is checked first;
+                you can also drill into the chain RPC directly with <strong>Deep Search</strong>.
+            </p>
+            ${note ? `<div style="color: var(--brand-secondary); font-size: 0.85rem; margin-bottom: 14px;">${stakingEscapeHtml(note)}</div>` : ''}
+            <div class="inline-search-bar" style="display: flex; gap: 8px; max-width: 640px; margin: 0 auto; flex-wrap: wrap;">
+                <input id="inline-search-input" type="text" inputmode="search"
+                    placeholder="12345 · 0xhash · es1…address"
+                    autocomplete="off" spellcheck="false"
+                    style="flex: 1 1 240px; min-width: 0; padding: 12px 14px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92rem;">
+                <button id="inline-search-paste-btn" type="button" title="Paste from clipboard" aria-label="Paste"
+                    style="padding: 10px 14px; background: transparent; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-size: 1.05rem;">
+                    <i class='bx bx-paste'></i>
+                </button>
+                <button id="inline-search-clear-btn" type="button" title="Clear" aria-label="Clear"
+                    style="padding: 10px 14px; background: transparent; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-size: 1.05rem;">
+                    <i class='bx bx-x'></i>
+                </button>
+                <button id="inline-search-submit-btn" type="button"
+                    style="padding: 10px 22px; background: var(--brand-primary); border: 0; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer;">
+                    Search
+                </button>
+            </div>
+            <p style="color: var(--text-muted); font-size: 0.78rem; margin-top: 14px;">
+                Tip: pressing <kbd style="padding: 1px 5px; border: 1px solid var(--border-color); border-radius: 3px; font-family: inherit;">Enter</kbd> submits.
+            </p>
+        </div>`;
+
+    const inputEl  = document.getElementById('inline-search-input');
+    const submitBtn = document.getElementById('inline-search-submit-btn');
+    const pasteBtn  = document.getElementById('inline-search-paste-btn');
+    const clearBtn  = document.getElementById('inline-search-clear-btn');
+
+    const submit = () => {
+        const q = (inputEl && inputEl.value || '').trim();
+        if (!q) { if (inputEl) inputEl.focus(); return; }
+        // Sync the topbar input too so users see what they searched for.
+        if (searchInput) searchInput.value = q;
+        // Restore header visibility before performSearch repaints the container.
+        if (header) header.style.display = '';
+        performSearch(q);
+    };
+    if (submitBtn) submitBtn.addEventListener('click', submit);
+    if (inputEl) {
+        inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+        // Focus on next tick so the cursor lands in the field after layout settles.
+        setTimeout(() => inputEl.focus(), 30);
+    }
+    if (pasteBtn) pasteBtn.addEventListener('click', async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text && inputEl) { inputEl.value = text.trim(); inputEl.focus(); }
+        } catch (e) {
+            // Clipboard API unavailable (insecure context, or user denied).
+            // Fall back to selecting the field so the user can paste manually.
+            if (inputEl) inputEl.focus();
+        }
+    });
+    if (clearBtn) clearBtn.addEventListener('click', () => {
+        if (inputEl) { inputEl.value = ''; inputEl.focus(); }
+    });
 }
 
 if (deepSearchBtn) {
@@ -1060,9 +1147,13 @@ async function performSearch(query) {
     currentSearchQuery = query;
     // Always reset the deep-search button to its default state when a fresh
     // local search starts. If a previous deep-search result had left the
-    // button in "Back to search" mode, this puts it back to "Deep Search
-    // Network" so the user can drill deeper from any new query.
+    // button in "Back to search" mode (or the empty-state prompt had hidden
+    // it), this puts it back to "Deep Search Network" so the user can drill
+    // deeper from any new query.
     setDeepSearchButtonMode('deep');
+    // The empty-state prompt hides the page's H2 header; restore it.
+    const header = document.querySelector('.search-page .list-header h2');
+    if (header) header.style.display = '';
     if (searchQueryDisplay) searchQueryDisplay.innerText = query;
     if (searchResultsContainer) searchResultsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Searching local indexer...</div>';
 
@@ -1110,35 +1201,61 @@ async function performSearch(query) {
 }
 
 // Parse a fetch Response that we *expect* to be JSON, but might not be when
-// the backend is timed out / restarting / errored at the nginx layer (nginx
-// returns its own HTML error pages on 502/504). Returns the JSON body on
-// success, or throws a friendly message instead of "Unexpected token '<'".
-async function parseJsonResponse(response, contextLabel) {
+// the backend is timed out / restarting / errored at the nginx (or Cloudflare)
+// layer — those return their own HTML error pages on 502/504/521. Returns
+// the JSON body on success, or throws a short, friendly message instead of
+// the raw "Unexpected token '<'". The caller decides how to prefix it for
+// display, so the message itself is just the status + hint + a sanitized
+// snippet of any human-readable text.
+async function parseJsonResponse(response) {
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
-    if (!contentType.includes('application/json')) {
-        // Body is text — most often nginx's "502 Bad Gateway" or "504 Gateway
-        // Timeout" HTML error page. Convert to a human-readable message.
-        const bodyPreview = (await response.text()).slice(0, 200).replace(/\s+/g, ' ').trim();
-        const hint = response.status === 502 ? 'backend is unreachable'
-                  : response.status === 504 ? 'backend timed out'
-                  : response.status >= 500   ? 'backend error'
-                  : 'unexpected non-JSON response';
-        throw new Error(`${contextLabel || 'Request'} failed: ${response.status} ${response.statusText} (${hint})${bodyPreview ? ' — ' + bodyPreview : ''}`);
-    }
-    return await response.json();
+    if (contentType.includes('application/json')) return await response.json();
+
+    // Non-JSON body — strip HTML (doctype, comments incl. IE conditionals, tags)
+    // so a Cloudflare or nginx error page collapses to its visible text only.
+    const raw = await response.text();
+    const stripped = raw
+        .replace(/<!doctype[^>]*>/gi, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const bodyPreview = stripped.slice(0, 140);
+    const hint = response.status === 502 ? 'backend is unreachable'
+              : response.status === 504 ? 'backend timed out'
+              : response.status === 521 ? 'origin server is down (Cloudflare)'
+              : response.status === 522 ? 'connection timed out (Cloudflare)'
+              : response.status === 524 ? 'a timeout occurred (Cloudflare)'
+              : response.status >= 500   ? 'backend error'
+              : response.status === 404  ? 'not found'
+              : 'unexpected non-JSON response';
+    throw new Error(`${response.status} ${response.statusText || hint} (${hint})${bodyPreview ? ' — ' + bodyPreview : ''}`);
 }
 
 async function deepSearchNetwork(query) {
+    // Guard: an empty query usually means the page was refreshed and
+    // `currentSearchQuery` was reset. Calling /api/search/ with no path param
+    // produces a 404 (or a Cloudflare 502 when the origin can't be reached),
+    // which surfaces as a confusing error. Render the empty-state prompt
+    // instead so the user can type a query.
+    const q = (query || '').trim();
+    if (!q) {
+        renderSearchPrompt('Type a query before searching the network.');
+        return;
+    }
+
     if (searchResultsContainer) searchResultsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Querying Deep Network RPC...</div>';
     try {
-        const response = await fetch(`/api/search/${encodeURIComponent(query)}`);
+        const response = await fetch(`/api/search/${encodeURIComponent(q)}`);
         if (!response.ok) {
             // Try to read a JSON-shaped error message first; if the upstream
-            // returned an nginx-style HTML error page, parseJsonResponse
+            // returned an nginx/Cloudflare HTML error page, parseJsonResponse
             // converts it to a readable string instead of throwing
             // "Unexpected token '<'".
             try {
-                const err = await parseJsonResponse(response, 'Deep search');
+                const err = await parseJsonResponse(response);
                 searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep Search Failed: ${stakingEscapeHtml(err.error || 'unknown error')}</div>`;
             } catch (e) {
                 searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep Search Failed: ${stakingEscapeHtml(e.message)}<br><span style="color:var(--text-secondary);font-size:0.85rem;">If this keeps happening, the chain RPC is likely timing out; try again in a minute.</span></div>`;
@@ -1146,7 +1263,7 @@ async function deepSearchNetwork(query) {
             return;
         }
 
-        const data = await parseJsonResponse(response, 'Deep search');
+        const data = await parseJsonResponse(response);
         let html = '';
 
         if (data.type === 'block') {
@@ -1566,6 +1683,14 @@ function routeTo(target) {
                 initDemocracyPage();
             } else if (mainTarget === 'treasury') {
                 fetchTreasuryData();
+            } else if (mainTarget === 'search') {
+                // /search reached without an active query — usually a page
+                // refresh on the search results page, which loses the
+                // in-memory `currentSearchQuery`. Render the inline prompt
+                // so users have a paste-friendly box to retype into, instead
+                // of staring at an empty results panel with a deep-search
+                // button that has nothing to query.
+                if (!currentSearchQuery) renderSearchPrompt();
             }
         } else {
             page.style.display = 'none';
