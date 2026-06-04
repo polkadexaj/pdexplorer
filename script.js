@@ -1079,6 +1079,11 @@ function renderSearchPrompt(note, prefillQuery) {
     if (searchCloseBtn) searchCloseBtn.style.display = 'none';
     setDeepSearchButtonMode('hidden');
 
+    // Mirror the staking-rewards page layout: the input field hosts both the
+    // Paste and Clear icon buttons inside its right edge (absolute-positioned
+    // over the field's reserved padding-right), with the Search button as a
+    // separate sibling. Reuses the existing .staking-search-bar styling so
+    // visual treatment stays consistent across the app.
     searchResultsContainer.innerHTML = `
         <div style="text-align: center; padding: 32px 16px;">
             <h3 style="margin: 0 0 10px; font-size: 1.25rem;">Search the Polkadex Mainnet</h3>
@@ -1087,23 +1092,24 @@ function renderSearchPrompt(note, prefillQuery) {
                 you can also drill into the chain RPC directly with <strong>Deep Search</strong>.
             </p>
             ${note ? `<div style="color: var(--brand-secondary); font-size: 0.85rem; margin-bottom: 14px;">${stakingEscapeHtml(note)}</div>` : ''}
-            <div class="inline-search-bar" style="display: flex; gap: 8px; max-width: 640px; margin: 0 auto; flex-wrap: wrap;">
-                <input id="inline-search-input" type="text" inputmode="search"
-                    placeholder="12345 · 0xhash · es1…address"
-                    autocomplete="off" spellcheck="false"
-                    style="flex: 1 1 240px; min-width: 0; padding: 12px 14px; background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92rem;">
-                <button id="inline-search-paste-btn" type="button" title="Paste from clipboard" aria-label="Paste"
-                    style="padding: 10px 14px; background: transparent; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-size: 1.05rem;">
-                    <i class='bx bx-paste'></i>
-                </button>
-                <button id="inline-search-clear-btn" type="button" title="Clear" aria-label="Clear"
-                    style="padding: 10px 14px; background: transparent; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-size: 1.05rem;">
-                    <i class='bx bx-x'></i>
-                </button>
-                <button id="inline-search-submit-btn" type="button"
-                    style="padding: 10px 22px; background: var(--brand-primary); border: 0; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer;">
-                    Search
-                </button>
+            <div class="staking-search-bar" style="max-width: 640px; margin: 0 auto;">
+                <div style="flex: 1 1 320px; position: relative; display: flex; align-items: center;">
+                    <input id="inline-search-input" type="text" inputmode="search"
+                        placeholder="12345 · 0xhash · es1…address"
+                        autocomplete="off" spellcheck="false"
+                        style="width: 100%; padding-right: 70px;">
+                    <div style="position: absolute; right: 10px; display: flex; gap: 5px;">
+                        <button id="inline-search-clear-btn" type="button" title="Clear" aria-label="Clear"
+                            style="background: none; border: none; padding: 5px; color: var(--text-secondary); display: none; min-width: auto; height: auto; cursor: pointer;">
+                            <i class='bx bx-x' style="font-size: 20px;"></i>
+                        </button>
+                        <button id="inline-search-paste-btn" type="button" title="Paste" aria-label="Paste from clipboard"
+                            style="background: none; border: none; padding: 5px; color: var(--text-secondary); min-width: auto; height: auto; cursor: pointer;">
+                            <i class='bx bx-paste' style="font-size: 18px;"></i>
+                        </button>
+                    </div>
+                </div>
+                <button id="inline-search-submit-btn" type="button"><i class='bx bx-search'></i> Search</button>
             </div>
             <p style="color: var(--text-muted); font-size: 0.78rem; margin-top: 14px;">
                 Tip: pressing <kbd style="padding: 1px 5px; border: 1px solid var(--border-color); border-radius: 3px; font-family: inherit;">Enter</kbd> submits.
@@ -1114,6 +1120,15 @@ function renderSearchPrompt(note, prefillQuery) {
     const submitBtn = document.getElementById('inline-search-submit-btn');
     const pasteBtn  = document.getElementById('inline-search-paste-btn');
     const clearBtn  = document.getElementById('inline-search-clear-btn');
+
+    // The Clear button only makes sense when there's text to clear — toggle
+    // its visibility based on the input's current content. Mirrors the
+    // staking-rewards page behavior.
+    const syncClearVisibility = () => {
+        if (clearBtn && inputEl) {
+            clearBtn.style.display = inputEl.value.length > 0 ? 'inline-flex' : 'none';
+        }
+    };
 
     const submit = () => {
         const q = (inputEl && inputEl.value || '').trim();
@@ -1127,9 +1142,11 @@ function renderSearchPrompt(note, prefillQuery) {
     if (submitBtn) submitBtn.addEventListener('click', submit);
     if (inputEl) {
         inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+        inputEl.addEventListener('input', syncClearVisibility);
         // Pre-fill from the previous query when the user closed a result via
         // the header X, so they can tweak and re-submit instead of retyping.
         if (prefillQuery) inputEl.value = prefillQuery;
+        syncClearVisibility();
         // Focus on next tick so the cursor lands in the field after layout settles.
         // When pre-filled, place the caret at the end of the existing text so the
         // user can immediately append or correct it.
@@ -1144,7 +1161,7 @@ function renderSearchPrompt(note, prefillQuery) {
     if (pasteBtn) pasteBtn.addEventListener('click', async () => {
         try {
             const text = await navigator.clipboard.readText();
-            if (text && inputEl) { inputEl.value = text.trim(); inputEl.focus(); }
+            if (text && inputEl) { inputEl.value = text.trim(); inputEl.focus(); syncClearVisibility(); }
         } catch (e) {
             // Clipboard API unavailable (insecure context, or user denied).
             // Fall back to selecting the field so the user can paste manually.
@@ -1152,7 +1169,7 @@ function renderSearchPrompt(note, prefillQuery) {
         }
     });
     if (clearBtn) clearBtn.addEventListener('click', () => {
-        if (inputEl) { inputEl.value = ''; inputEl.focus(); }
+        if (inputEl) { inputEl.value = ''; inputEl.focus(); syncClearVisibility(); }
     });
 }
 

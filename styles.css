@@ -888,7 +888,12 @@ h1, h2, h3 { font-weight: 600; }
 
 .staking-search-bar input:focus {
     outline: none;
-    border-color: var(--border-hover);
+    /* Thin brand-pink edge + a subtle 2 px halo, so the whole search box
+       (including the absolute-positioned paste/clear icons inside the right
+       padding) reads as "active". Reused by the inline empty-state search
+       on /search via the same class, so both pages feel identical. */
+    border-color: var(--brand-primary);
+    box-shadow: 0 0 0 2px rgba(230, 0, 122, 0.15);
 }
 
 .staking-search-bar input::placeholder {
