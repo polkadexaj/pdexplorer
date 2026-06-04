@@ -1020,14 +1020,49 @@ if (searchInput) {
     });
 }
 
+// The deep-search button has two modes:
+//   - "deep" (default): label "Deep Search Network", triggers an on-chain RPC
+//     lookup via deepSearchNetwork().
+//   - "back": shown after a successful deep-search result lands. Repurposes
+//     the same button as "← Back to search", returning the user to the local
+//     search view. The dataset attribute keeps the state on the element so
+//     we don't have to swap event listeners on the fly.
+function setDeepSearchButtonMode(mode) {
+    if (!deepSearchBtn) return;
+    if (mode === 'back') {
+        deepSearchBtn.dataset.mode = 'back';
+        deepSearchBtn.innerHTML = "<i class='bx bx-arrow-back' style=\"vertical-align:middle;\"></i> Back to search";
+        deepSearchBtn.style.borderColor = 'var(--border-color)';
+        deepSearchBtn.style.background  = 'rgba(255,255,255,0.05)';
+    } else {
+        deepSearchBtn.dataset.mode = 'deep';
+        deepSearchBtn.textContent = 'Deep Search Network';
+        deepSearchBtn.style.borderColor = 'var(--brand-primary)';
+        deepSearchBtn.style.background  = 'rgba(229,0,122,0.1)';
+    }
+}
+
 if (deepSearchBtn) {
+    // Initialise to deep mode (matches the static HTML defaults).
+    setDeepSearchButtonMode('deep');
     deepSearchBtn.addEventListener('click', () => {
-        deepSearchNetwork(currentSearchQuery);
+        if (deepSearchBtn.dataset.mode === 'back') {
+            // Go back to the local search view. performSearch() resets the
+            // button to "deep" mode internally so it's ready for re-use.
+            performSearch(currentSearchQuery);
+        } else {
+            deepSearchNetwork(currentSearchQuery);
+        }
     });
 }
 
 async function performSearch(query) {
     currentSearchQuery = query;
+    // Always reset the deep-search button to its default state when a fresh
+    // local search starts. If a previous deep-search result had left the
+    // button in "Back to search" mode, this puts it back to "Deep Search
+    // Network" so the user can drill deeper from any new query.
+    setDeepSearchButtonMode('deep');
     if (searchQueryDisplay) searchQueryDisplay.innerText = query;
     if (searchResultsContainer) searchResultsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Searching local indexer...</div>';
 
@@ -1122,7 +1157,16 @@ async function deepSearchNetwork(query) {
             html += `<div style="padding: 10px 0;">Address: <strong>${data.data.address}</strong><br>Identity: ${data.data.name}<br>Total Balance: ${data.data.balance.toFixed(4)} PDEX<br>Free: ${data.data.free.toFixed(4)} PDEX, Reserved: ${data.data.reserved.toFixed(4)} PDEX</div>`;
         }
 
-        if (searchResultsContainer) searchResultsContainer.innerHTML = html;
+        if (html) {
+            if (searchResultsContainer) searchResultsContainer.innerHTML = html;
+            // A real result is on screen — repurpose the button as "Back to search"
+            // so the user has an obvious one-click way back to the local view.
+            setDeepSearchButtonMode('back');
+        } else {
+            // The chain didn't recognise the query as a block or account.
+            // Leave the button in "deep" mode so the user can refine and retry.
+            if (searchResultsContainer) searchResultsContainer.innerHTML = '<div style="text-align:center; padding: 20px; color: var(--text-secondary);">No matching block or account found on-chain for that query.</div>';
+        }
 
     } catch (err) {
         searchResultsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Deep search error: ${stakingEscapeHtml(err.message)}</div>`;
