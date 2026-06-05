@@ -81,17 +81,17 @@ h1, h2, h3 { font-weight: 600; }
     flex-direction: column;
     position: fixed;
     height: 100vh;
-    /* Scroll internally when the nav is taller than the viewport (short
-       screens / 6-inch phones) so content stays inside the painted
-       background box instead of spilling out with a transparent backdrop. */
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
+    /* `dvh` tracks the *visible* viewport (excludes iOS Safari's address bar)
+       so the footer reaches the real bottom edge on mobile too. `100vh` is
+       the fallback for older browsers. */
+    height: 100dvh;
+    /* The sidebar itself never scrolls — only `.sidebar-nav` does. That keeps
+       `.sidebar-footer` (PDEX Price) visually pinned to the bottom of the
+       sidebar on every screen size, instead of getting pushed off-screen when
+       the nav list is taller than the viewport. */
+    overflow: hidden;
     z-index: 100;
 }
-/* Let the nav shrink and scroll within the flex column instead of forcing
-   the sidebar past its height (min-height:0 overrides the default
-   min-height:auto that prevents flex items from shrinking below content). */
-.sidebar-nav { min-height: 0; }
 
 .sidebar-header {
     padding: 24px;
@@ -128,7 +128,15 @@ h1, h2, h3 { font-weight: 600; }
 }
 
 .sidebar-nav {
-    flex: 1;
+    /* Take all remaining vertical space between header and footer, but allow
+       this child to actually shrink below its content height — `min-height:0`
+       is required because the default for flex items is `min-height:auto`,
+       which would otherwise force the parent to grow and push the footer
+       below the viewport on short screens. */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     padding: 16px 0;
     display: flex;
     flex-direction: column;
@@ -180,7 +188,14 @@ h1, h2, h3 { font-weight: 600; }
 .badge.small { font-size: 0.6rem; margin-left: 8px; }
 
 .sidebar-footer {
-    padding: 24px;
+    /* Pinned-to-bottom price ticker. `margin-top:auto` is a belt-and-braces
+       partner to `.sidebar-nav { flex:1 }` — even if the nav ever loses its
+       flex grow, this still pushes the footer to the bottom of the column.
+       `flex-shrink:0` prevents the footer from getting squeezed on short
+       viewports, and the safe-area inset keeps it above the iOS home bar. */
+    margin-top: auto;
+    flex-shrink: 0;
+    padding: 20px 24px calc(20px + env(safe-area-inset-bottom, 0px));
     border-top: 1px solid var(--border-color);
     background: var(--bg-dark);
 }
@@ -704,13 +719,9 @@ h1, h2, h3 { font-weight: 600; }
         background: var(--bg-dark) !important;
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
-        /* `dvh` tracks the *visible* viewport on iOS Safari (excludes the
-           address bar), so the footer/background reach the true bottom edge.
-           `100vh` stays as the fallback for browsers without dvh support. */
-        height: 100vh;
-        height: 100dvh;
-        overflow-y: auto;
-        -webkit-overflow-scrolling: touch;
+        /* Inherits `height:100dvh; overflow:hidden` from the base rule — the
+           inner `.sidebar-nav` is the scroll container, so the footer
+           (PDEX Price) stays glued to the bottom of the drawer on mobile too. */
     }
     .sidebar.open { 
         transform: translateX(0); 

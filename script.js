@@ -2238,82 +2238,15 @@ async function fetchAccountDetails(address) {
             canonicalPath: `/account/${address}`
         });
 
-        // Transactions Table
-        let txHtml = `
-            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
-                <thead>
-                    <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-secondary);">
-                        <th style="padding: 12px 10px; font-weight: 500;">Txn Hash</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Method/Action</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Age</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Date</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-        `;
-
-        data.transactions.forEach(t => {
-            const dateObj = new Date(t.timestamp);
-            const dateStr = dateObj.toISOString().replace('T', ' ').substring(0, 19) + '(UTC)';
-            const statusBadge = t.status === 'success' ? `<span class="badge" style="background: rgba(46, 204, 113, 0.2); color: #2ecc71;">Success</span>` : `<span class="badge" style="background: rgba(231, 76, 60, 0.2); color: #e74c3c;">Failed</span>`;
-
-            txHtml += `
-                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                    <td style="padding: 15px 10px;"><a href="/tx/${t.block}/${t.hash}" class="item-link" style="color: var(--brand-secondary);">${t.hash.substring(0, 25)}...</a></td>
-                    <td style="padding: 15px 10px;">${t.amount || 'system'}<br><span style="color: var(--text-secondary); font-size: 11px;">call</span></td>
-                    <td style="padding: 15px 10px;">${timeAgo(t.timestamp)}</td>
-                    <td style="padding: 15px 10px;">${dateStr}</td>
-                    <td style="padding: 15px 10px;">${statusBadge}</td>
-                </tr>
-            `;
-        });
-        if (data.transactions.length === 0) {
-            if (data.status === 'Syncing') {
-                txHtml += '<tr><td colspan="5" style="padding: 20px; text-align: center; color: var(--brand-secondary);">Crawling deep history (up to 30 days)... Please refresh in a minute.</td></tr>';
-            } else {
-                txHtml += '<tr><td colspan="5" style="padding: 20px; text-align: center;">No recent transactions.</td></tr>';
-            }
-        }
-        txHtml += `</tbody></table>`;
-
-        // Events Table
-        let evHtml = `
-            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
-                <thead>
-                    <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-secondary);">
-                        <th style="padding: 12px 10px; font-weight: 500;">Event Hash</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Action</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Age</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Date</th>
-                        <th style="padding: 12px 10px; font-weight: 500;">Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-        `;
-        data.events.forEach(e => {
-            const dateObj = new Date(e.timestamp);
-            const dateStr = dateObj.toISOString().replace('T', ' ').substring(0, 19) + '(UTC)';
-            const statusBadge = `<span class="badge" style="background: rgba(46, 204, 113, 0.2); color: #2ecc71;">Success</span>`;
-
-            evHtml += `
-                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                    <td style="padding: 15px 10px;"><span class="address-cell" style="color: var(--brand-secondary);">${e.hash.substring(0, 25)}...</span></td>
-                    <td style="padding: 15px 10px;">${e.section}<br><span style="color: var(--text-secondary); font-size: 11px;">${e.method}</span></td>
-                    <td style="padding: 15px 10px;">${timeAgo(e.timestamp)}</td>
-                    <td style="padding: 15px 10px;">${dateStr}</td>
-                    <td style="padding: 15px 10px;">${statusBadge}</td>
-                </tr>
-            `;
-        });
-        if (data.events.length === 0) {
-            if (data.status === 'Syncing') {
-                evHtml += '<tr><td colspan="5" style="padding: 20px; text-align: center; color: var(--brand-secondary);">Crawling deep history (up to 30 days)... Please refresh in a minute.</td></tr>';
-            } else {
-                evHtml += '<tr><td colspan="5" style="padding: 20px; text-align: center;">No recent events.</td></tr>';
-            }
-        }
-        evHtml += `</tbody></table>`;
+        // Transactions + Events tables are now rendered by makeTable into
+        // dedicated container divs after the outer chrome is in place. We
+        // just leave placeholders in the markup here and wire them up below.
+        const txEmptyMessage = data.status === 'Syncing'
+            ? 'Crawling deep history (up to 30 days)… Please refresh in a minute.'
+            : 'No recent transactions.';
+        const evEmptyMessage = data.status === 'Syncing'
+            ? 'Crawling deep history (up to 30 days)… Please refresh in a minute.'
+            : 'No recent events.';
 
         let html = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
@@ -2360,15 +2293,97 @@ async function fetchAccountDetails(address) {
                 </div>
                 
                 <div id="account-tab-transactions">
-                    ${txHtml}
+                    <div id="account-tx-table"></div>
                 </div>
-                
+
                 <div id="account-tab-events" style="display: none;">
-                    ${evHtml}
+                    <div id="account-ev-table"></div>
                 </div>
             </div>
         `;
         accountDetailsContainer.innerHTML = html;
+
+        // Now that the container divs exist, mount the two makeTable
+        // instances. Re-running fetchAccountDetails creates new instances
+        // each time; that's fine because the outer DOM was replaced.
+        makeTable({
+            container: document.getElementById('account-tx-table'),
+            rows: data.transactions || [],
+            defaultSort: { key: 'timestamp', dir: 'desc' },
+            globalSearch: true,
+            summarySuffix: 'transactions',
+            emptyMessage: txEmptyMessage,
+            columns: [
+                {
+                    key: 'hash', label: 'Txn Hash', searchable: true,
+                    sort: (a, b) => String(a.hash || '').localeCompare(String(b.hash || '')),
+                    format: row => `<a href="/tx/${row.block}/${row.hash}" class="item-link" style="color: var(--brand-secondary);">${stakingEscapeHtml((row.hash || '').substring(0, 25))}…</a>`
+                },
+                {
+                    key: 'amount', label: 'Method / Action', searchable: true,
+                    sort: (a, b) => String(a.amount || '').localeCompare(String(b.amount || '')),
+                    filter: { type: 'text', placeholder: 'Method…' },
+                    format: row => `${stakingEscapeHtml(row.amount || 'system')}<br><span style="color: var(--text-secondary); font-size: 11px;">call</span>`
+                },
+                {
+                    key: 'timestamp', label: 'Age',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => stakingEscapeHtml(timeAgo(row.timestamp))
+                },
+                {
+                    key: 'timestampDate', label: 'Date',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => row.timestamp ? stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' (UTC)') : '—'
+                },
+                {
+                    key: 'status', label: 'Status', searchable: true,
+                    sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+                    filter: { type: 'select', options: ['success', 'failed'] },
+                    format: row => row.status === 'success'
+                        ? '<span class="badge" style="background: rgba(46, 204, 113, 0.2); color: #2ecc71;">Success</span>'
+                        : '<span class="badge" style="background: rgba(231, 76, 60, 0.2); color: #e74c3c;">Failed</span>'
+                }
+            ]
+        });
+
+        const eventSections = Array.from(new Set((data.events || []).map(e => e.section).filter(Boolean))).sort();
+        const eventMethods  = Array.from(new Set((data.events || []).map(e => e.method).filter(Boolean))).sort();
+        makeTable({
+            container: document.getElementById('account-ev-table'),
+            rows: data.events || [],
+            defaultSort: { key: 'timestamp', dir: 'desc' },
+            globalSearch: true,
+            summarySuffix: 'events',
+            emptyMessage: evEmptyMessage,
+            columns: [
+                {
+                    key: 'hash', label: 'Event Hash', searchable: true,
+                    format: row => `<span class="address-cell" style="color: var(--brand-secondary);">${stakingEscapeHtml((row.hash || '').substring(0, 25))}…</span>`
+                },
+                {
+                    key: 'section', label: 'Section',
+                    sort: (a, b) => String(a.section || '').localeCompare(String(b.section || '')),
+                    filter: { type: 'select', options: eventSections },
+                    format: row => stakingEscapeHtml(row.section || '')
+                },
+                {
+                    key: 'method', label: 'Method', searchable: true,
+                    sort: (a, b) => String(a.method || '').localeCompare(String(b.method || '')),
+                    filter: { type: 'select', options: eventMethods },
+                    format: row => `<span style="color: var(--text-secondary); font-size: 11px;">${stakingEscapeHtml(row.method || '')}</span>`
+                },
+                {
+                    key: 'timestamp', label: 'Age',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => stakingEscapeHtml(timeAgo(row.timestamp))
+                },
+                {
+                    key: 'timestampDate', label: 'Date',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => row.timestamp ? stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' (UTC)') : '—'
+                }
+            ]
+        });
     } catch (e) {
         accountDetailsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${e.message}</div>`;
     }
@@ -3580,26 +3595,15 @@ function renderWalletDashboard(data, price) {
             </a>`).join('')
         : '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 8px 0;">This wallet is not nominating any validators.</div>';
 
-    const txHtml = (data.recentTransactions && data.recentTransactions.length)
-        ? data.recentTransactions.map(t => {
-            const dir = t.from === data.address ? 'out' : 'in';
-            const date = t.timestamp ? new Date(t.timestamp).toLocaleDateString('en-US') : '—';
-            return `<tr>
-                <td><a href="/tx/${t.block}/${t.hash}" class="item-link" style="color:var(--brand-secondary);">${stakingShortAddress(t.hash)}</a></td>
-                <td><span class="reward-badge ${dir === 'out' ? 'unclaimed' : 'claimed'}">${dir === 'out' ? 'Sent' : 'Received'}</span></td>
-                <td>${stakingEscapeHtml(t.amount || '—')}</td>
-                <td style="white-space:nowrap;">${date}</td>
-            </tr>`;
-        }).join('')
-        : '<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text-muted);">No recent transactions.</td></tr>';
-
-    const recentRewardsHtml = (rewards.recentClaimed && rewards.recentClaimed.length)
-        ? rewards.recentClaimed.map(r => `<tr>
-            <td>${r.era != null ? r.era : '—'}</td>
-            <td class="staking-amount">${stakingFormatPDEX(r.amount)} PDEX</td>
-            <td style="white-space:nowrap;">${r.timestamp ? new Date(r.timestamp).toLocaleDateString('en-US') : '—'}</td>
-          </tr>`).join('')
-        : '<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted);">No claimed rewards indexed yet.</td></tr>';
+    // Recent transactions + recent rewards tables are rendered by makeTable
+    // into placeholder divs after the outer dashboard chrome lands. Tag each
+    // row in `recentTransactions` with a `direction` so the column can sort
+    // and filter on it without recomputing per-row.
+    const recentTx = (data.recentTransactions || []).map(t => ({
+        ...t,
+        direction: t.from === data.address ? 'Sent' : 'Received'
+    }));
+    const recentClaimed = rewards.recentClaimed || [];
 
     const priceConfigured = price && price.configured;
     const priceHistory = (price && price.history) || [];
@@ -3676,24 +3680,74 @@ function renderWalletDashboard(data, price) {
             </div>
             <div class="list-container glass">
                 <div class="list-header"><h2>Recent Staking Rewards</h2><a href="/staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View all</a></div>
-                <div class="table-responsive">
-                    <table class="staking-rewards-table">
-                        <thead><tr><th>Era</th><th>Amount</th><th>Date</th></tr></thead>
-                        <tbody>${recentRewardsHtml}</tbody>
-                    </table>
-                </div>
+                <div id="wallet-recent-rewards-table"></div>
             </div>
         </div>
 
         <div class="list-container glass">
             <div class="list-header"><h2>Recent Transactions</h2><a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View account</a></div>
-            <div class="table-responsive">
-                <table class="staking-rewards-table">
-                    <thead><tr><th>Hash</th><th>Direction</th><th>Amount</th><th>Date</th></tr></thead>
-                    <tbody>${txHtml}</tbody>
-                </table>
-            </div>
+            <div id="wallet-recent-tx-table"></div>
         </div>`;
+
+    // Mount the two small tables. These are typically short snapshots
+    // (top ~10 rows), but giving them the same filter/sort affordances as
+    // the long-form tables keeps the explorer's UX consistent.
+    makeTable({
+        container: document.getElementById('wallet-recent-rewards-table'),
+        rows: recentClaimed,
+        defaultSort: { key: 'era', dir: 'desc' },
+        globalSearch: false,
+        summarySuffix: 'rewards',
+        emptyMessage: 'No claimed rewards indexed yet.',
+        columns: [
+            {
+                key: 'era', label: 'Era',
+                sort: (a, b) => (a.era == null ? -1 : a.era) - (b.era == null ? -1 : b.era),
+                format: row => row.era != null ? String(row.era) : '—'
+            },
+            {
+                key: 'amount', label: 'Amount',
+                sort: (a, b) => (Number(a.amount) || 0) - (Number(b.amount) || 0),
+                format: row => `<span class="staking-amount">${stakingFormatPDEX(row.amount)} PDEX</span>`
+            },
+            {
+                key: 'timestamp', label: 'Date',
+                sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                format: row => `<span style="white-space:nowrap;">${row.timestamp ? new Date(row.timestamp).toLocaleDateString('en-US') : '—'}</span>`
+            }
+        ]
+    });
+
+    makeTable({
+        container: document.getElementById('wallet-recent-tx-table'),
+        rows: recentTx,
+        defaultSort: { key: 'timestamp', dir: 'desc' },
+        globalSearch: false,
+        summarySuffix: 'transactions',
+        emptyMessage: 'No recent transactions.',
+        columns: [
+            {
+                key: 'hash', label: 'Hash',
+                format: row => `<a href="/tx/${row.block}/${row.hash}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(row.hash))}</a>`
+            },
+            {
+                key: 'direction', label: 'Direction',
+                sort: (a, b) => String(a.direction || '').localeCompare(String(b.direction || '')),
+                filter: { type: 'select', options: ['Sent', 'Received'] },
+                format: row => `<span class="reward-badge ${row.direction === 'Sent' ? 'unclaimed' : 'claimed'}">${stakingEscapeHtml(row.direction)}</span>`
+            },
+            {
+                key: 'amount', label: 'Amount',
+                sort: (a, b) => String(a.amount || '').localeCompare(String(b.amount || '')),
+                format: row => stakingEscapeHtml(row.amount || '—')
+            },
+            {
+                key: 'timestamp', label: 'Date',
+                sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                format: row => `<span style="white-space:nowrap;">${row.timestamp ? new Date(row.timestamp).toLocaleDateString('en-US') : '—'}</span>`
+            }
+        ]
+    });
 
     const switchBtn = document.getElementById('wallet-switch-btn');
     if (switchBtn) switchBtn.addEventListener('click', disconnectWallet);
@@ -4610,40 +4664,27 @@ async function fetchDiscussionThreads() {
     root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading discussions…</div>';
     try {
         const res = await fetch('/api/discussions');
-        const data = await res.json();
-        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        // parseJsonResponse converts an upstream HTML error page (502 / 504)
+        // to a clean message instead of "Unexpected token '<'".
+        const data = await parseJsonResponse(res);
+        if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
         renderThreadList(data.threads || []);
     } catch (e) {
-        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+        root.innerHTML = `
+            <div class="list-container glass" style="padding:40px;text-align:center;">
+                <h3 style="color:var(--error);margin-bottom:8px;">Couldn't load discussions</h3>
+                <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:14px;">${stakingEscapeHtml(e.message)}</p>
+                <p style="color:var(--text-muted);font-size:0.82rem;">The backend is likely restarting or timing out. Try again in a moment.</p>
+                <button id="discussions-retry-btn" class="staking-download-btn" style="margin-top:18px;"><i class='bx bx-refresh'></i> Retry</button>
+            </div>`;
+        const retry = document.getElementById('discussions-retry-btn');
+        if (retry) retry.addEventListener('click', fetchDiscussionThreads);
     }
 }
 
 function renderThreadList(threads) {
     const root = document.getElementById('discussions-content');
     if (!root) return;
-    const proposals = threads.filter(t => t.kind === 'proposal');
-    const motions = threads.filter(t => t.kind === 'motion');
-    const card = t => {
-        const badge = t.status === 'open'
-            ? '<span class="reward-badge claimed">Open</span>'
-            : '<span class="reward-badge unclaimed">Closed</span>';
-        const meta = `${t.postCount} post${t.postCount === 1 ? '' : 's'}` +
-            (t.status === 'closed' && t.closedReason ? ' · ' + stakingEscapeHtml(t.closedReason) : '');
-        return `<a class="discussion-thread-row" href="/discussions/${encodeURIComponent(t.id)}">
-            <div class="discussion-thread-main">
-                <span class="discussion-thread-title">${stakingEscapeHtml(t.title || t.id)}</span>
-                <span class="discussion-thread-meta">${meta}</span>
-            </div>
-            ${badge}
-        </a>`;
-    };
-    const section = (title, items) => `
-        <div class="list-container glass" style="margin-bottom:20px;">
-            <div class="list-header"><h2>${title}</h2><span style="color:var(--text-secondary);font-size:0.8rem;">${items.length}</span></div>
-            <div style="padding:8px 0;">
-                ${items.length ? items.map(card).join('') : '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:0.86rem;">No threads yet — one is created automatically when a proposal or motion appears on-chain.</div>'}
-            </div>
-        </div>`;
     root.innerHTML = `
         <div class="list-container glass" style="margin-bottom:20px;">
             <div class="list-header"><h2>Discussions</h2></div>
@@ -4651,8 +4692,64 @@ function renderThreadList(threads) {
                 A discussion thread opens automatically for every public proposal and council motion. Each thread locks for new posts once its proposal moves to a referendum (voting) or its motion concludes. Sign in with your Substrate wallet to take part.
             </div>
         </div>
-        ${section('Public Proposals', proposals)}
-        ${section('Council Motions', motions)}`;
+        <div class="list-container glass">
+            <div class="list-header">
+                <h2>Threads</h2>
+                <span style="color:var(--text-secondary);font-size:0.8rem;">${threads.length} total</span>
+            </div>
+            <div id="discussions-threads-table"></div>
+        </div>`;
+
+    // makeTable lets users filter by kind (proposal vs motion), status
+    // (open vs closed), or title — the previous "two separate sections"
+    // layout split that for them statically; this gives them control.
+    makeTable({
+        container: document.getElementById('discussions-threads-table'),
+        rows: threads,
+        defaultSort: { key: 'status', dir: 'asc' },  // 'closed' < 'open' alphabetically, but a stable secondary by title gives a deterministic order
+        globalSearch: true,
+        summarySuffix: 'threads',
+        emptyMessage: 'No threads yet — one is created automatically when a proposal or motion appears on-chain.',
+        columns: [
+            {
+                key: 'title', label: 'Title', searchable: true,
+                sort: (a, b) => String(a.title || a.id || '').localeCompare(String(b.title || b.id || '')),
+                filter: { type: 'text', placeholder: 'Title…' },
+                format: row => `<a href="/discussions/${encodeURIComponent(row.id)}" class="item-link" style="color:var(--brand-secondary);font-weight:500;">${stakingEscapeHtml(row.title || row.id)}</a>`
+            },
+            {
+                key: 'kind', label: 'Kind', searchable: true,
+                sort: (a, b) => String(a.kind || '').localeCompare(String(b.kind || '')),
+                filter: { type: 'select', options: [
+                    { value: 'proposal', label: 'Public Proposal' },
+                    { value: 'motion',   label: 'Council Motion' }
+                ] },
+                format: row => row.kind === 'motion'
+                    ? '<span style="color:var(--text-secondary);">Council Motion</span>'
+                    : '<span style="color:var(--text-secondary);">Public Proposal</span>'
+            },
+            {
+                key: 'status', label: 'Status',
+                sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+                filter: { type: 'select', options: ['open', 'closed'] },
+                format: row => row.status === 'open'
+                    ? '<span class="reward-badge claimed">Open</span>'
+                    : '<span class="reward-badge unclaimed">Closed</span>'
+            },
+            {
+                key: 'postCount', label: 'Posts',
+                sort: (a, b) => (a.postCount || 0) - (b.postCount || 0),
+                format: row => stakingFormatNumber(row.postCount || 0)
+            },
+            {
+                key: 'closedReason', label: 'Closed reason', searchable: true,
+                sort: (a, b) => String(a.closedReason || '').localeCompare(String(b.closedReason || '')),
+                format: row => row.closedReason
+                    ? `<span style="color:var(--text-muted);font-size:0.85rem;">${stakingEscapeHtml(row.closedReason)}</span>`
+                    : '<span style="color:var(--text-muted);">—</span>'
+            }
+        ]
+    });
 }
 
 async function fetchDiscussionThread(id) {
@@ -4808,6 +4905,31 @@ let democracyTab = 'overview';
 let democracyVoteChart = null;
 let democracyTurnoutChart = null;
 let democracyTurnoutPctChart = null;
+// Per-tab quick-filter pills. These survive tab switches so a user who
+// filters Referenda to "Ongoing", switches to Statistics, and comes back to
+// Referenda still sees their filter applied.
+let democracyReferendaFilter = 'all';
+let democracyProposalsSortKey = 'index';
+
+// Map raw indexer status strings to a label + accent color for the corner
+// badge on the Democracy/Treasury/Council pages. An unrecognised value
+// (most commonly "Error" when the indexer ticks errored) lands in the
+// "warn" bucket with the underlying message in a tooltip — much friendlier
+// than the bare word "Error" floating in the header.
+function indexerStatusBadge(rawStatus, errorMessage) {
+    const status = String(rawStatus || 'Unknown');
+    if (status === 'Synced') {
+        return `<span title="Indexer is up-to-date" style="display:inline-flex;align-items:center;gap:6px;color:var(--success);font-size:0.78rem;">
+            <i class='bx bx-check-circle'></i> Synced</span>`;
+    }
+    if (status === 'Initializing' || status === 'Syncing' || status === 'Backfilling') {
+        return `<span title="${stakingEscapeHtml(status)}" style="display:inline-flex;align-items:center;gap:6px;color:#f5a623;font-size:0.78rem;">
+            <i class='bx bx-loader-alt bx-spin'></i> ${stakingEscapeHtml(status)}</span>`;
+    }
+    // 'Error' and any other unrecognised value — clearer wording + tooltip.
+    return `<span title="${stakingEscapeHtml(errorMessage || 'Indexer encountered an error on the last tick. It will retry automatically.')}" style="display:inline-flex;align-items:center;gap:6px;color:var(--error);font-size:0.78rem;cursor:help;">
+        <i class='bx bx-error-circle'></i> Indexer error</span>`;
+}
 
 function initDemocracyPage() {
     democracyTab = 'overview';
@@ -4820,12 +4942,26 @@ async function fetchDemocracyData() {
     root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading democracy data…</div>';
     try {
         const res = await fetch('/api/democracy');
-        const data = await res.json();
-        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        // Use parseJsonResponse so an upstream HTML error page (Cloudflare
+        // 502 / nginx 504 when the indexer is restarting) becomes a clean
+        // "backend is unreachable" message instead of the raw "Unexpected
+        // token '<'" you'd get from a naïve .json() call.
+        const data = await parseJsonResponse(res);
+        if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
         democracyData = data;
         renderDemocracy();
     } catch (e) {
-        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+        root.innerHTML = `
+            <div class="list-container glass" style="padding:40px;text-align:center;">
+                <h3 style="color:var(--error);margin-bottom:8px;">Couldn't load democracy data</h3>
+                <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:14px;">${stakingEscapeHtml(e.message)}</p>
+                <p style="color:var(--text-muted);font-size:0.82rem;">The chain indexer is likely restarting or timing out. Try again in a moment.</p>
+                <button id="democracy-retry-btn" class="staking-download-btn" style="margin-top:18px;">
+                    <i class='bx bx-refresh'></i> Retry
+                </button>
+            </div>`;
+        const retry = document.getElementById('democracy-retry-btn');
+        if (retry) retry.addEventListener('click', fetchDemocracyData);
     }
 }
 
@@ -4844,7 +4980,7 @@ function renderDemocracy() {
         <div class="list-container glass">
             <div class="list-header">
                 <h2>Democracy</h2>
-                <span style="color:var(--text-secondary);font-size:0.78rem;">${d.status === 'Synced' ? 'Synced' : stakingEscapeHtml(d.status || 'Initializing')}</span>
+                ${indexerStatusBadge(d.status, d.error)}
             </div>
             <div class="account-tabs" style="margin:0 24px;">
                 ${tabBtn('overview', 'Overview')}${tabBtn('referenda', 'Referenda')}${tabBtn('proposals', 'Public Proposals')}${tabBtn('statistics', 'Statistics')}
@@ -4852,8 +4988,26 @@ function renderDemocracy() {
             <div style="padding:24px;">${body}</div>
         </div>`;
 
+    // Mount the sortable tables for the active tab now that the placeholder
+    // div is in the DOM.
+    if (democracyTab === 'referenda')      mountDemocracyReferendaTable(d.referenda || []);
+    else if (democracyTab === 'proposals') mountDemocracyProposalsTable(d.publicProposals || []);
+
     root.querySelectorAll('[data-demtab]').forEach(btn => {
         btn.addEventListener('click', () => { democracyTab = btn.getAttribute('data-demtab'); renderDemocracy(); });
+    });
+    // Pill-filter handlers for Referenda / Proposals tabs.
+    root.querySelectorAll('[data-demreffilter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            democracyReferendaFilter = btn.getAttribute('data-demreffilter');
+            renderDemocracy();
+        });
+    });
+    root.querySelectorAll('[data-demproposalsort]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            democracyProposalsSortKey = btn.getAttribute('data-demproposalsort');
+            renderDemocracy();
+        });
     });
     if (democracyTab === 'statistics') renderDemocracyCharts(d);
 }
@@ -4892,40 +5046,129 @@ function democracyStatusBadge(s) {
 function renderDemocracyReferenda(d) {
     const refs = d.referenda || [];
     if (!refs.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No referenda indexed yet.</div>';
-    let rows = '';
-    refs.forEach(r => {
-        const dash = '<span style="color:var(--text-muted);">&mdash;</span>';
-        const tally = r.tallyKnown ? `${stakingFormatPDEX(r.ayes)} / ${stakingFormatPDEX(r.nays)}` : dash;
-        rows += `<tr>
-            <td>#${r.refIndex}</td>
-            <td>${democracyStatusBadge(r.status)}</td>
-            <td style="text-align:right;">${tally}</td>
-            <td style="text-align:right;">${r.tallyKnown ? stakingFormatPDEX(r.turnout) : dash}</td>
-            <td style="text-align:right;">${stakingFormatNumber(r.endBlock)}</td>
-        </tr>`;
+    // Count each status bucket so the pill labels read e.g. "Ongoing (3)".
+    const c = { all: refs.length, ongoing: 0, passed: 0, rejected: 0, cancelled: 0 };
+    for (const r of refs) if (c.hasOwnProperty(r.status)) c[r.status]++;
+    const pill = (key, label) =>
+        `<button class="reward-filter-btn${democracyReferendaFilter === key ? ' active' : ''}" data-demreffilter="${key}">${label}${c[key] != null ? ` (${stakingFormatNumber(c[key])})` : ''}</button>`;
+    return `
+        <div class="staking-toolbar" style="margin-bottom:14px;">
+            <div class="reward-filter">
+                ${pill('all', 'All')}${pill('ongoing', 'Ongoing')}${pill('passed', 'Passed')}${pill('rejected', 'Rejected')}${pill('cancelled', 'Cancelled')}
+            </div>
+        </div>
+        <div id="dem-referenda-table"></div>`;
+}
+function mountDemocracyReferendaTable(refs) {
+    const el = document.getElementById('dem-referenda-table');
+    if (!el) return;
+    // Apply the pill filter before handing rows to makeTable. The column
+    // filter on Status still works on top of that for fine-grained queries.
+    const filtered = democracyReferendaFilter === 'all'
+        ? refs
+        : refs.filter(r => r.status === democracyReferendaFilter);
+    const dash = '<span style="color:var(--text-muted);">—</span>';
+    makeTable({
+        container: el, rows: filtered,
+        defaultSort: { key: 'refIndex', dir: 'desc' },
+        globalSearch: true, summarySuffix: 'referenda',
+        emptyMessage: democracyReferendaFilter === 'all'
+            ? 'No referenda indexed yet.'
+            : `No ${democracyReferendaFilter} referenda.`,
+        columns: [
+            {
+                key: 'refIndex', label: 'Referendum', searchable: true,
+                sort: (a, b) => (a.refIndex || 0) - (b.refIndex || 0),
+                format: row => `#${row.refIndex}`
+            },
+            {
+                key: 'status', label: 'Status',
+                sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+                filter: { type: 'select', options: ['ongoing', 'passed', 'rejected', 'cancelled'] },
+                format: row => democracyStatusBadge(row.status)
+            },
+            {
+                key: 'ayes', label: 'Ayes / Nays (PDEX)',
+                sort: (a, b) => (Number(a.ayes) || 0) - (Number(b.ayes) || 0),
+                format: row => row.tallyKnown ? `${stakingFormatPDEX(row.ayes)} / ${stakingFormatPDEX(row.nays)}` : dash
+            },
+            {
+                key: 'turnout', label: 'Turnout',
+                sort: (a, b) => (Number(a.turnout) || 0) - (Number(b.turnout) || 0),
+                format: row => row.tallyKnown ? stakingFormatPDEX(row.turnout) : dash
+            },
+            {
+                key: 'endBlock', label: 'End Block',
+                sort: (a, b) => (a.endBlock || 0) - (b.endBlock || 0),
+                format: row => stakingFormatNumber(row.endBlock)
+            }
+        ]
     });
-    return `<div class="table-responsive"><table class="data-table">
-        <thead><tr><th>Referendum</th><th>Status</th><th style="text-align:right;">Ayes / Nays (PDEX)</th><th style="text-align:right;">Turnout</th><th style="text-align:right;">End Block</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
 }
 
 function renderDemocracyProposals(d) {
     const props = d.publicProposals || [];
     if (!props.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No active public proposals. Proposals appear here while they await tabling to a referendum.</div>';
-    let rows = '';
-    props.forEach(p => {
-        const who = p.proposerName && p.proposerName !== 'Unknown' ? p.proposerName : stakingShortAddress(p.proposer);
-        rows += `<tr>
-            <td>#${p.index}</td>
-            <td><a href="/account/${encodeURIComponent(p.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(who)}</a></td>
-            <td style="text-align:right;">${stakingFormatPDEX(p.deposit)} PDEX</td>
-            <td style="text-align:right;">${stakingFormatNumber(p.seconds)}</td>
-            <td style="text-align:right;"><a href="/discussions/proposal-${p.index}" class="item-link" style="color:var(--brand-secondary);">Discuss</a></td>
-        </tr>`;
+    // Sort pills — Public Proposals don't have multiple statuses (they're all
+    // pending tabling), so the prominent filter is "sort by X" instead of
+    // "show only status Y". Pills sort by the most useful axes at a glance:
+    // newest first (index), most-supported (seconds), biggest deposit.
+    const pill = (key, label) =>
+        `<button class="reward-filter-btn${democracyProposalsSortKey === key ? ' active' : ''}" data-demproposalsort="${key}">${label}</button>`;
+    return `
+        <div class="staking-toolbar" style="margin-bottom:14px;">
+            <div class="reward-filter">
+                ${pill('index', 'Newest')}${pill('seconds', 'Most supported')}${pill('deposit', 'Largest deposit')}
+            </div>
+        </div>
+        <div id="dem-proposals-table"></div>`;
+}
+function mountDemocracyProposalsTable(props) {
+    const el = document.getElementById('dem-proposals-table');
+    if (!el) return;
+    // Translate the pill into the makeTable defaultSort so its visible state
+    // matches the pill selection.
+    const defaultSort = democracyProposalsSortKey === 'index'
+        ? { key: 'index', dir: 'desc' }
+        : democracyProposalsSortKey === 'seconds'
+            ? { key: 'seconds', dir: 'desc' }
+            : { key: 'deposit', dir: 'desc' };
+    makeTable({
+        container: el, rows: props,
+        defaultSort,
+        globalSearch: true, summarySuffix: 'proposals',
+        emptyMessage: 'No active public proposals.',
+        columns: [
+            {
+                key: 'index', label: 'Proposal', searchable: true,
+                sort: (a, b) => (a.index || 0) - (b.index || 0),
+                format: row => `#${row.index}`
+            },
+            {
+                key: 'proposerName', label: 'Proposer', searchable: true,
+                sort: (a, b) => String(a.proposerName || a.proposer || '').localeCompare(String(b.proposerName || b.proposer || '')),
+                filter: { type: 'text', placeholder: 'Proposer…' },
+                format: row => {
+                    const who = row.proposerName && row.proposerName !== 'Unknown' ? row.proposerName : stakingShortAddress(row.proposer);
+                    return `<a href="/account/${encodeURIComponent(row.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(who)}</a>`;
+                }
+            },
+            {
+                key: 'deposit', label: 'Deposit',
+                sort: (a, b) => (Number(a.deposit) || 0) - (Number(b.deposit) || 0),
+                format: row => `${stakingFormatPDEX(row.deposit)} PDEX`
+            },
+            {
+                key: 'seconds', label: 'Seconds',
+                sort: (a, b) => (Number(a.seconds) || 0) - (Number(b.seconds) || 0),
+                format: row => stakingFormatNumber(row.seconds)
+            },
+            {
+                key: 'discussion', label: 'Discussion',
+                format: row => `<a href="/discussions/proposal-${row.index}" class="item-link" style="color:var(--brand-secondary);">Discuss</a>`
+            }
+        ]
     });
-    return `<div class="table-responsive"><table class="data-table">
-        <thead><tr><th>Proposal</th><th>Proposer</th><th style="text-align:right;">Deposit</th><th style="text-align:right;">Seconds</th><th style="text-align:right;">Discussion</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
 }
 
 function renderDemocracyStatisticsBody(d) {
@@ -5064,11 +5307,15 @@ setInterval(() => {
 // --- Council Module Logic ---
 let councilPalletName = 'elections'; // overridden by the /api/council response
 let councilData = null;
+// Per-tab filter state for the Motions tab — sticky across re-renders.
+let councilMotionsFilter = 'all';   // all | voting | approved | rejected | expired
 
 async function fetchCouncilData() {
     try {
         const response = await fetch('/api/council');
-        const data = await response.json();
+        // Survive HTML error pages from nginx/Cloudflare with a clean message
+        // instead of "Unexpected token '<'".
+        const data = await parseJsonResponse(response);
         if (data.error) throw new Error(data.error);
         if (data.pallet) councilPalletName = data.pallet;
         councilData = data;
@@ -5166,6 +5413,23 @@ function renderCouncilMotions(data) {
             <div class="staking-summary-card"><div class="label">Your Role</div><div class="value" style="font-size:1rem;">${isCouncilMember ? 'Council member' : (stored ? 'Observer' : 'Not connected')}</div></div>
         </div>`;
 
+    // Pre-compute each open motion's resolved status so we can both filter on
+    // it and avoid recomputing inside the card renderer below.
+    const annotatedMotions = motions.map(m => ({ ...m, __status: councilMotionStatus(m, currentBlock) }));
+    // Status pill row — counts each bucket for the pill label.
+    const counts = { all: annotatedMotions.length, voting: 0, approved: 0, rejected: 0, expired: 0 };
+    for (const m of annotatedMotions) {
+        if (counts.hasOwnProperty(m.__status.key)) counts[m.__status.key]++;
+    }
+    const pill = (key, label) =>
+        `<button class="reward-filter-btn${councilMotionsFilter === key ? ' active' : ''}" data-motionfilter="${key}">${label}${counts[key] != null ? ` (${counts[key]})` : ''}</button>`;
+    const pillsHtml = `
+        <div class="staking-toolbar" style="margin-bottom:14px;">
+            <div class="reward-filter">
+                ${pill('all', 'All')}${pill('voting', 'Voting open')}${pill('approved', 'Threshold met')}${pill('rejected', 'Rejected')}${pill('expired', 'Voting ended')}
+            </div>
+        </div>`;
+
     if (!motions.length) {
         root.innerHTML = summary
             + governanceIndexNote(data.history, 'motions')
@@ -5178,8 +5442,17 @@ function renderCouncilMotions(data) {
         ? '<div style="margin-bottom:16px;color:var(--text-secondary);font-size:0.82rem;">You are a council member — you can vote on and close the motions below.</div>'
         : `<div style="margin-bottom:16px;color:var(--text-muted);font-size:0.82rem;">${stored ? 'Voting and closing motions is restricted to council members.' : 'Connect a council member wallet to vote on or close motions.'}</div>`;
 
-    const cards = motions.map(m => {
-        const st = councilMotionStatus(m, currentBlock);
+    // Apply the pill filter before card rendering.
+    const visibleMotions = councilMotionsFilter === 'all'
+        ? annotatedMotions
+        : annotatedMotions.filter(m => m.__status.key === councilMotionsFilter);
+
+    const emptyForFilter = visibleMotions.length === 0
+        ? `<div style="padding:28px;text-align:center;color:var(--text-muted);">No motions match the "${stakingEscapeHtml(councilMotionsFilter)}" filter.</div>`
+        : '';
+
+    const cards = visibleMotions.map(m => {
+        const st = m.__status;
         const ayes = (m.ayes || []).length;
         const nays = (m.nays || []).length;
         const threshold = Number(m.threshold) || 0;
@@ -5234,10 +5507,16 @@ function renderCouncilMotions(data) {
         </div>`;
     }).join('');
 
-    root.innerHTML = summary + governanceIndexNote(data.history, 'motions') + roleNote
-        + '<div class="motion-list">' + cards + '</div>'
+    root.innerHTML = summary + pillsHtml + governanceIndexNote(data.history, 'motions') + roleNote
+        + '<div class="motion-list">' + emptyForFilter + cards + '</div>'
         + renderResolvedMotions(data);
 
+    root.querySelectorAll('[data-motionfilter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            councilMotionsFilter = btn.getAttribute('data-motionfilter');
+            renderCouncilMotions();
+        });
+    });
     root.querySelectorAll('.motion-aye-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), true)));
     root.querySelectorAll('.motion-nay-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), false)));
     root.querySelectorAll('.motion-close-btn').forEach(b => b.addEventListener('click', () => councilMotionClose(b.getAttribute('data-hash'), b.getAttribute('data-index'))));
@@ -5539,12 +5818,20 @@ async function fetchTreasuryData() {
     root.innerHTML = '<div class="list-container glass" style="padding:40px;text-align:center;color:var(--text-secondary);">Loading treasury data…</div>';
     try {
         const res = await fetch('/api/treasury');
-        const data = await res.json();
-        if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+        const data = await parseJsonResponse(res);
+        if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
         treasuryData = data;
         renderTreasury();
     } catch (e) {
-        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+        root.innerHTML = `
+            <div class="list-container glass" style="padding:40px;text-align:center;">
+                <h3 style="color:var(--error);margin-bottom:8px;">Couldn't load treasury data</h3>
+                <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:14px;">${stakingEscapeHtml(e.message)}</p>
+                <p style="color:var(--text-muted);font-size:0.82rem;">The chain indexer is likely restarting or timing out. Try again in a moment.</p>
+                <button id="treasury-retry-btn" class="staking-download-btn" style="margin-top:18px;"><i class='bx bx-refresh'></i> Retry</button>
+            </div>`;
+        const retry = document.getElementById('treasury-retry-btn');
+        if (retry) retry.addEventListener('click', fetchTreasuryData);
     }
 }
 
@@ -5578,6 +5865,13 @@ function renderTreasury() {
             </div>
             <div style="padding:24px;">${governanceIndexNote(d.history, 'proposals')}${body}</div>
         </div>`;
+
+    // Tables are mounted AFTER the outer innerHTML lands so their container
+    // divs exist in the DOM. Each mount-* is a no-op when its target div isn't
+    // in the current tab.
+    if (treasuryTab === 'proposals')      mountTreasuryProposalsTable(openProposals);
+    else if (treasuryTab === 'approved')  mountTreasuryApprovedTable(approvedProposals);
+    else if (treasuryTab === 'history')   mountTreasuryHistoryTable(historyProposals);
 
     root.querySelectorAll('[data-treastab]').forEach(btn => {
         btn.addEventListener('click', () => { treasuryTab = btn.getAttribute('data-treastab'); renderTreasury(); });
@@ -5642,36 +5936,93 @@ function treasuryPartyCell(name, address) {
     return `<a href="/account/${encodeURIComponent(address)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(name, address))}</a>`;
 }
 
-function renderTreasuryProposalRows(list, showStatus) {
-    return list.map(p => `<tr>
-        <td>#${p.id}</td>
-        <td>${treasuryPartyCell(p.beneficiaryName, p.beneficiary)}</td>
-        <td>${treasuryPartyCell(p.proposerName, p.proposer)}</td>
-        <td style="text-align:right;">${p.bond == null ? '—' : stakingFormatPDEX(p.bond) + ' PDEX'}</td>
-        <td style="text-align:right;font-weight:600;">${p.value == null ? '—' : stakingFormatPDEX(p.value) + ' PDEX'}</td>
-        ${showStatus ? `<td style="text-align:right;">${treasuryStatusBadge(p.status)}</td>` : ''}
-    </tr>`).join('');
+// Shared makeTable column factory for treasury proposals. `showStatus` adds
+// a Status / Outcome column at the right edge for Approved and History tabs.
+function buildTreasuryColumns(showStatus) {
+    return [
+        {
+            key: 'id', label: 'Proposal', searchable: true,
+            sort: (a, b) => (a.id || 0) - (b.id || 0),
+            format: row => `#${row.id}`
+        },
+        {
+            key: 'beneficiaryName', label: 'Beneficiary', searchable: true,
+            sort: (a, b) => String(a.beneficiaryName || a.beneficiary || '').localeCompare(String(b.beneficiaryName || b.beneficiary || '')),
+            filter: { type: 'text', placeholder: 'Beneficiary…' },
+            format: row => treasuryPartyCell(row.beneficiaryName, row.beneficiary)
+        },
+        {
+            key: 'proposerName', label: 'Proposer', searchable: true,
+            sort: (a, b) => String(a.proposerName || a.proposer || '').localeCompare(String(b.proposerName || b.proposer || '')),
+            filter: { type: 'text', placeholder: 'Proposer…' },
+            format: row => treasuryPartyCell(row.proposerName, row.proposer)
+        },
+        {
+            key: 'bond', label: 'Bond',
+            sort: (a, b) => (Number(a.bond) || 0) - (Number(b.bond) || 0),
+            format: row => row.bond == null ? '—' : stakingFormatPDEX(row.bond) + ' PDEX'
+        },
+        {
+            key: 'value', label: 'Requested',
+            sort: (a, b) => (Number(a.value) || 0) - (Number(b.value) || 0),
+            format: row => row.value == null ? '—' : `<strong>${stakingFormatPDEX(row.value)} PDEX</strong>`
+        },
+        ...(showStatus ? [{
+            key: 'status', label: showStatus === 'outcome' ? 'Outcome' : 'Status',
+            sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+            filter: { type: 'select', options: ['proposed', 'approved', 'awarded', 'rejected'] },
+            format: row => treasuryStatusBadge(row.status)
+        }] : [])
+    ];
 }
 
+// Mount points returned for the three tabs; each renderTreasury*() returns a
+// placeholder div, and the caller calls mount...Table after setting innerHTML
+// so the makeTable instance can find its container in the DOM.
 function renderTreasuryProposals(list) {
     if (!list.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No open proposals are currently awaiting council approval.</div>';
-    return `<div class="table-responsive"><table class="data-table">
-        <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th></tr></thead>
-        <tbody>${renderTreasuryProposalRows(list, false)}</tbody></table></div>`;
+    return '<div id="treasury-proposals-table"></div>';
 }
-
 function renderTreasuryApproved(list) {
     if (!list.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No approved proposals are awaiting payout.</div>';
-    return `<div class="table-responsive"><table class="data-table">
-        <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th><th style="text-align:right;">Status</th></tr></thead>
-        <tbody>${renderTreasuryProposalRows(list, true)}</tbody></table></div>`;
+    return '<div id="treasury-approved-table"></div>';
 }
-
 function renderTreasuryHistory(list) {
     if (!list.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No resolved proposals indexed yet. Past proposals are crawled from chain history in the background.</div>';
-    return `<div class="table-responsive"><table class="data-table">
-        <thead><tr><th>Proposal</th><th>Beneficiary</th><th>Proposer</th><th style="text-align:right;">Bond</th><th style="text-align:right;">Requested</th><th style="text-align:right;">Outcome</th></tr></thead>
-        <tbody>${renderTreasuryProposalRows(list, true)}</tbody></table></div>`;
+    return '<div id="treasury-history-table"></div>';
+}
+function mountTreasuryProposalsTable(list) {
+    const el = document.getElementById('treasury-proposals-table');
+    if (!el) return;
+    makeTable({
+        container: el, rows: list,
+        defaultSort: { key: 'id', dir: 'desc' },
+        globalSearch: true, summarySuffix: 'proposals',
+        emptyMessage: 'No open proposals.',
+        columns: buildTreasuryColumns(false)
+    });
+}
+function mountTreasuryApprovedTable(list) {
+    const el = document.getElementById('treasury-approved-table');
+    if (!el) return;
+    makeTable({
+        container: el, rows: list,
+        defaultSort: { key: 'id', dir: 'desc' },
+        globalSearch: true, summarySuffix: 'proposals',
+        emptyMessage: 'No approved proposals.',
+        columns: buildTreasuryColumns('status')
+    });
+}
+function mountTreasuryHistoryTable(list) {
+    const el = document.getElementById('treasury-history-table');
+    if (!el) return;
+    makeTable({
+        container: el, rows: list,
+        defaultSort: { key: 'id', dir: 'desc' },
+        globalSearch: true, summarySuffix: 'proposals',
+        emptyMessage: 'No resolved proposals indexed yet.',
+        columns: buildTreasuryColumns('outcome')
+    });
 }
 
 function openTreasurySubmitModal() {
