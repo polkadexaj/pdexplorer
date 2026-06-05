@@ -896,6 +896,126 @@ h1, h2, h3 { font-weight: 600; }
     box-shadow: 0 0 0 2px rgba(230, 0, 122, 0.15);
 }
 
+/* --- Reusable sortable/filterable table (makeTable in script.js) -------- */
+.table-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.015);
+}
+.table-filter-search {
+    flex: 1 1 240px;
+    min-width: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.table-filter-search > i {
+    position: absolute;
+    left: 10px;
+    color: var(--text-muted);
+    font-size: 1rem;
+    pointer-events: none;
+}
+.table-filter-search .table-global-search {
+    width: 100%;
+    padding: 8px 12px 8px 32px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm, 8px);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: inherit;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.table-filter-bar .table-col-filter {
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm, 8px);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: inherit;
+    min-width: 140px;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.table-filter-search .table-global-search:focus,
+.table-filter-bar .table-col-filter:focus {
+    outline: none;
+    border-color: var(--brand-primary);
+    box-shadow: 0 0 0 2px rgba(230, 0, 122, 0.15);
+}
+.table-filter-bar .table-col-filter::placeholder,
+.table-filter-search .table-global-search::placeholder { color: var(--text-muted); }
+.table-filter-bar .table-filter-clear {
+    padding: 7px 12px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm, 8px);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.table-filter-bar .table-filter-clear:hover {
+    border-color: var(--brand-primary);
+    color: var(--text-primary);
+}
+
+.table-summary {
+    padding: 8px 20px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-color);
+    text-align: right;
+}
+
+/* Sortable header arrows on .data-table (rendered by makeTable). */
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.data-table thead th.table-th {
+    text-align: left;
+    padding: 12px 16px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 500;
+    border-bottom: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.015);
+    white-space: nowrap;
+    user-select: none;
+}
+.data-table thead th.table-th.sortable {
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+}
+.data-table thead th.table-th.sortable:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.04);
+}
+.data-table thead th.table-th.sorted {
+    color: var(--brand-primary);
+}
+.data-table thead th.table-th i { font-size: 0.95rem; vertical-align: middle; }
+.data-table tbody td {
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    vertical-align: middle;
+}
+.data-table tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+.data-table tbody .table-empty-row {
+    text-align: center;
+    padding: 32px 20px;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+}
+
 .staking-search-bar input::placeholder {
     color: var(--text-muted);
 }

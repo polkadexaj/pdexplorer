@@ -33,6 +33,241 @@ function formatNetworkNumber(value, maximumFractionDigits = 1) {
     return number.toLocaleString('en-US', { maximumFractionDigits });
 }
 
+// --- Reusable sortable/filterable table -----------------------------------
+// Renders a filter bar + sortable headers + tbody + row-count summary into a
+// container <div>. Each table page (transactions, blocks, events, validators,
+// holders, staking-rewards) passes its column definitions and row array; the
+// helper takes care of sort state, per-column filters, global search, focus
+// preservation across re-renders, and the empty-state message.
+//
+//   const api = makeTable({
+//       container: document.getElementById('foo-table-container'),
+//       columns: [
+//           {
+//               key:        'block',                       // field on the row
+//               label:      'Block',                       // <th> text
+//               sort:       (a, b) => a.block - b.block,   // optional. enables click-to-sort
+//               format:     row => `<a href="...">${row.block}</a>`,  // cell HTML
+//               searchable: true,                          // included in the global search box
+//               filter:     { type: 'text' } | { type: 'select', options: [...] }
+//           },
+//           ...
+//       ],
+//       rows:           [...],
+//       defaultSort:    { key: 'timestamp', dir: 'desc' },
+//       globalSearch:   true,
+//       emptyMessage:   'No rows yet.',
+//       summarySuffix:  'transactions'   // appears after the count: "Showing X of Y transactions"
+//   });
+//   api.setData(newRows);   // call when the underlying data changes
+//   api.refresh();          // re-render with current state (e.g. after a format change)
+//
+// Implementation notes:
+//   * Re-rendering on every keystroke would steal focus, so we record which
+//     filter input has focus + caret position before innerHTML replacement
+//     and restore them afterwards.
+//   * The global search matches any column flagged `searchable`. Per-column
+//     filters apply on top of the global search.
+//   * Sort cycle on header click: unsorted → asc → desc → unsorted.
+function makeTable(config) {
+    const container = config.container;
+    if (!container) return { setData() {}, refresh() {} };
+
+    const columns = config.columns || [];
+    let rows = Array.isArray(config.rows) ? config.rows : [];
+    let sortKey = config.defaultSort ? config.defaultSort.key : null;
+    let sortDir = config.defaultSort ? (config.defaultSort.dir || 'asc') : 'asc';
+    const colFilters = {};
+    let globalSearch = '';
+
+    const showGlobalSearch = config.globalSearch !== false;
+    const emptyMessage = config.emptyMessage || 'No matching rows.';
+    const summarySuffix = config.summarySuffix || 'rows';
+    const rowClass = config.rowClass || null;       // optional fn(row) => string
+
+    function applyFilters(input) {
+        let out = input;
+        // Global search
+        if (globalSearch.trim()) {
+            const q = globalSearch.trim().toLowerCase();
+            out = out.filter(row => columns.some(col => {
+                if (!col.searchable) return false;
+                const raw = row[col.key];
+                return raw != null && String(raw).toLowerCase().includes(q);
+            }));
+        }
+        // Per-column filters
+        for (const col of columns) {
+            const val = colFilters[col.key];
+            if (!val) continue;
+            if (col.filter && col.filter.type === 'text') {
+                const q = String(val).toLowerCase();
+                out = out.filter(row => {
+                    const raw = row[col.key];
+                    return raw != null && String(raw).toLowerCase().includes(q);
+                });
+            } else if (col.filter && col.filter.type === 'select') {
+                out = out.filter(row => String(row[col.key] ?? '') === String(val));
+            }
+        }
+        return out;
+    }
+
+    function applySort(input) {
+        if (!sortKey) return input;
+        const col = columns.find(c => c.key === sortKey);
+        if (!col || !col.sort) return input;
+        const cmp = col.sort;
+        const sorted = input.slice().sort(cmp);
+        if (sortDir === 'desc') sorted.reverse();
+        return sorted;
+    }
+
+    function buildHeaderHTML() {
+        let html = '';
+        for (const col of columns) {
+            const isSortKey = sortKey === col.key;
+            let indicator = '';
+            if (col.sort) {
+                indicator = isSortKey
+                    ? (sortDir === 'asc' ? ' <i class="bx bx-up-arrow-alt"></i>' : ' <i class="bx bx-down-arrow-alt"></i>')
+                    : ' <i class="bx bx-sort" style="opacity:0.4;"></i>';
+            }
+            const classes = ['table-th'];
+            if (col.sort) classes.push('sortable');
+            if (isSortKey) classes.push('sorted');
+            html += `<th class="${classes.join(' ')}" data-col="${stakingEscapeHtml(col.key)}">${stakingEscapeHtml(col.label || col.key)}${indicator}</th>`;
+        }
+        return html;
+    }
+
+    function buildFilterBarHTML() {
+        const filterableCols = columns.filter(c => c.filter);
+        if (!showGlobalSearch && !filterableCols.length) return '';
+        const hasActiveFilter = !!globalSearch || Object.values(colFilters).some(v => v);
+        let parts = [];
+        if (showGlobalSearch) {
+            const anySearchable = columns.some(c => c.searchable);
+            if (anySearchable) {
+                parts.push(`<div class="table-filter-search">
+                    <i class='bx bx-search'></i>
+                    <input type="text" class="table-global-search" placeholder="Search…" value="${stakingEscapeHtml(globalSearch)}" autocomplete="off">
+                </div>`);
+            }
+        }
+        for (const col of filterableCols) {
+            const val = colFilters[col.key] || '';
+            if (col.filter.type === 'text') {
+                parts.push(`<input type="text" class="table-col-filter" data-col="${stakingEscapeHtml(col.key)}" placeholder="${stakingEscapeHtml(col.filter.placeholder || col.label)}" value="${stakingEscapeHtml(val)}" autocomplete="off">`);
+            } else if (col.filter.type === 'select') {
+                const opts = ['<option value="">All ' + stakingEscapeHtml(col.label) + '</option>']
+                    .concat((col.filter.options || []).map(o => {
+                        const v = typeof o === 'object' ? o.value : o;
+                        const lab = typeof o === 'object' ? o.label : o;
+                        return `<option value="${stakingEscapeHtml(v)}" ${String(val) === String(v) ? 'selected' : ''}>${stakingEscapeHtml(lab)}</option>`;
+                    }));
+                parts.push(`<select class="table-col-filter" data-col="${stakingEscapeHtml(col.key)}">${opts.join('')}</select>`);
+            }
+        }
+        if (hasActiveFilter) {
+            parts.push('<button type="button" class="table-filter-clear">Clear filters</button>');
+        }
+        return `<div class="table-filter-bar">${parts.join('')}</div>`;
+    }
+
+    function snapshotFocus() {
+        const ae = document.activeElement;
+        if (!ae || !container.contains(ae)) return null;
+        const col = ae.getAttribute && ae.getAttribute('data-col');
+        const isGlobal = ae.classList && ae.classList.contains('table-global-search');
+        const caret = (typeof ae.selectionStart === 'number') ? ae.selectionStart : null;
+        return { col, isGlobal, caret };
+    }
+    function restoreFocus(snap) {
+        if (!snap) return;
+        let target = null;
+        if (snap.isGlobal) target = container.querySelector('.table-global-search');
+        else if (snap.col) target = container.querySelector(`.table-col-filter[data-col="${snap.col}"]`);
+        if (!target) return;
+        target.focus();
+        if (snap.caret != null && typeof target.setSelectionRange === 'function') {
+            try { target.setSelectionRange(snap.caret, snap.caret); } catch (e) { /* ignore */ }
+        }
+    }
+
+    function render() {
+        const focusSnap = snapshotFocus();
+        const filtered = applyFilters(rows);
+        const sorted = applySort(filtered);
+        const total = rows.length;
+        const shown = sorted.length;
+
+        let bodyHTML = '';
+        if (!shown) {
+            bodyHTML = `<tr><td colspan="${columns.length}" class="table-empty-row">${stakingEscapeHtml(total === 0 ? emptyMessage : 'No rows match the current filters.')}</td></tr>`;
+        } else {
+            for (const row of sorted) {
+                const rc = rowClass ? rowClass(row) : '';
+                bodyHTML += `<tr${rc ? ` class="${rc}"` : ''}>`;
+                for (const col of columns) {
+                    bodyHTML += '<td>' + (col.format ? col.format(row) : (row[col.key] != null ? stakingEscapeHtml(String(row[col.key])) : '')) + '</td>';
+                }
+                bodyHTML += '</tr>';
+            }
+        }
+
+        const summary = (shown === total)
+            ? `<div class="table-summary">${total.toLocaleString()} ${stakingEscapeHtml(summarySuffix)}</div>`
+            : `<div class="table-summary">Showing <strong>${shown.toLocaleString()}</strong> of ${total.toLocaleString()} ${stakingEscapeHtml(summarySuffix)}</div>`;
+
+        container.innerHTML = `
+            ${buildFilterBarHTML()}
+            ${summary}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead><tr>${buildHeaderHTML()}</tr></thead>
+                    <tbody>${bodyHTML}</tbody>
+                </table>
+            </div>`;
+
+        // Wire up handlers on freshly-rendered elements.
+        container.querySelectorAll('.table-th.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const key = th.getAttribute('data-col');
+                if (sortKey === key) {
+                    if (sortDir === 'asc') sortDir = 'desc';
+                    else { sortKey = null; sortDir = 'asc'; }
+                } else {
+                    sortKey = key; sortDir = 'asc';
+                }
+                render();
+            });
+        });
+        const gs = container.querySelector('.table-global-search');
+        if (gs) gs.addEventListener('input', e => { globalSearch = e.target.value; render(); });
+        container.querySelectorAll('.table-col-filter').forEach(el => {
+            const handler = () => { colFilters[el.getAttribute('data-col')] = el.value; render(); };
+            el.addEventListener('input', handler);
+            el.addEventListener('change', handler);
+        });
+        const clearBtn = container.querySelector('.table-filter-clear');
+        if (clearBtn) clearBtn.addEventListener('click', () => {
+            globalSearch = '';
+            for (const k of Object.keys(colFilters)) colFilters[k] = '';
+            render();
+        });
+
+        restoreFocus(focusSnap);
+    }
+
+    render();
+    return {
+        setData(newRows) { rows = Array.isArray(newRows) ? newRows : []; render(); },
+        refresh()        { render(); },
+        getState()       { return { sortKey, sortDir, colFilters: { ...colFilters }, globalSearch }; }
+    };
+}
+
 function setText(id, value) {
     const el = document.getElementById(id);
     if (el) el.innerText = value;
@@ -54,15 +289,22 @@ const issuanceEl = document.querySelector('.stat-card:nth-child(2) .stat-value')
 const stakeEl = document.querySelector('.stat-card:nth-child(3) .stat-value');
 const currentEraEl = document.getElementById('network-current-era');
 
-const validatorsListEl = document.getElementById('validators-list');
+const validatorsListEl = document.getElementById('validators-table');
+let validatorsTableApi = null;
 const validatorCountEl = document.querySelector('.validator-count');
-const holdersListEl = document.getElementById('holders-list');
+const holdersListEl = document.getElementById('holders-table');
+let holdersTableApi = null;
 const holderCountEl = document.querySelector('.holder-count');
-const fullTransactionsListEl = document.getElementById('full-transactions-list');
+// Container <div> for the full /transactions table. makeTable owns the
+// filter bar + sortable header + tbody + summary; we hand it the row array.
+const fullTransactionsListEl = document.getElementById('full-transactions-table');
+let transactionsTableApi = null;
 const txCountEl = document.querySelector('.tx-count');
-const fullBlocksListEl = document.getElementById('full-blocks-list');
+const fullBlocksListEl = document.getElementById('full-blocks-table');
+let blocksTableApi = null;
 const blockCountEl = document.querySelector('.block-count');
 const fullEventsListEl = document.getElementById('full-events-list');
+let eventsTableApi = null;
 const eventCountEl = document.querySelector('.event-count');
 const accountDetailsContainer = document.getElementById('account-details-container');
 const blockDetailsContainer = document.getElementById('block-details-container');
@@ -381,65 +623,94 @@ let validatorDisplayLimit = 50;
 async function fetchValidators() {
     if (validatorsFetched) return;
     try {
-        validatorsListEl.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px;">Fetching from backend indexer...</td></tr>';
+        if (!validatorsTableApi) {
+            validatorsListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching from backend indexer…</div>';
+        }
 
         const response = await fetch('/api/validators');
         const data = await response.json();
 
         if (data.status === 'Initializing' || data.status === 'Syncing' && data.validators.length === 0) {
-            validatorsListEl.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px; color: orange;">Indexer is syncing data from Polkadex node, please wait...</td></tr>';
-            // Retry in 3 seconds
+            if (!validatorsTableApi) {
+                validatorsListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: orange;">Indexer is syncing data from Polkadex node, please wait…</div>';
+            }
             setTimeout(() => { validatorsFetched = false; fetchValidators(); }, 3000);
             return;
         }
 
         validatorCountEl.innerText = `${data.totalCount} Active`;
         currentValidators = data.validators;
-        sortValidators();
         validatorsFetched = true;
         renderValidators();
 
     } catch (err) {
         console.error("Error fetching validators:", err);
-        validatorsListEl.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px; color: var(--error);">Error reaching backend indexer. Is node server.js running?</td></tr>';
+        if (!validatorsTableApi) {
+            validatorsListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--error);">Error reaching backend indexer. Is node server.js running?</div>';
+        }
     }
 }
 
 function renderValidators() {
-    let html = '';
-    const toDisplay = currentValidators.slice(0, validatorDisplayLimit);
+    if (!validatorsListEl) return;
+    const rows = currentValidators || [];
 
-    for (const val of toDisplay) {
-        const shortAddr = val.address.substring(0, 8) + '...' + val.address.substring(val.address.length - 8);
-
-        // Commission & Risk Logic
-        let commissionHtml = `${val.commission.toFixed(2)}%`;
-        if (val.commission > 50) {
-            commissionHtml += ` <span class="badge" style="background: var(--error);">HIGH RISK</span>`;
-        }
-
-        html += `
-            <tr>
-                <td class="address-cell"><a href="/validator/${val.address}" class="item-link">${shortAddr}</a></td>
-                <td><a href="/validator/${val.address}" class="item-link">${val.name}</a></td>
-                <td>${Number(val.totalStake).toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="unit">PDEX</span></td>
-                <td>${commissionHtml}</td>
-                <td style="color: var(--success); font-weight: 500;">${val.avg30DayApy.toFixed(2)}%</td>
-                <td>${val.realApy.toFixed(2)}% <span class="unit">/</span> <span style="color: var(--success);">${val.avg30DayApy.toFixed(2)}%</span></td>
-            </tr>
-        `;
+    if (!validatorsTableApi) {
+        validatorsTableApi = makeTable({
+            container: validatorsListEl,
+            rows,
+            defaultSort: { key: 'totalStake', dir: 'desc' },
+            globalSearch: true,
+            summarySuffix: 'validators',
+            emptyMessage: 'No validators in the indexer yet.',
+            columns: [
+                {
+                    key: 'address', label: 'Address', searchable: true,
+                    sort: (a, b) => String(a.address || '').localeCompare(String(b.address || '')),
+                    format: row => {
+                        const a = row.address || '';
+                        const short = a.substring(0, 8) + '…' + a.substring(a.length - 8);
+                        return `<a href="/validator/${a}" class="address-cell item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'name', label: 'Identity', searchable: true,
+                    sort: (a, b) => String(a.name || '').localeCompare(String(b.name || '')),
+                    filter: { type: 'text', placeholder: 'Identity name…' },
+                    format: row => `<a href="/validator/${row.address}" class="item-link">${stakingEscapeHtml(row.name || '')}</a>`
+                },
+                {
+                    key: 'totalStake', label: 'Total Stake',
+                    sort: (a, b) => (a.totalStake || 0) - (b.totalStake || 0),
+                    format: row => `${Number(row.totalStake).toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="unit">PDEX</span>`
+                },
+                {
+                    key: 'commission', label: 'Commission',
+                    sort: (a, b) => (a.commission || 0) - (b.commission || 0),
+                    format: row => {
+                        let html = `${Number(row.commission).toFixed(2)}%`;
+                        if (row.commission > 50) html += ` <span class="badge" style="background: var(--error);">HIGH RISK</span>`;
+                        return html;
+                    }
+                },
+                {
+                    key: 'avg30DayApy', label: 'Real APY (30d)',
+                    sort: (a, b) => (a.avg30DayApy || 0) - (b.avg30DayApy || 0),
+                    format: row => `<span style="color: var(--success); font-weight: 500;">${Number(row.avg30DayApy).toFixed(2)}%</span>`
+                },
+                {
+                    key: 'realApy', label: 'Now vs Real',
+                    sort: (a, b) => (a.realApy || 0) - (b.realApy || 0),
+                    format: row => `${Number(row.realApy).toFixed(2)}% <span class="unit">/</span> <span style="color: var(--success);">${Number(row.avg30DayApy).toFixed(2)}%</span>`
+                }
+            ]
+        });
+    } else {
+        validatorsTableApi.setData(rows);
     }
-
-    validatorsListEl.innerHTML = html;
 
     const showMoreBtn = document.getElementById('show-more-btn');
-    if (showMoreBtn) {
-        if (validatorDisplayLimit < currentValidators.length) {
-            showMoreBtn.style.display = 'inline-block';
-        } else {
-            showMoreBtn.style.display = 'none';
-        }
-    }
+    if (showMoreBtn) showMoreBtn.style.display = 'none';
 }
 
 let currentSort = { field: null, asc: true };
@@ -489,13 +760,17 @@ async function fetchHolders() {
     if (holdersFetched) return;
     try {
         if (!holdersListEl) return;
-        holdersListEl.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px;">Fetching from backend indexer...</td></tr>';
+        if (!holdersTableApi) {
+            holdersListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching from backend indexer…</div>';
+        }
 
         const response = await fetch('/api/holders');
         const data = await response.json();
 
         if (data.status === 'Initializing' || data.status === 'Syncing' && data.holders.length === 0) {
-            holdersListEl.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px; color: orange;">Indexer is syncing data from Polkadex node, please wait...</td></tr>';
+            if (!holdersTableApi) {
+                holdersListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: orange;">Indexer is syncing data from Polkadex node, please wait…</div>';
+            }
             setTimeout(() => { holdersFetched = false; fetchHolders(); }, 3000);
             return;
         }
@@ -503,44 +778,67 @@ async function fetchHolders() {
         if (holderCountEl) holderCountEl.innerText = `${data.holders.length} Top Holders`;
         currentHolders = data.holders;
         holdersFetched = true;
-        sortHolders();
         renderHolders();
 
     } catch (err) {
         console.error("Error fetching holders:", err);
-        holdersListEl.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px; color: var(--error);">Error reaching backend indexer. Is node server.js running?</td></tr>';
+        if (!holdersTableApi) {
+            holdersListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--error);">Error reaching backend indexer. Is node server.js running?</div>';
+        }
     }
 }
 
 function renderHolders() {
     if (!holdersListEl) return;
-    let html = '';
-    const toDisplay = currentHolders.slice(0, holderDisplayLimit);
+    const rows = currentHolders || [];
 
-    for (const val of toDisplay) {
-        const shortAddr = val.address.substring(0, 8) + '...' + val.address.substring(val.address.length - 8);
-
-        html += `
-            <tr>
-                <td>#${val.rank}</td>
-                <td class="address-cell"><a href="/account/${val.address}" class="item-link">${shortAddr}</a></td>
-                <td><a href="/account/${val.address}" class="item-link">${val.name}</a></td>
-                <td>${Number(val.balance).toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="unit">PDEX</span></td>
-                <td style="color: var(--brand-primary); font-weight: 500;">${val.share.toFixed(4)}%</td>
-            </tr>
-        `;
+    if (!holdersTableApi) {
+        holdersTableApi = makeTable({
+            container: holdersListEl,
+            rows,
+            defaultSort: { key: 'rank', dir: 'asc' },
+            globalSearch: true,
+            summarySuffix: 'holders',
+            emptyMessage: 'No holder data in the indexer yet.',
+            columns: [
+                {
+                    key: 'rank', label: 'Rank',
+                    sort: (a, b) => (a.rank || 0) - (b.rank || 0),
+                    format: row => `#${row.rank}`
+                },
+                {
+                    key: 'address', label: 'Address', searchable: true,
+                    sort: (a, b) => String(a.address || '').localeCompare(String(b.address || '')),
+                    format: row => {
+                        const a = row.address || '';
+                        const short = a.substring(0, 8) + '…' + a.substring(a.length - 8);
+                        return `<a href="/account/${a}" class="address-cell item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'name', label: 'Identity', searchable: true,
+                    sort: (a, b) => String(a.name || '').localeCompare(String(b.name || '')),
+                    filter: { type: 'text', placeholder: 'Identity name…' },
+                    format: row => `<a href="/account/${row.address}" class="item-link">${stakingEscapeHtml(row.name || '')}</a>`
+                },
+                {
+                    key: 'balance', label: 'Balance',
+                    sort: (a, b) => (a.balance || 0) - (b.balance || 0),
+                    format: row => `${Number(row.balance).toLocaleString('en-US', { maximumFractionDigits: 2 })} <span class="unit">PDEX</span>`
+                },
+                {
+                    key: 'share', label: 'Percentage',
+                    sort: (a, b) => (a.share || 0) - (b.share || 0),
+                    format: row => `<span style="color: var(--brand-primary); font-weight: 500;">${Number(row.share).toFixed(4)}%</span>`
+                }
+            ]
+        });
+    } else {
+        holdersTableApi.setData(rows);
     }
-
-    holdersListEl.innerHTML = html;
 
     const showMoreBtn = document.getElementById('show-more-holders-btn');
-    if (showMoreBtn) {
-        if (holderDisplayLimit < currentHolders.length) {
-            showMoreBtn.style.display = 'inline-block';
-        } else {
-            showMoreBtn.style.display = 'none';
-        }
-    }
+    if (showMoreBtn) showMoreBtn.style.display = 'none';
 }
 
 function sortHolders() {
@@ -594,15 +892,15 @@ async function fetchTransactions(force = false) {
     if (txFetched && !force) return;
     try {
         if (!fullTransactionsListEl) return;
-        if (!force || transactions.length === 0) {
-            fullTransactionsListEl.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 20px;">Fetching from backend indexer...</td></tr>';
+        if ((!force || transactions.length === 0) && !transactionsTableApi) {
+            fullTransactionsListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching from backend indexer…</div>';
         }
 
         const response = await fetch('/api/transactions');
         const data = await response.json();
 
         if (data.status === 'Initializing' || (data.status === 'Syncing' && data.transactions.length === 0)) {
-            fullTransactionsListEl.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 20px; color: orange;">Indexer is crawling historical blocks, please wait...</td></tr>';
+            fullTransactionsListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: orange;">Indexer is crawling historical blocks, please wait…</div>';
             setTimeout(() => { txFetched = false; fetchTransactions(); }, 5000);
             return;
         }
@@ -619,58 +917,99 @@ async function fetchTransactions(force = false) {
 
     } catch (err) {
         console.error("Error fetching transactions:", err);
-        fullTransactionsListEl.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 20px; color: var(--error);">Error reaching backend indexer. Is node server.js running?</td></tr>';
+        if (!transactionsTableApi) {
+            fullTransactionsListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--error);">Error reaching backend indexer. Is node server.js running?</div>';
+        }
     }
 }
 
 function renderFullTransactions() {
     if (!fullTransactionsListEl) return;
-    let html = '';
-    const financialTransactions = financialTransactionRows(transactions);
-    const toDisplay = financialTransactions.slice(0, txDisplayLimit);
+    const rows = financialTransactionRows(transactions).map(normalizeTransactionRow);
 
-    for (const rawTx of toDisplay) {
-        const tx = normalizeTransactionRow(rawTx);
-        const shortHash = tx.hash.substring(0, 10) + '...';
-        const shortFrom = tx.from.substring(0, 8) + '...';
-        let shortTo = tx.to.toString();
-        if (shortTo.length > 15) shortTo = shortTo.substring(0, 8) + '...';
-
-        const dateObj = new Date(tx.timestamp);
-        const dateStr = `${timeAgo(tx.timestamp)} (${dateObj.toISOString().replace('T', ' ').substring(0, 19)})`;
-        const hashCell = tx.eventDerived
-            ? `<a href="/block/${tx.block}" class="item-link">${shortHash}</a>`
-            : `<a href="/tx/${tx.block}/${tx.hash}" class="item-link">${shortHash}</a>`;
-
-        html += `
-            <tr>
-                <td class="address-cell">${hashCell}</td>
-                <td>${tx.from === 'System' ? shortFrom : `<a href="/account/${tx.from}" class="item-link">${shortFrom}</a>`}</td>
-                <td>${tx.to === tx.amount ? shortTo : `<a href="/account/${tx.to}" class="item-link">${shortTo}</a>`}</td>
-                <td style="color: var(--text-secondary);">${dateStr}</td>
-                <td><a href="/block/${tx.block}" class="item-link">${tx.block}</a></td>
-                <td style="font-weight: 500;">${tx.amount}</td>
-                <td style="color: var(--text-secondary);">${tx.value}</td>
-                <td><span class="badge" style="background: ${tx.status === 'failed' ? 'var(--error)' : 'var(--success)'};">${tx.status}</span></td>
-            </tr>
-        `;
+    if (!transactionsTableApi) {
+        transactionsTableApi = makeTable({
+            container: fullTransactionsListEl,
+            rows,
+            defaultSort: { key: 'timestamp', dir: 'desc' },
+            globalSearch: true,
+            summarySuffix: 'transactions',
+            emptyMessage: 'No recent financial transactions found.',
+            columns: [
+                {
+                    key: 'hash', label: 'Txn Hash', searchable: true,
+                    sort: (a, b) => String(a.hash || '').localeCompare(String(b.hash || '')),
+                    format: row => {
+                        const short = (row.hash || '').substring(0, 10) + '…';
+                        return row.eventDerived
+                            ? `<a href="/block/${row.block}" class="item-link">${stakingEscapeHtml(short)}</a>`
+                            : `<a href="/tx/${row.block}/${row.hash}" class="item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'from', label: 'From', searchable: true,
+                    sort: (a, b) => String(a.from || '').localeCompare(String(b.from || '')),
+                    filter: { type: 'text', placeholder: 'From address…' },
+                    format: row => {
+                        const short = String(row.from || '').substring(0, 8) + '…';
+                        return row.from === 'System'
+                            ? stakingEscapeHtml(short)
+                            : `<a href="/account/${row.from}" class="item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'to', label: 'To', searchable: true,
+                    sort: (a, b) => String(a.to || '').localeCompare(String(b.to || '')),
+                    filter: { type: 'text', placeholder: 'To address…' },
+                    format: row => {
+                        const t = String(row.to);
+                        const short = t.length > 15 ? t.substring(0, 8) + '…' : t;
+                        return row.to === row.amount
+                            ? stakingEscapeHtml(short)
+                            : `<a href="/account/${row.to}" class="item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'timestamp', label: 'Date',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => {
+                        const d = row.timestamp ? new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '';
+                        return `<span style="color: var(--text-secondary);">${stakingEscapeHtml(timeAgo(row.timestamp))}<br><small>${stakingEscapeHtml(d)}</small></span>`;
+                    }
+                },
+                {
+                    key: 'block', label: 'Block', searchable: true,
+                    sort: (a, b) => (a.block || 0) - (b.block || 0),
+                    format: row => `<a href="/block/${row.block}" class="item-link">${row.block}</a>`
+                },
+                {
+                    key: 'numericAmount', label: 'Amount',
+                    sort: (a, b) => (a.numericAmount || 0) - (b.numericAmount || 0),
+                    format: row => `<strong>${stakingEscapeHtml(String(row.amount || ''))}</strong>`
+                },
+                {
+                    key: 'value', label: 'Value',
+                    format: row => `<span style="color: var(--text-secondary);">${stakingEscapeHtml(String(row.value || ''))}</span>`
+                },
+                {
+                    key: 'status', label: 'Status',
+                    sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+                    filter: { type: 'select', options: ['success', 'failed'] },
+                    format: row => `<span class="badge" style="background: ${row.status === 'failed' ? 'var(--error)' : 'var(--success)'};">${stakingEscapeHtml(row.status || '')}</span>`
+                }
+            ]
+        });
+    } else {
+        transactionsTableApi.setData(rows);
     }
-    if (toDisplay.length === 0) {
-        html = '<tr><td colspan="8" style="text-align:center; padding: 20px; color: var(--text-muted);">No recent financial transactions found.</td></tr>';
-    }
 
-    fullTransactionsListEl.innerHTML = html;
-    if (txCountEl) txCountEl.innerText = `${financialTransactions.length} Records`;
-    updateOlderFinancialTxButton(financialTransactions.length === 0);
-
+    if (txCountEl) txCountEl.innerText = `${rows.length} Records`;
+    updateOlderFinancialTxButton(rows.length === 0);
+    // makeTable's filter bar replaces the need for client-side "Show More" —
+    // all loaded rows are shown unless the user filters them out. Hide the
+    // legacy button so it doesn't sit there with nothing to do.
     const showMoreTxBtn = document.getElementById('show-more-tx-btn');
-    if (showMoreTxBtn) {
-        if (txDisplayLimit < financialTransactions.length) {
-            showMoreTxBtn.style.display = 'inline-block';
-        } else {
-            showMoreTxBtn.style.display = 'none';
-        }
-    }
+    if (showMoreTxBtn) showMoreTxBtn.style.display = 'none';
 }
 
 function updateOlderFinancialTxButton(show) {
@@ -729,14 +1068,30 @@ async function loadOlderFinancialTransactions() {
         sortTransactions();
         renderFullTransactions();
 
-        if (olderRows.length === 0 && fullTransactionsListEl) {
-            fullTransactionsListEl.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 20px; color: var(--text-muted);">No financial transactions found in the last ${data.scannedBlocks || 0} older blocks.</td></tr>`;
+        if (olderRows.length === 0) {
+            // No new rows came back — surface a transient message above the table
+            // without nuking the existing rendered table (makeTable owns it now).
+            const note = document.getElementById('older-tx-note');
+            if (!note) {
+                const n = document.createElement('div');
+                n.id = 'older-tx-note';
+                n.style.cssText = 'text-align:center; padding: 12px; color: var(--text-muted); font-size: 0.85rem;';
+                n.textContent = `No financial transactions found in the last ${data.scannedBlocks || 0} older blocks.`;
+                if (fullTransactionsListEl && fullTransactionsListEl.parentNode) {
+                    fullTransactionsListEl.parentNode.insertBefore(n, fullTransactionsListEl);
+                }
+            }
             updateOlderFinancialTxButton(true);
         }
     } catch (err) {
         console.error("Error loading older financial transactions:", err);
-        if (fullTransactionsListEl) {
-            fullTransactionsListEl.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 20px; color: var(--error);">Error loading older financial transactions: ${err.message}</td></tr>`;
+        // Show the error as a toast-style note rather than wiping the table.
+        const errEl = document.createElement('div');
+        errEl.style.cssText = 'text-align:center; padding: 12px; color: var(--error); font-size: 0.85rem;';
+        errEl.textContent = 'Error loading older financial transactions: ' + (err.message || String(err));
+        if (fullTransactionsListEl && fullTransactionsListEl.parentNode) {
+            fullTransactionsListEl.parentNode.insertBefore(errEl, fullTransactionsListEl);
+            setTimeout(() => { try { errEl.remove(); } catch (e) {} }, 6000);
         }
     } finally {
         isLoadingOlderTx = false;
@@ -748,8 +1103,8 @@ async function fetchBlocks(force = false) {
     if (blocksFetched && !force) return;
     try {
         if (!fullBlocksListEl) return;
-        if (!force || fullBlocks.length === 0) {
-            fullBlocksListEl.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 20px;">Fetching from backend indexer...</td></tr>';
+        if ((!force || fullBlocks.length === 0) && !blocksTableApi) {
+            fullBlocksListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching from backend indexer…</div>';
         }
 
         const response = await fetch('/api/blocks');
@@ -759,7 +1114,7 @@ async function fetchBlocks(force = false) {
         if (data.error || !data.blocks) throw new Error(data.error || "Blocks cache empty");
 
         if (data.status === 'Initializing' || (data.status === 'Syncing' && data.blocks.length === 0)) {
-            fullBlocksListEl.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 20px; color: orange;">Indexer is crawling historical blocks, please wait...</td></tr>';
+            fullBlocksListEl.innerHTML = '<div style="text-align:center; padding: 40px; color: orange;">Indexer is crawling historical blocks, please wait…</div>';
             setTimeout(() => { blocksFetched = false; fetchBlocks(); }, 5000);
             return;
         }
@@ -770,43 +1125,83 @@ async function fetchBlocks(force = false) {
 
     } catch (err) {
         console.error("Error fetching blocks:", err);
-        fullBlocksListEl.innerHTML = `<tr><td colspan="7" style="text-align:center; padding: 20px; color: var(--error);">Backend Syncing. Please refresh.</td></tr>`;
+        if (!blocksTableApi) {
+            fullBlocksListEl.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--error);">Backend Syncing. Please refresh.</div>`;
+        }
     }
 }
 
 function renderFullBlocks() {
     if (!fullBlocksListEl) return;
-    let html = '';
-    const toDisplay = fullBlocks.slice(0, blockDisplayLimit);
+    const rows = fullBlocks || [];
 
-    for (const b of toDisplay) {
-        const shortHash = b.hash.substring(0, 10) + '...';
-        const dateObj = new Date(b.timestamp);
-
-        html += `
-            <tr>
-                <td><a href="/block/${b.number}" class="item-link">${b.number}</a></td>
-                <td style="color: var(--text-secondary);">${timeAgo(b.timestamp)}</td>
-                <td>${b.authorName && b.authorName !== "Unknown" && b.authorName !== "System" && !b.authorName.startsWith("Validator") ? `<a href="/account/${b.authorAddress}" class="item-link">${b.authorName}</a>` : `<a href="/account/${b.authorAddress}" class="address-cell item-link">${b.authorAddress.substring(0, 8)}...</a>`}</td>
-                <td style="font-weight: 500;">${b.extrinsicsCount}</td>
-                <td style="font-weight: 500;">${b.eventsCount}</td>
-                <td class="address-cell"><a href="/block/${b.hash}" class="item-link">${shortHash}</a></td>
-                <td style="color: var(--text-secondary);">${dateObj.toISOString().replace('T', ' ').substring(0, 19)}</td>
-            </tr>
-        `;
+    if (!blocksTableApi) {
+        blocksTableApi = makeTable({
+            container: fullBlocksListEl,
+            rows,
+            defaultSort: { key: 'number', dir: 'desc' },
+            globalSearch: true,
+            summarySuffix: 'blocks',
+            emptyMessage: 'No blocks indexed yet.',
+            columns: [
+                {
+                    key: 'number', label: 'Block #', searchable: true,
+                    sort: (a, b) => (a.number || 0) - (b.number || 0),
+                    format: row => `<a href="/block/${row.number}" class="item-link">${row.number}</a>`
+                },
+                {
+                    key: 'timestamp', label: 'Age',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => `<span style="color: var(--text-secondary);">${stakingEscapeHtml(timeAgo(row.timestamp))}</span>`
+                },
+                {
+                    key: 'authorName', label: 'Author', searchable: true,
+                    sort: (a, b) => String(a.authorName || '').localeCompare(String(b.authorName || '')),
+                    filter: { type: 'text', placeholder: 'Author name/address…' },
+                    format: row => {
+                        const name = row.authorName;
+                        const addr = row.authorAddress || '';
+                        const short = addr.substring(0, 8) + '…';
+                        if (name && name !== 'Unknown' && name !== 'System' && !String(name).startsWith('Validator')) {
+                            return `<a href="/account/${addr}" class="item-link">${stakingEscapeHtml(name)}</a>`;
+                        }
+                        return `<a href="/account/${addr}" class="address-cell item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'extrinsicsCount', label: 'Extrinsics',
+                    sort: (a, b) => (a.extrinsicsCount || 0) - (b.extrinsicsCount || 0),
+                    format: row => `<strong>${row.extrinsicsCount}</strong>`
+                },
+                {
+                    key: 'eventsCount', label: 'Events',
+                    sort: (a, b) => (a.eventsCount || 0) - (b.eventsCount || 0),
+                    format: row => `<strong>${row.eventsCount}</strong>`
+                },
+                {
+                    key: 'hash', label: 'Hash', searchable: true,
+                    format: row => {
+                        const short = (row.hash || '').substring(0, 10) + '…';
+                        return `<a href="/block/${row.hash}" class="address-cell item-link">${stakingEscapeHtml(short)}</a>`;
+                    }
+                },
+                {
+                    key: 'timestampDate', label: 'Date',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => row.timestamp
+                        ? `<span style="color: var(--text-secondary);">${stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T',' ').substring(0,19))}</span>`
+                        : ''
+                }
+            ]
+        });
+    } else {
+        blocksTableApi.setData(rows);
     }
 
-    fullBlocksListEl.innerHTML = html;
-    if (blockCountEl) blockCountEl.innerText = `${fullBlocks.length} Records`;
-
+    if (blockCountEl) blockCountEl.innerText = `${rows.length} Records`;
+    // makeTable shows everything that's loaded — legacy Show More button is moot.
     const showMoreBlocksBtn = document.getElementById('show-more-blocks-btn');
-    if (showMoreBlocksBtn) {
-        if (blockDisplayLimit < fullBlocks.length) {
-            showMoreBlocksBtn.style.display = 'inline-block';
-        } else {
-            showMoreBlocksBtn.style.display = 'none';
-        }
-    }
+    if (showMoreBlocksBtn) showMoreBlocksBtn.style.display = 'none';
 }
 
 async function refreshDashboardLists() {
@@ -882,57 +1277,86 @@ async function fetchEvents(force = false) {
 
 function renderFullEvents() {
     if (!fullEventsListEl) return;
-    let html = '';
-    const toDisplay = fullEvents.slice(0, eventDisplayLimit);
+    const rows = fullEvents || [];
 
-    for (const ev of toDisplay) {
-        const displayHash = ev.txHash || ev.hash;
-        const shortHash = displayHash.substring(0, 15) + '...';
-        const dateObj = new Date(ev.timestamp);
-        const actionStr = `${ev.section} -> ${ev.method}`;
-        const identityStr = (ev.signerName && ev.signerName !== "Unknown") ? ev.signerName : ev.signerAddress;
-        const eventLink = ev.txHash
-            ? `<a href="/tx/${ev.block}/${ev.txHash}" class="item-link" style="font-size: 13px; color: var(--brand-secondary); opacity: 0.8;">tx: ${shortHash}</a>`
-            : `<span style="font-size: 13px; color: var(--text-secondary); opacity: 0.8;">event: ${shortHash}</span>`;
-        const statusColor = ev.status === 'failed' ? 'var(--error)' : 'var(--success)';
+    // Pre-compute the section + method select options from the data so the
+    // user can filter to "balances/Transfer", "staking/Rewarded", etc.
+    const uniqueSections = Array.from(new Set(rows.map(r => r.section).filter(Boolean))).sort();
+    const uniqueMethods  = Array.from(new Set(rows.map(r => r.method).filter(Boolean))).sort();
 
-        html += `
-            <div class="event-list-item">
-                <div>
-                    <a href="/block/${ev.block}" class="item-link" style="display: block; font-size: 15px; margin-bottom: 5px;">${ev.block}</a>
-                    ${eventLink}
-                </div>
-                <div>
-                    <div style="font-weight: 500; font-size: 14px; margin-bottom: 5px;">${actionStr}</div>
-                    <div style="font-size: 13px; color: var(--text-secondary);">
-                        signer:<br>
-                        <a href="/account/${ev.signerAddress}" class="item-link" style="font-size: 13px;">${identityStr}</a>
-                    </div>
-                </div>
-                <div style="color: var(--text-secondary); font-size: 14px;">
-                    ${timeAgo(ev.timestamp)}
-                </div>
-                <div style="color: var(--text-secondary); font-size: 14px;">
-                    ${dateObj.toISOString().replace('T', ' ').substring(0, 19)}(UTC)
-                </div>
-                <div>
-                    <span class="badge" style="background: ${statusColor}; font-size: 11px;">${ev.status}</span>
-                </div>
-            </div>
-        `;
+    if (!eventsTableApi) {
+        eventsTableApi = makeTable({
+            container: fullEventsListEl,
+            rows,
+            defaultSort: { key: 'block', dir: 'desc' },
+            globalSearch: true,
+            summarySuffix: 'events',
+            emptyMessage: 'No events indexed yet.',
+            columns: [
+                {
+                    key: 'block', label: 'Block', searchable: true,
+                    sort: (a, b) => (a.block || 0) - (b.block || 0),
+                    format: row => {
+                        const displayHash = row.txHash || row.hash || '';
+                        const shortHash = displayHash.substring(0, 15) + '…';
+                        const link = row.txHash
+                            ? `<a href="/tx/${row.block}/${row.txHash}" class="item-link" style="font-size:12px; color: var(--brand-secondary); opacity:0.8;">tx: ${stakingEscapeHtml(shortHash)}</a>`
+                            : `<span style="font-size:12px; color: var(--text-secondary); opacity:0.8;">event: ${stakingEscapeHtml(shortHash)}</span>`;
+                        return `<a href="/block/${row.block}" class="item-link">${row.block}</a><br>${link}`;
+                    }
+                },
+                {
+                    key: 'section', label: 'Section',
+                    sort: (a, b) => String(a.section || '').localeCompare(String(b.section || '')),
+                    filter: { type: 'select', options: uniqueSections },
+                    format: row => `<strong>${stakingEscapeHtml(row.section || '')}</strong>`
+                },
+                {
+                    key: 'method', label: 'Method', searchable: true,
+                    sort: (a, b) => String(a.method || '').localeCompare(String(b.method || '')),
+                    filter: { type: 'select', options: uniqueMethods },
+                    format: row => stakingEscapeHtml(row.method || '')
+                },
+                {
+                    key: 'signerName', label: 'Signer', searchable: true,
+                    sort: (a, b) => String(a.signerName || a.signerAddress || '').localeCompare(String(b.signerName || b.signerAddress || '')),
+                    filter: { type: 'text', placeholder: 'Signer name/address…' },
+                    format: row => {
+                        const identityStr = (row.signerName && row.signerName !== 'Unknown') ? row.signerName : row.signerAddress;
+                        return `<a href="/account/${row.signerAddress}" class="item-link" style="font-size:13px;">${stakingEscapeHtml(identityStr || '')}</a>`;
+                    }
+                },
+                {
+                    key: 'timestamp', label: 'Date',
+                    sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                    format: row => {
+                        const d = row.timestamp ? new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' UTC' : '';
+                        return `<span style="color: var(--text-secondary);">${stakingEscapeHtml(timeAgo(row.timestamp))}<br><small>${stakingEscapeHtml(d)}</small></span>`;
+                    }
+                },
+                {
+                    key: 'status', label: 'Status',
+                    sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+                    filter: { type: 'select', options: ['success', 'failed'] },
+                    format: row => `<span class="badge" style="background: ${row.status === 'failed' ? 'var(--error)' : 'var(--success)'}; font-size:11px;">${stakingEscapeHtml(row.status || '')}</span>`
+                },
+                {
+                    key: 'signerAddress', label: 'Signer Address', searchable: true,
+                    sort: (a, b) => String(a.signerAddress || '').localeCompare(String(b.signerAddress || '')),
+                    // Hidden by default — its data is searchable but the column
+                    // is not interesting to display since the Signer column
+                    // shows the identity. We could later add a column-visibility
+                    // toggle; for now we omit by not declaring it.
+                }
+            ].filter(c => c.label !== 'Signer Address') // (placeholder for future hidden-but-searchable columns)
+        });
+    } else {
+        eventsTableApi.setData(rows);
     }
 
-    fullEventsListEl.innerHTML = html;
-    if (eventCountEl) eventCountEl.innerText = `${fullEvents.length} Records`;
-
+    if (eventCountEl) eventCountEl.innerText = `${rows.length} Records`;
     const showMoreEventsBtn = document.getElementById('show-more-events-btn');
-    if (showMoreEventsBtn) {
-        if (eventDisplayLimit < fullEvents.length) {
-            showMoreEventsBtn.style.display = 'inline-block';
-        } else {
-            showMoreEventsBtn.style.display = 'none';
-        }
-    }
+    if (showMoreEventsBtn) showMoreEventsBtn.style.display = 'none';
 }
 
 document.querySelectorAll('.sortable-tx').forEach(th => {
@@ -2496,39 +2920,17 @@ function renderStakingRewards(data) {
     }
 
     const rewards = getFilteredRewards(data, stakingRewardFilter);
-    const shown = rewards.slice(0, stakingRewardsDisplayLimit);
-    let rowsHtml = '';
-    shown.forEach(r => {
-        const date = r.timestamp ? new Date(r.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '—';
-        const validatorCell = r.validator
-            ? `<a href="/validator/${encodeURIComponent(r.validator)}" class="item-link" style="color: var(--brand-secondary);">${stakingShortAddress(r.validator)}</a>`
-            : '<span style="color: var(--text-muted);">—</span>';
-        const blockCell = r.block != null
-            ? `<a href="/block/${r.block}" class="item-link" style="color: var(--brand-secondary);">${stakingFormatNumber(r.block)}</a>`
-            : '<span style="color: var(--text-muted);">—</span>';
-        const statusBadge = r.status === 'claimed'
-            ? '<span class="reward-badge claimed">Claimed</span>'
-            : '<span class="reward-badge unclaimed">Unpaid</span>';
-        rowsHtml += `
-            <tr>
-                <td>${r.era != null ? r.era : '<span style="color:var(--text-muted);">—</span>'}</td>
-                <td style="white-space: nowrap;">${date}</td>
-                <td class="staking-amount">${stakingFormatPDEX(r.amount)} PDEX</td>
-                <td>${statusBadge}</td>
-                <td>${validatorCell}</td>
-                <td>${blockCell}</td>
-            </tr>`;
-    });
-
-    const remaining = rewards.length - shown.length;
-    const showMoreHtml = remaining > 0
-        ? `<div style="text-align:center; padding: 18px;"><button id="staking-show-more" class="staking-download-btn">Show more (${stakingFormatNumber(remaining)} remaining)</button></div>`
-        : '';
     const fbtn = (key, label) => `<button class="reward-filter-btn${stakingRewardFilter === key ? ' active' : ''}" data-filter="${key}">${label}</button>`;
     const computingNote = data.unclaimedComputing
         ? '<div style="padding: 0 24px 14px; color: var(--text-muted); font-size: 0.78rem;">Unpaid rewards are being computed in the background and will appear shortly.</div>'
         : '';
 
+    // The pill row above already coarse-filters to all/claimed/unpaid; the
+    // makeTable instance below adds sortable headers + per-column filters
+    // (e.g. validator address, era/amount/block search via global search) on
+    // top of that pre-filtered set. We rebuild the whole shell each render
+    // since the surrounding summary cards + chart need to refresh too;
+    // makeTable is cheap to re-instantiate.
     resultsEl.innerHTML = `
         <div class="list-header">
             <h2>Reward history${identity ? ' — ' + stakingEscapeHtml(identity) : ''}</h2>
@@ -2550,15 +2952,55 @@ function renderStakingRewards(data) {
                 <button class="staking-download-btn" id="staking-dl-json"><i class='bx bx-download'></i> JSON</button>
             </div>
         </div>
-        <div class="table-responsive">
-            <table class="staking-rewards-table">
-                <thead>
-                    <tr><th>Era</th><th>Date (UTC)</th><th>Amount</th><th>Status</th><th>Validator</th><th>Block</th></tr>
-                </thead>
-                <tbody>${rowsHtml || '<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text-secondary);">No rewards match this filter.</td></tr>'}</tbody>
-            </table>
-        </div>
-        ${showMoreHtml}`;
+        <div id="staking-rewards-table-container"></div>`;
+
+    makeTable({
+        container: document.getElementById('staking-rewards-table-container'),
+        rows: rewards,
+        defaultSort: { key: 'era', dir: 'desc' },
+        globalSearch: true,
+        summarySuffix: 'rewards',
+        emptyMessage: 'No rewards match this filter.',
+        columns: [
+            {
+                key: 'era', label: 'Era', searchable: true,
+                sort: (a, b) => (a.era == null ? -1 : a.era) - (b.era == null ? -1 : b.era),
+                format: row => row.era != null ? String(row.era) : '<span style="color:var(--text-muted);">—</span>'
+            },
+            {
+                key: 'timestamp', label: 'Date (UTC)',
+                sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+                format: row => row.timestamp ? `<span style="white-space:nowrap;">${stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19))}</span>` : '<span style="color:var(--text-muted);">—</span>'
+            },
+            {
+                key: 'amount', label: 'Amount',
+                sort: (a, b) => (Number(a.amount) || 0) - (Number(b.amount) || 0),
+                format: row => `<span class="staking-amount">${stakingFormatPDEX(row.amount)} PDEX</span>`
+            },
+            {
+                key: 'status', label: 'Status',
+                sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
+                format: row => row.status === 'claimed'
+                    ? '<span class="reward-badge claimed">Claimed</span>'
+                    : '<span class="reward-badge unclaimed">Unpaid</span>'
+            },
+            {
+                key: 'validator', label: 'Validator', searchable: true,
+                sort: (a, b) => String(a.validator || '').localeCompare(String(b.validator || '')),
+                filter: { type: 'text', placeholder: 'Validator address…' },
+                format: row => row.validator
+                    ? `<a href="/validator/${encodeURIComponent(row.validator)}" class="item-link" style="color: var(--brand-secondary);">${stakingShortAddress(row.validator)}</a>`
+                    : '<span style="color: var(--text-muted);">—</span>'
+            },
+            {
+                key: 'block', label: 'Block', searchable: true,
+                sort: (a, b) => (a.block || 0) - (b.block || 0),
+                format: row => row.block != null
+                    ? `<a href="/block/${row.block}" class="item-link" style="color: var(--brand-secondary);">${stakingFormatNumber(row.block)}</a>`
+                    : '<span style="color: var(--text-muted);">—</span>'
+            }
+        ]
+    });
 
     resultsEl.querySelectorAll('.reward-filter-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -2571,11 +3013,9 @@ function renderStakingRewards(data) {
     if (csvBtn) csvBtn.addEventListener('click', downloadStakingRewardsCSV);
     const jsonBtn = document.getElementById('staking-dl-json');
     if (jsonBtn) jsonBtn.addEventListener('click', downloadStakingRewardsJSON);
-    const moreBtn = document.getElementById('staking-show-more');
-    if (moreBtn) moreBtn.addEventListener('click', () => {
-        stakingRewardsDisplayLimit += 100;
-        renderStakingRewards(stakingRewardsData);
-    });
+    // The old client-side pagination "Show more" button is no longer needed —
+    // makeTable shows all rows by default and the user can drill in via the
+    // filter bar instead.
 
     renderStakingRewardsChart(data);
 }

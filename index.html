@@ -360,22 +360,8 @@
                         <h2>Active Validators</h2>
                         <span class="validator-count">Loading...</span>
                     </div>
-                    <div class="table-responsive">
-                        <table class="validators-table">
-                            <thead>
-                                <tr>
-                                    <th>Address</th>
-                                    <th class="sortable" data-sort="name">Identity <i class='bx bx-sort'></i></th>
-                                    <th>Total Stake</th>
-                                    <th class="sortable" data-sort="commission">Commission <i class='bx bx-sort'></i></th>
-                                    <th class="sortable" data-sort="avg30DayApy">Real APY (30d) <i class='bx bx-sort'></i></th>
-                                    <th>Now vs Real</th>
-                                </tr>
-                            </thead>
-                            <tbody id="validators-list">
-                                <tr><td colspan="6" style="text-align:center; padding: 20px;">Fetching validators from indexer...</td></tr>
-                            </tbody>
-                        </table>
+                    <div id="validators-table">
+                        <div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching validators from indexer…</div>
                     </div>
                     <div style="text-align: center; padding: 20px;">
                         <button id="show-more-btn" class="glass" style="padding: 10px 20px; color: var(--text-primary); border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); border-radius: var(--radius-sm); cursor: pointer; display: none; transition: var(--transition-fast);">Show More</button>
@@ -738,21 +724,8 @@
                         <h2>Top Token Holders</h2>
                         <span class="holder-count">Loading...</span>
                     </div>
-                    <div class="table-responsive">
-                        <table class="holders-table validators-table">
-                            <thead>
-                                <tr>
-                                    <th class="sortable-holder" data-sort="rank">Rank <i class='bx bx-sort'></i></th>
-                                    <th>Address</th>
-                                    <th class="sortable-holder" data-sort="name">Identity <i class='bx bx-sort'></i></th>
-                                    <th class="sortable-holder" data-sort="balance">Balance <i class='bx bx-sort'></i></th>
-                                    <th class="sortable-holder" data-sort="share">Percentage <i class='bx bx-sort'></i></th>
-                                </tr>
-                            </thead>
-                            <tbody id="holders-list">
-                                <tr><td colspan="5" style="text-align:center; padding: 20px;">Fetching holders from indexer...</td></tr>
-                            </tbody>
-                        </table>
+                    <div id="holders-table">
+                        <div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching holders from indexer…</div>
                     </div>
                     <div style="text-align: center; padding: 20px;">
                         <button id="show-more-holders-btn" class="glass" style="padding: 10px 20px; color: var(--text-primary); border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); border-radius: var(--radius-sm); cursor: pointer; display: none; transition: var(--transition-fast);">Show More</button>
@@ -767,24 +740,8 @@
                         <h2>Transactions History</h2>
                         <span class="tx-count">Loading...</span>
                     </div>
-                    <div class="table-responsive">
-                        <table class="transactions-table validators-table">
-                            <thead>
-                                <tr>
-                                    <th>Txn Hash</th>
-                                    <th>From</th>
-                                    <th>To</th>
-                                    <th class="sortable-tx" data-sort="timestamp">Date <i class='bx bx-sort'></i></th>
-                                    <th>Block</th>
-                                    <th class="sortable-tx" data-sort="numericAmount">Amount <i class='bx bx-sort'></i></th>
-                                    <th>Value</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody id="full-transactions-list">
-                                <tr><td colspan="8" style="text-align:center; padding: 20px;">Fetching transactions...</td></tr>
-                            </tbody>
-                        </table>
+                    <div id="full-transactions-table">
+                        <div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching transactions…</div>
                     </div>
                     <div style="text-align: center; padding: 20px;">
                         <button id="load-older-financial-tx-btn" class="glass" style="padding: 10px 20px; color: var(--text-primary); border: 1px solid var(--brand-primary); background: rgba(229,0,122,0.1); border-radius: var(--radius-sm); cursor: pointer; display: none; transition: var(--transition-fast); margin-right: 10px;">Load Older 100 Financial Tx</button>
@@ -800,23 +757,8 @@
                         <h2>Blocks History</h2>
                         <span class="block-count">Loading...</span>
                     </div>
-                    <div class="table-responsive">
-                        <table class="blocks-table validators-table">
-                            <thead>
-                                <tr>
-                                    <th>Block Number</th>
-                                    <th>Time Elapsed</th>
-                                    <th>Author</th>
-                                    <th>Extrinsics</th>
-                                    <th>Events</th>
-                                    <th>Hash</th>
-                                    <th>Date</th>
-                                </tr>
-                            </thead>
-                            <tbody id="full-blocks-list">
-                                <tr><td colspan="7" style="text-align:center; padding: 20px;">Fetching blocks...</td></tr>
-                            </tbody>
-                        </table>
+                    <div id="full-blocks-table">
+                        <div style="text-align:center; padding: 40px; color: var(--text-muted);">Fetching blocks…</div>
                     </div>
                     <div style="text-align: center; padding: 20px;">
                         <button id="show-more-blocks-btn" class="glass" style="padding: 10px 20px; color: var(--text-primary); border: 1px solid var(--border-color); background: rgba(255,255,255,0.05); border-radius: var(--radius-sm); cursor: pointer; display: none; transition: var(--transition-fast);">Show More</button>
