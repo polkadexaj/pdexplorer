@@ -983,6 +983,90 @@ h1, h2, h3 { font-weight: 600; }
     border-bottom: 1px solid var(--border-color);
     text-align: right;
 }
+.table-summary strong { color: var(--text-primary); font-weight: 600; }
+.table-summary-muted { color: var(--text-muted); margin-left: 4px; }
+
+/* ---- Pagination + "Show more" controls (rendered by makeTable when the
+   `pagination` config is enabled). Two flavours of UI for the same role:
+   .table-showmore for progressive disclosure up to the cap, and
+   .table-pagination for the numbered nav strip beyond it. */
+.table-showmore {
+    display: flex;
+    justify-content: center;
+    padding: 16px;
+    border-top: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.015);
+}
+.table-showmore-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 22px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+.table-showmore-btn:hover {
+    border-color: var(--brand-primary);
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
+}
+.table-showmore-btn:active { transform: scale(0.98); }
+.table-showmore-remaining {
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 0.78rem;
+}
+
+.table-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+    padding: 14px 16px;
+    border-top: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.015);
+}
+.table-pagebtn {
+    min-width: 34px;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+.table-pagebtn:hover:not([disabled]):not(.active) {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: rgba(255, 255, 255, 0.04);
+}
+.table-pagebtn.active {
+    color: #fff;
+    background: var(--brand-primary);
+    border-color: var(--brand-primary);
+    cursor: default;
+}
+.table-pagebtn[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.table-pageellipsis {
+    padding: 0 4px;
+    color: var(--text-muted);
+    user-select: none;
+}
 
 /* Sortable header arrows on .data-table (rendered by makeTable). */
 .data-table {

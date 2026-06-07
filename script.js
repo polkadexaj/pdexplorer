@@ -57,8 +57,12 @@ function formatNetworkNumber(value, maximumFractionDigits = 1) {
 //       defaultSort:    { key: 'timestamp', dir: 'desc' },
 //       globalSearch:   true,
 //       emptyMessage:   'No rows yet.',
-//       summarySuffix:  'transactions'   // appears after the count: "Showing X of Y transactions"
-//   });
+//       summarySuffix:  'transactions',  // appears after the count: "Showing X of Y transactions"
+//       pagination:     {                // optional. omit to render every row (legacy behavior)
+//           pageSize:     50,            // rows per page / show-more increment
+//           showMoreMax:  200            // cumulative cap; beyond this the UI switches to
+//       }                                // numbered pagination (Prev / 1 2 3 / Next) instead
+//   });                                  // of growing the visible window.
 //   api.setData(newRows);   // call when the underlying data changes
 //   api.refresh();          // re-render with current state (e.g. after a format change)
 //
@@ -84,6 +88,27 @@ function makeTable(config) {
     const emptyMessage = config.emptyMessage || 'No matching rows.';
     const summarySuffix = config.summarySuffix || 'rows';
     const rowClass = config.rowClass || null;       // optional fn(row) => string
+
+    // Pagination config — when present, the table progressively reveals rows
+    // instead of dumping the whole filtered set into the DOM. Two modes share
+    // the same config:
+    //   • Show-more  (filtered count ≤ showMoreMax): one cumulative window
+    //     starting at pageSize, grows by pageSize per click, hard-capped at
+    //     showMoreMax. The button disappears when there's nothing left.
+    //   • Paginated  (filtered count > showMoreMax): traditional prev/page-
+    //     numbers/next strip with pageSize rows per page. Resets to page 1
+    //     whenever filters/search change so the user isn't stranded on page
+    //     50 of an empty result set.
+    const paginationCfg = config.pagination || null;
+    const pageSize = paginationCfg ? Math.max(1, paginationCfg.pageSize | 0 || 50) : 0;
+    const showMoreMax = paginationCfg ? Math.max(pageSize, paginationCfg.showMoreMax | 0 || pageSize * 4) : 0;
+    let expandedCount = pageSize;   // visible row count in show-more mode
+    let page = 1;                   // current page in paginated mode
+
+    function resetPaginationState() {
+        expandedCount = pageSize;
+        page = 1;
+    }
 
     function applyFilters(input) {
         let out = input;
@@ -195,18 +220,78 @@ function makeTable(config) {
         }
     }
 
+    // Compact "Prev 1 … 4 5 6 … 23 Next" strip used in paginated mode.
+    // Always renders 1 + total and a 2-wide window around the current page,
+    // collapsing the rest into ellipses so the strip stays a single row even
+    // for huge result sets.
+    function buildPaginationNav(current, totalPages) {
+        if (totalPages <= 1) return '';
+        const wanted = new Set([1, totalPages, current, current - 1, current + 1, current - 2, current + 2]);
+        const list = [...wanted].filter(p => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+        const parts = [];
+        parts.push(`<button type="button" class="table-pagebtn" data-page="${current - 1}"${current === 1 ? ' disabled' : ''}>‹ Prev</button>`);
+        let last = 0;
+        for (const p of list) {
+            if (last && p - last > 1) parts.push(`<span class="table-pageellipsis">…</span>`);
+            parts.push(`<button type="button" class="table-pagebtn${p === current ? ' active' : ''}" data-page="${p}">${p}</button>`);
+            last = p;
+        }
+        parts.push(`<button type="button" class="table-pagebtn" data-page="${current + 1}"${current === totalPages ? ' disabled' : ''}>Next ›</button>`);
+        return `<div class="table-pagination">${parts.join('')}</div>`;
+    }
+
     function render() {
         const focusSnap = snapshotFocus();
         const filtered = applyFilters(rows);
         const sorted = applySort(filtered);
         const total = rows.length;
-        const shown = sorted.length;
+        const matched = sorted.length;
 
+        // Decide pagination mode and slice the visible window.
+        //   • mode = 'all':       no pagination config or filtered set fits.
+        //   • mode = 'showmore':  cumulative reveal up to showMoreMax.
+        //   • mode = 'paginated': numbered nav (when > showMoreMax).
+        let mode = 'all';
+        let visible = sorted;
+        let firstIdx = 0;       // 1-based first row in the visible slice
+        let lastIdx = matched;
+        let extraHTML = '';     // "Show more" button or page-nav, appended below the table
+        if (paginationCfg && matched > pageSize) {
+            if (matched <= showMoreMax) {
+                mode = 'showmore';
+                const limit = Math.min(expandedCount, matched);
+                visible = sorted.slice(0, limit);
+                firstIdx = matched ? 1 : 0;
+                lastIdx = limit;
+                const remaining = matched - limit;
+                if (remaining > 0) {
+                    const step = Math.min(pageSize, remaining);
+                    extraHTML = `<div class="table-showmore">
+                        <button type="button" class="table-showmore-btn">Show ${step} more
+                            <span class="table-showmore-remaining">(${remaining.toLocaleString()} remaining)</span>
+                        </button>
+                    </div>`;
+                }
+            } else {
+                mode = 'paginated';
+                const totalPages = Math.max(1, Math.ceil(matched / pageSize));
+                if (page > totalPages) page = totalPages;
+                if (page < 1) page = 1;
+                const start = (page - 1) * pageSize;
+                const end = Math.min(start + pageSize, matched);
+                visible = sorted.slice(start, end);
+                firstIdx = start + 1;
+                lastIdx = end;
+                extraHTML = buildPaginationNav(page, totalPages);
+            }
+        }
+
+        const shown = visible.length;
         let bodyHTML = '';
         if (!shown) {
             bodyHTML = `<tr><td colspan="${columns.length}" class="table-empty-row">${stakingEscapeHtml(total === 0 ? emptyMessage : 'No rows match the current filters.')}</td></tr>`;
         } else {
-            for (const row of sorted) {
+            for (const row of visible) {
                 const rc = rowClass ? rowClass(row) : '';
                 bodyHTML += `<tr${rc ? ` class="${rc}"` : ''}>`;
                 for (const col of columns) {
@@ -216,9 +301,18 @@ function makeTable(config) {
             }
         }
 
-        const summary = (shown === total)
-            ? `<div class="table-summary">${total.toLocaleString()} ${stakingEscapeHtml(summarySuffix)}</div>`
-            : `<div class="table-summary">Showing <strong>${shown.toLocaleString()}</strong> of ${total.toLocaleString()} ${stakingEscapeHtml(summarySuffix)}</div>`;
+        const suffixEsc = stakingEscapeHtml(summarySuffix);
+        const filteredFrom = (matched !== total) ? ` <span class="table-summary-muted">(filtered from ${total.toLocaleString()})</span>` : '';
+        let summary;
+        if (mode === 'paginated') {
+            summary = `<div class="table-summary">Showing <strong>${firstIdx.toLocaleString()}–${lastIdx.toLocaleString()}</strong> of ${matched.toLocaleString()} ${suffixEsc}${filteredFrom}</div>`;
+        } else if (mode === 'showmore') {
+            summary = `<div class="table-summary">Showing <strong>${lastIdx.toLocaleString()}</strong> of ${matched.toLocaleString()} ${suffixEsc}${filteredFrom}</div>`;
+        } else {
+            summary = (matched === total)
+                ? `<div class="table-summary">${total.toLocaleString()} ${suffixEsc}</div>`
+                : `<div class="table-summary">Showing <strong>${matched.toLocaleString()}</strong> of ${total.toLocaleString()} ${suffixEsc}</div>`;
+        }
 
         container.innerHTML = `
             ${buildFilterBarHTML()}
@@ -228,9 +322,12 @@ function makeTable(config) {
                     <thead><tr>${buildHeaderHTML()}</tr></thead>
                     <tbody>${bodyHTML}</tbody>
                 </table>
-            </div>`;
+            </div>
+            ${extraHTML}`;
 
-        // Wire up handlers on freshly-rendered elements.
+        // Wire up handlers on freshly-rendered elements. Filter/search/sort all
+        // reset pagination state so a narrowing filter doesn't strand the user
+        // on a page that no longer exists.
         container.querySelectorAll('.table-th.sortable').forEach(th => {
             th.addEventListener('click', () => {
                 const key = th.getAttribute('data-col');
@@ -240,13 +337,16 @@ function makeTable(config) {
                 } else {
                     sortKey = key; sortDir = 'asc';
                 }
+                // Sort change keeps the same rows but re-orders them — reset
+                // page to 1 so the user always sees the new top of the list.
+                page = 1;
                 render();
             });
         });
         const gs = container.querySelector('.table-global-search');
-        if (gs) gs.addEventListener('input', e => { globalSearch = e.target.value; render(); });
+        if (gs) gs.addEventListener('input', e => { globalSearch = e.target.value; resetPaginationState(); render(); });
         container.querySelectorAll('.table-col-filter').forEach(el => {
-            const handler = () => { colFilters[el.getAttribute('data-col')] = el.value; render(); };
+            const handler = () => { colFilters[el.getAttribute('data-col')] = el.value; resetPaginationState(); render(); };
             el.addEventListener('input', handler);
             el.addEventListener('change', handler);
         });
@@ -254,7 +354,20 @@ function makeTable(config) {
         if (clearBtn) clearBtn.addEventListener('click', () => {
             globalSearch = '';
             for (const k of Object.keys(colFilters)) colFilters[k] = '';
+            resetPaginationState();
             render();
+        });
+        const showmoreBtn = container.querySelector('.table-showmore-btn');
+        if (showmoreBtn) showmoreBtn.addEventListener('click', () => {
+            expandedCount = Math.min(expandedCount + pageSize, showMoreMax);
+            render();
+        });
+        container.querySelectorAll('.table-pagebtn').forEach(btn => {
+            if (btn.hasAttribute('disabled')) return;
+            btn.addEventListener('click', () => {
+                const p = parseInt(btn.getAttribute('data-page'), 10);
+                if (!isNaN(p)) { page = p; render(); }
+            });
         });
 
         restoreFocus(focusSnap);
@@ -262,7 +375,14 @@ function makeTable(config) {
 
     render();
     return {
-        setData(newRows) { rows = Array.isArray(newRows) ? newRows : []; render(); },
+        setData(newRows) {
+            rows = Array.isArray(newRows) ? newRows : [];
+            // Fresh data means stale row indices — reset pagination so the
+            // user lands on the first page / first 50 rows instead of an
+            // accidentally-out-of-range slice.
+            resetPaginationState();
+            render();
+        },
         refresh()        { render(); },
         getState()       { return { sortKey, sortDir, colFilters: { ...colFilters }, globalSearch }; }
     };
@@ -2735,7 +2855,8 @@ async function fetchValidatorDetails(address) {
 // --- Shared wallet / staking-rewards helpers ---
 let stakingRewardsData = null;
 let stakingRewardsChart = null;
-let stakingRewardsDisplayLimit = 100;
+// (Legacy `stakingRewardsDisplayLimit` removed — pagination now lives inside
+// makeTable via the `pagination` config on the staking-rewards table.)
 let stakingRewardFilter = 'all';
 let stakingUnclaimedPolls = 0;
 let walletPriceChart = null;
@@ -2856,7 +2977,6 @@ async function fetchStakingRewards(address, isPoll) {
     }
 
     if (!isPoll) {
-        stakingRewardsDisplayLimit = 100;
         stakingRewardFilter = 'all';
         stakingUnclaimedPolls = 0;
         resultsEl.style.display = 'block';
@@ -2976,6 +3096,10 @@ function renderStakingRewards(data) {
         globalSearch: true,
         summarySuffix: 'rewards',
         emptyMessage: 'No rewards match this filter.',
+        // 50/page; expand cumulatively via "Show more" up to 200, then switch
+        // to numbered pagination so long-running validators with thousands
+        // of payouts stay navigable.
+        pagination: { pageSize: 50, showMoreMax: 200 },
         columns: [
             {
                 key: 'era', label: 'Era', searchable: true,
@@ -3020,7 +3144,9 @@ function renderStakingRewards(data) {
     resultsEl.querySelectorAll('.reward-filter-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             stakingRewardFilter = btn.getAttribute('data-filter');
-            stakingRewardsDisplayLimit = 100;
+            // makeTable owns pagination state now; switching the All/Claimed/
+            // Unpaid pill triggers a full re-render which constructs a fresh
+            // makeTable instance, so its internal page counter starts at 1.
             renderStakingRewards(stakingRewardsData);
         });
     });
