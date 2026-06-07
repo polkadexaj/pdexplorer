@@ -63,6 +63,21 @@ function formatNetworkNumber(value, maximumFractionDigits = 1) {
 //           showMoreMax:  200            // cumulative cap; beyond this the UI switches to
 //       }                                // numbered pagination (Prev / 1 2 3 / Next) instead
 //   });                                  // of growing the visible window.
+//
+// Pagination policy (which call sites set `pagination` and which don't):
+//   ON  — tables that can plausibly grow into the thousands and would hurt
+//         page performance if dumped wholesale into the DOM:
+//             /transactions, /blocks, /events, /holders,
+//             /staking-rewards/:addr,
+//             account-details (transactions + events tabs),
+//             /discussions (threads).
+//   OFF — tables whose row count is structurally bounded or whose UX favors
+//         scanning the whole set at once:
+//             /validators (chain-capped active+candidate set),
+//             treasury (proposals, approved, history — each typically <50),
+//             democracy referenda + public proposals (small),
+//             council motions (small, pre-filtered by status pill),
+//             wallet recent-rewards + recent-tx (intentional top-~10 snapshots).
 //   api.setData(newRows);   // call when the underlying data changes
 //   api.refresh();          // re-render with current state (e.g. after a format change)
 //
@@ -920,6 +935,9 @@ function renderHolders() {
             globalSearch: true,
             summarySuffix: 'holders',
             emptyMessage: 'No holder data in the indexer yet.',
+            // Polkadex has thousands of distinct PDEX holders; paginate so the
+            // page stays snappy even at the long-tail end of the ranking.
+            pagination: { pageSize: 50, showMoreMax: 200 },
             columns: [
                 {
                     key: 'rank', label: 'Rank',
@@ -1055,6 +1073,9 @@ function renderFullTransactions() {
             globalSearch: true,
             summarySuffix: 'transactions',
             emptyMessage: 'No recent financial transactions found.',
+            // Bounded by TX_CACHE_LIMIT (500) server-side today, but the chain
+            // accumulates indefinitely — show-more first, paginate above 200.
+            pagination: { pageSize: 50, showMoreMax: 200 },
             columns: [
                 {
                     key: 'hash', label: 'Txn Hash', searchable: true,
@@ -1263,6 +1284,9 @@ function renderFullBlocks() {
             globalSearch: true,
             summarySuffix: 'blocks',
             emptyMessage: 'No blocks indexed yet.',
+            // Chain block count grows monotonically — paginate to keep the
+            // DOM bounded as the indexer backfills further into history.
+            pagination: { pageSize: 50, showMoreMax: 200 },
             columns: [
                 {
                     key: 'number', label: 'Block #', searchable: true,
@@ -1412,6 +1436,9 @@ function renderFullEvents() {
             globalSearch: true,
             summarySuffix: 'events',
             emptyMessage: 'No events indexed yet.',
+            // Multiple events per block — this set outgrows /blocks fast.
+            // Show-more for the first 200, page numbers beyond.
+            pagination: { pageSize: 50, showMoreMax: 200 },
             columns: [
                 {
                     key: 'block', label: 'Block', searchable: true,
@@ -2433,6 +2460,9 @@ async function fetchAccountDetails(address) {
             globalSearch: true,
             summarySuffix: 'transactions',
             emptyMessage: txEmptyMessage,
+            // Active accounts can accumulate hundreds-to-thousands of txs over
+            // their lifetime; show-more first, page numbers above 200.
+            pagination: { pageSize: 50, showMoreMax: 200 },
             columns: [
                 {
                     key: 'hash', label: 'Txn Hash', searchable: true,
@@ -2475,6 +2505,9 @@ async function fetchAccountDetails(address) {
             globalSearch: true,
             summarySuffix: 'events',
             emptyMessage: evEmptyMessage,
+            // Events per account outpace transactions (staking, rewards,
+            // governance vote casts, etc.) — paginate on the same cadence.
+            pagination: { pageSize: 50, showMoreMax: 200 },
             columns: [
                 {
                     key: 'hash', label: 'Event Hash', searchable: true,
@@ -4836,6 +4869,9 @@ function renderThreadList(threads) {
         globalSearch: true,
         summarySuffix: 'threads',
         emptyMessage: 'No threads yet — one is created automatically when a proposal or motion appears on-chain.',
+        // Threads accumulate one-per-on-chain-proposal-or-motion over time;
+        // paginate so the page stays usable as governance history grows.
+        pagination: { pageSize: 50, showMoreMax: 200 },
         columns: [
             {
                 key: 'title', label: 'Title', searchable: true,
