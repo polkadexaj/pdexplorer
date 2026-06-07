@@ -5046,15 +5046,19 @@ function democracyStatusBadge(s) {
 function renderDemocracyReferenda(d) {
     const refs = d.referenda || [];
     if (!refs.length) return '<div style="padding:24px;text-align:center;color:var(--text-muted);">No referenda indexed yet.</div>';
-    // Count each status bucket so the pill labels read e.g. "Ongoing (3)".
-    const c = { all: refs.length, ongoing: 0, passed: 0, rejected: 0, cancelled: 0 };
+    // The indexer writes one of exactly three status values (server.js:
+    // democracy sync): 'Ongoing', 'Passed', 'NotPassed'. Pill keys MUST match
+    // those casing-and-spelling exactly — earlier versions used lowercase
+    // 'rejected'/'cancelled' here, which silently zeroed every counter and
+    // hid all finalised-and-failed referenda from the filter UI.
+    const c = { all: refs.length, Ongoing: 0, Passed: 0, NotPassed: 0 };
     for (const r of refs) if (c.hasOwnProperty(r.status)) c[r.status]++;
     const pill = (key, label) =>
         `<button class="reward-filter-btn${democracyReferendaFilter === key ? ' active' : ''}" data-demreffilter="${key}">${label}${c[key] != null ? ` (${stakingFormatNumber(c[key])})` : ''}</button>`;
     return `
         <div class="staking-toolbar" style="margin-bottom:14px;">
             <div class="reward-filter">
-                ${pill('all', 'All')}${pill('ongoing', 'Ongoing')}${pill('passed', 'Passed')}${pill('rejected', 'Rejected')}${pill('cancelled', 'Cancelled')}
+                ${pill('all', 'All')}${pill('Ongoing', 'Ongoing')}${pill('Passed', 'Passed')}${pill('NotPassed', 'Not passed')}
             </div>
         </div>
         <div id="dem-referenda-table"></div>`;
@@ -5068,13 +5072,20 @@ function mountDemocracyReferendaTable(refs) {
         ? refs
         : refs.filter(r => r.status === democracyReferendaFilter);
     const dash = '<span style="color:var(--text-muted);">—</span>';
+    // Map the raw backend status to a human-friendly label for empty-state
+    // messaging ("No not-passed referenda" reads wrong).
+    const friendlyStatus = {
+        Ongoing: 'ongoing',
+        Passed: 'passed',
+        NotPassed: 'not-passed'
+    };
     makeTable({
         container: el, rows: filtered,
         defaultSort: { key: 'refIndex', dir: 'desc' },
         globalSearch: true, summarySuffix: 'referenda',
         emptyMessage: democracyReferendaFilter === 'all'
             ? 'No referenda indexed yet.'
-            : `No ${democracyReferendaFilter} referenda.`,
+            : `No ${friendlyStatus[democracyReferendaFilter] || democracyReferendaFilter} referenda.`,
         columns: [
             {
                 key: 'refIndex', label: 'Referendum', searchable: true,
@@ -5084,7 +5095,14 @@ function mountDemocracyReferendaTable(refs) {
             {
                 key: 'status', label: 'Status',
                 sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
-                filter: { type: 'select', options: ['ongoing', 'passed', 'rejected', 'cancelled'] },
+                // Option values match the raw `r.status` stored by the indexer.
+                // The label/value form (supported by makeTable) lets the
+                // dropdown display "Not Passed" while filtering on 'NotPassed'.
+                filter: { type: 'select', options: [
+                    'Ongoing',
+                    'Passed',
+                    { value: 'NotPassed', label: 'Not Passed' }
+                ] },
                 format: row => democracyStatusBadge(row.status)
             },
             {
