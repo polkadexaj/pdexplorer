@@ -449,14 +449,67 @@ If `/api/network-info` returns 502, the backend isn't listening on 3001 — chec
 
 ### Backups
 
+The provision script installs a nightly SQLite backup pipeline as the `backup` phase, which runs as part of the default `all` flow. Once provisioned, no further setup is needed.
+
+**What's installed:**
+
+- `/opt/pdexplorer/backup.sh` — the actual backup script (uses SQLite's online backup API, WAL-safe)
+- `/etc/cron.d/pdexplorer-backup` — runs nightly at 03:00 UTC as root
+- `/etc/logrotate.d/pdexplorer-backup` — weekly rotation of the backup log, 8 weeks retained
+- `/opt/pdexplorer/backups/` — destination dir, mode 0750
+
+**Schedule and retention:**
+
+- 03:00 UTC every night
+- Output: `/opt/pdexplorer/backups/explorer-YYYYMMDDTHHMMSSZ.db.gz`
+- Old backups are removed after 14 days (override with `KEEP_DAYS=30 ./backup.sh`)
+- Compressed with gzip -9 by default (`COMPRESS=zstd` for faster, parallel compression)
+- A flock-based lockfile (`/var/lock/pdexplorer-backup.lock`) prevents overlapping runs
+- Every snapshot is integrity-checked before rotation; failures are kept with a `.CORRUPT` suffix and old backups are NOT pruned
+
+**Manual run:**
+
 ```bash
-# Daily SQLite snapshot via cron:
-0 3 * * * docker compose -f /opt/pdexplorer/docker-compose.yml exec -T backend \
-  sqlite3 /app/data/explorer.db ".backup /app/data/explorer.bak.db" \
-  && rsync -a /opt/pdexplorer/data/explorer.bak.db backup-host:/backups/pdexplorer/$(date +\%Y-\%m-\%d).db
+sudo /opt/pdexplorer/backup.sh                        # one-shot, uses defaults
+sudo DEST=/mnt/external KEEP_DAYS=60 /opt/pdexplorer/backup.sh
 ```
 
-WAL mode means simply copying `explorer.db` while the indexer is writing is unsafe. Always use `.backup` (or stop the container first).
+**Inspect what's there:**
+
+```bash
+ls -lh /opt/pdexplorer/backups/
+tail -n 50 /var/log/pdexplorer-backup.log
+```
+
+**Restore from a backup** (with the stack stopped so nothing is mid-write):
+
+```bash
+docker compose -f /opt/pdexplorer/docker-compose.yml down
+gunzip -c /opt/pdexplorer/backups/explorer-YYYYMMDDTHHMMSSZ.db.gz \
+    > /opt/pdexplorer/data/explorer.db
+# Wipe any leftover WAL/SHM from the previous run — the gunzipped DB is a
+# fully checkpointed snapshot, so these are stale and could corrupt the
+# restored database if SQLite tries to replay them.
+rm -f /opt/pdexplorer/data/explorer.db-wal /opt/pdexplorer/data/explorer.db-shm
+chown -R 1000:1000 /opt/pdexplorer/data
+docker compose -f /opt/pdexplorer/docker-compose.yml up -d backend
+docker compose logs -f backend         # confirm the indexer picks up from the snapshot
+```
+
+**Off-host shipping (recommended).** The cron job only protects against accidental corruption / bad migrations, not against losing the host itself. Pair it with one of:
+
+```bash
+# rclone to S3 / B2 / GDrive / etc — daily sync after the backup runs:
+30 3 * * * root rclone copy /opt/pdexplorer/backups remote:pdexplorer-backups --max-age 24h
+
+# restic to any backend with deduplication + encryption:
+30 3 * * * root RESTIC_PASSWORD_FILE=/root/.restic-pw \
+  restic -r s3:s3.amazonaws.com/my-bucket/pdexplorer backup /opt/pdexplorer/backups
+```
+
+**Disaster-recovery story.** Because the explorer is reconstructable from chain state, a "lost everything including the off-host backup" failure is not a data-loss event — it's a downtime event. Bring up a fresh provisioned host with no `explorer.db`; the indexer starts re-indexing from genesis. Full backfill takes around 8–12 hours on a typical VPS with the current settings; serve traffic from a status page in the meantime, or restore a stale backup and let the gap-filler catch up.
+
+**SQLite tuning at 5 GB.** `db.js` sets `cache_size=-65536` (64 MB), `mmap_size=256 MB`, `synchronous=NORMAL`, `temp_store=MEMORY`, and `wal_autocheckpoint=1000` on startup. These keep query latencies low as the DB grows — most "SQLite is slow" stories at multi-GB scale come from leaving the defaults in place. If you're seeing slow specific queries, the next thing to check is the planner output (`EXPLAIN QUERY PLAN <query>`) — a `SCAN TABLE` over a multi-million-row table means an index is missing, not that SQLite is the wrong tool.
 
 ### Watching the indexer
 

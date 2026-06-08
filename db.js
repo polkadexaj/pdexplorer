@@ -200,11 +200,45 @@ CREATE INDEX IF NOT EXISTS idx_motions_index ON council_motions(motion_index DES
 export function initDb(dataDir) {
     fs.mkdirSync(dataDir, { recursive: true });
     db = new DatabaseSync(path.join(dataDir, 'explorer.db'));
+
+    // ---- Performance PRAGMAs ----
+    // SQLite's defaults target embedded use. For a multi-GB server-side
+    // index that's read-heavy with a single writer, these knobs matter:
+    //   * journal_mode=WAL — unlimited concurrent readers alongside the
+    //     indexer's writes; the indexer is the only writer.
+    //   * busy_timeout — absorbs transient lock waits during checkpointing
+    //     without surfacing SQLITE_BUSY to the API layer.
+    //   * cache_size=-65536 — 64 MB page cache (negative units = KB). The
+    //     default 2 MB is fine for a tiny DB; once the index grows past
+    //     ~1 GB every uncached query falls back to disk and latencies jump.
+    //   * mmap_size — memory-map up to 256 MB of the DB so hot pages
+    //     bypass the read() syscall path. Particularly effective for the
+    //     wide range scans /blocks, /events, /transactions do.
+    //   * synchronous=NORMAL — WAL-safe (still durable across power loss
+    //     except for the last transaction); fewer fsyncs than FULL means
+    //     the indexer's bulk-insert transactions finish noticeably faster.
+    //   * temp_store=MEMORY — sort/GROUP BY/temp B-trees live in RAM
+    //     instead of spilling to a temp file on disk.
+    //   * wal_autocheckpoint=1000 — fold the WAL back into the main file
+    //     every ~1000 pages (~4 MB at the default page size) so the WAL
+    //     doesn't grow unbounded between explicit checkpoints. The online
+    //     `sqlite3 .backup` we run from cron is also a checkpoint trigger.
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('PRAGMA cache_size = -65536');
+    db.exec('PRAGMA mmap_size = 268435456');
+    db.exec('PRAGMA synchronous = NORMAL');
+    db.exec('PRAGMA temp_store = MEMORY');
+    db.exec('PRAGMA wal_autocheckpoint = 1000');
+
     db.exec(SCHEMA);
     try { migrateFromJson(dataDir); }
     catch (e) { console.warn('JSON -> SQLite migration skipped:', e.message); }
+
+    // Gather index/table statistics so the query planner makes good choices
+    // after the DB grows. Cheap to run, only meaningful on startup.
+    try { db.exec('PRAGMA optimize'); } catch (_) { /* ignore on first boot */ }
+
     return db;
 }
 

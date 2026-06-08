@@ -17,6 +17,8 @@
 #   sudo bash provision-ubuntu.sh harden         # OS hardening only
 #   sudo bash provision-ubuntu.sh docker         # Docker install only
 #   sudo bash provision-ubuntu.sh app            # App deploy only
+#   sudo bash provision-ubuntu.sh backup         # Install nightly SQLite backup + cron
+#                                                # (run AFTER app so backup.sh exists)
 #   sudo bash provision-ubuntu.sh cloudflare     # Restrict 80/443 to Cloudflare ranges
 #                                                # (run AFTER harden so UFW exists)
 #
@@ -549,6 +551,80 @@ EOF
 EOF
 }
 
+# ---- Phase 5: SQLite nightly backup ---------------------------------------
+# Installs sqlite3, copies backup.sh into $DEPLOY_DIR (the repo's working copy
+# is what runs — symlink would let a `git pull` silently change behavior),
+# creates the backups dir, and drops a cron entry that runs at 03:00 UTC
+# nightly. Idempotent — re-running just updates the script and cron file.
+setup_backups() {
+    log "Phase 5: SQLite nightly backup"
+
+    log "Installing sqlite3 CLI (needed for online .backup)"
+    apt-get update -qq >/dev/null
+    apt-get install -y -qq sqlite3 >/dev/null
+    ok "sqlite3 $(sqlite3 --version | awk '{print $1}') installed"
+
+    local script_src="$DEPLOY_DIR/backup.sh"
+    local script_dst="$DEPLOY_DIR/backup.sh"
+    [ -f "$script_src" ] || die "backup.sh not found in $DEPLOY_DIR — run \`app\` phase first."
+
+    log "Ensuring backup.sh is executable"
+    chmod 0750 "$script_dst"
+    ok "$script_dst (mode 0750)"
+
+    log "Creating backups directory at $DEPLOY_DIR/backups"
+    install -d -m 0750 "$DEPLOY_DIR/backups"
+    ok "$DEPLOY_DIR/backups (mode 0750)"
+
+    log "Writing /etc/cron.d/pdexplorer-backup (runs nightly at 03:00 UTC)"
+    cat > /etc/cron.d/pdexplorer-backup <<EOF
+# Polkadex Explorer SQLite backup — written by provision-ubuntu.sh.
+# Runs $script_dst at 03:00 UTC every night. Output is appended to
+# /var/log/pdexplorer-backup.log; rotate via /etc/logrotate.d/pdexplorer-backup.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+0 3 * * * root $script_dst >> /var/log/pdexplorer-backup.log 2>&1
+EOF
+    # cron silently ignores files with the wrong perms — must be 644 and root-owned.
+    chown root:root /etc/cron.d/pdexplorer-backup
+    chmod 0644 /etc/cron.d/pdexplorer-backup
+    ok "/etc/cron.d/pdexplorer-backup (root:root 0644)"
+
+    log "Setting up log rotation for /var/log/pdexplorer-backup.log"
+    cat > /etc/logrotate.d/pdexplorer-backup <<'EOF'
+/var/log/pdexplorer-backup.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+}
+EOF
+    ok "/etc/logrotate.d/pdexplorer-backup"
+
+    # Touch the log file so the first cron run has somewhere to append.
+    touch /var/log/pdexplorer-backup.log
+    chmod 0640 /var/log/pdexplorer-backup.log
+
+    log "Running a one-shot backup now to verify the pipeline"
+    if [ -f "$DEPLOY_DIR/data/explorer.db" ]; then
+        if "$script_dst" >> /var/log/pdexplorer-backup.log 2>&1; then
+            ok "Initial backup succeeded — see /var/log/pdexplorer-backup.log"
+        else
+            warn "Initial backup failed — check /var/log/pdexplorer-backup.log"
+            warn "Cron is still installed and will retry tonight at 03:00 UTC."
+        fi
+    else
+        warn "explorer.db doesn't exist yet — skipping the one-shot run."
+        warn "Cron will pick up the first real backup once the indexer has written data."
+    fi
+
+    log "Phase 5 complete."
+}
+
 # ---- Final summary ---------------------------------------------------------
 summary() {
     cat <<EOF
@@ -564,6 +640,8 @@ summary() {
   Watchdog        : $(systemctl is-active watchdog 2>/dev/null || echo n/a)
   Journal storage : $(grep -oP 'Storage=\K\S+' /etc/systemd/journald.conf.d/persistent.conf 2>/dev/null || echo volatile)
   Docker          : $(docker --version 2>/dev/null || echo not-installed)
+  Backup cron     : $([ -f /etc/cron.d/pdexplorer-backup ] && echo "active (nightly 03:00 UTC)" || echo "not installed")
+  Backups dir     : $DEPLOY_DIR/backups$([ -d "$DEPLOY_DIR/backups" ] && echo " ($(find "$DEPLOY_DIR/backups" -maxdepth 1 -name 'explorer-*.db*' 2>/dev/null | wc -l) file(s))" || echo " (not created yet)")
   Domain          : $DOMAIN
   Deploy dir      : $DEPLOY_DIR
 ============================================================================
@@ -583,6 +661,11 @@ Next steps:
        docker compose -f $DEPLOY_DIR/docker-compose.yml logs -f backend
   5. Confirm certificate is valid:
        curl -sI https://$DOMAIN | head -5
+  6. Verify the nightly backup ran:
+       tail -n 50 /var/log/pdexplorer-backup.log
+       ls -lh $DEPLOY_DIR/backups/
+     Ship $DEPLOY_DIR/backups/ off-host (rclone / restic / aws s3 sync)
+     so a host failure doesn't take your only copy with it.
 
 EOF
 }
@@ -595,10 +678,11 @@ main() {
         harden)     harden_system ;;
         docker)     install_docker ;;
         app)        deploy_app ;;
+        backup)     setup_backups ;;
         cloudflare) setup_cloudflare_only ;;
-        all)        harden_system; install_docker; deploy_app ;;
-        all+cf)     harden_system; install_docker; deploy_app; setup_cloudflare_only ;;
-        *)          die "Usage: $0 [harden|docker|app|cloudflare|all|all+cf]" ;;
+        all)        harden_system; install_docker; deploy_app; setup_backups ;;
+        all+cf)     harden_system; install_docker; deploy_app; setup_backups; setup_cloudflare_only ;;
+        *)          die "Usage: $0 [harden|docker|app|backup|cloudflare|all|all+cf]" ;;
     esac
     summary
 }
