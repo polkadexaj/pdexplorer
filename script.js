@@ -1114,7 +1114,7 @@ function renderFullTransactions() {
                     key: 'timestamp', label: 'Date',
                     sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
                     format: row => {
-                        const d = row.timestamp ? new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) : '';
+                        const d = formatLocalDateTime(row.timestamp);
                         return `<span style="color: var(--text-secondary);">${stakingEscapeHtml(timeAgo(row.timestamp))}<br><small>${stakingEscapeHtml(d)}</small></span>`;
                     }
                 },
@@ -1333,7 +1333,7 @@ function renderFullBlocks() {
                     key: 'timestampDate', label: 'Date',
                     sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
                     format: row => row.timestamp
-                        ? `<span style="color: var(--text-secondary);">${stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T',' ').substring(0,19))}</span>`
+                        ? `<span style="color: var(--text-secondary);">${stakingEscapeHtml(formatLocalDateTime(row.timestamp))}</span>`
                         : ''
                 }
             ]
@@ -1477,7 +1477,7 @@ function renderFullEvents() {
                     key: 'timestamp', label: 'Date',
                     sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
                     format: row => {
-                        const d = row.timestamp ? new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' UTC' : '';
+                        const d = formatLocalDateTime(row.timestamp);
                         return `<span style="color: var(--text-secondary);">${stakingEscapeHtml(timeAgo(row.timestamp))}<br><small>${stakingEscapeHtml(d)}</small></span>`;
                     }
                 },
@@ -2532,7 +2532,7 @@ async function fetchAccountDetails(address) {
                 {
                     key: 'timestampDate', label: 'Date',
                     sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
-                    format: row => row.timestamp ? stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' (UTC)') : '—'
+                    format: row => row.timestamp ? stakingEscapeHtml(formatLocalDateTime(row.timestamp)) : '—'
                 },
                 {
                     key: 'status', label: 'Status', searchable: true,
@@ -2582,7 +2582,7 @@ async function fetchAccountDetails(address) {
                 {
                     key: 'timestampDate', label: 'Date',
                     sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
-                    format: row => row.timestamp ? stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' (UTC)') : '—'
+                    format: row => row.timestamp ? stakingEscapeHtml(formatLocalDateTime(row.timestamp)) : '—'
                 }
             ]
         });
@@ -2615,7 +2615,7 @@ async function fetchBlockDetails(id) {
             </div>
             <div style="padding: 20px;">
                 <div style="margin-bottom: 10px;"><strong>hash</strong> <span class="address-cell">${data.hash}</span></div>
-                <div style="margin-bottom: 20px;"><strong>date UTC</strong> <span style="color: var(--text-secondary);">${new Date(data.date).toISOString().replace('T', ' ').substring(0, 19)}</span></div>
+                <div style="margin-bottom: 20px;"><strong>date</strong> <span style="color: var(--text-secondary);">${stakingEscapeHtml(formatLocalDateTime(data.date))}</span></div>
                 <div class="json-container">
                     ${renderJSONTree({ block: data.block })}
                 </div>
@@ -2650,7 +2650,7 @@ async function fetchTxDetails(block, hash) {
             </div>
             <div style="padding: 20px;">
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px; text-align: left;">
-                    <tr><td style="padding: 10px; font-weight: bold; width: 150px;">Time</td><td style="padding: 10px;">${new Date(data.time).toISOString().replace('T', ' ').substring(0, 19)} (UTC)</td></tr>
+                    <tr><td style="padding: 10px; font-weight: bold; width: 150px;">Time</td><td style="padding: 10px;">${stakingEscapeHtml(formatLocalDateTime(data.time))}</td></tr>
                     <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">event</td><td style="padding: 10px;">${data.event}</td></tr>
                     <tr><td style="padding: 10px; font-weight: bold;">from</td><td style="padding: 10px;"><a href="/account/${data.from}" class="item-link address-cell">${data.from}</a></td></tr>
                     <tr style="background: rgba(255,255,255,0.02);"><td style="padding: 10px; font-weight: bold;">to</td><td style="padding: 10px;"><a href="/account/${data.to}" class="item-link address-cell">${data.to}</a></td></tr>
@@ -2757,7 +2757,7 @@ async function fetchValidatorDetails(address) {
                                             <td style="padding: 5px;">${t.era}</td>
                                             <td style="padding: 5px;">${t.prevCommission.toFixed(2)}%</td>
                                             <td style="padding: 5px; color: #ff6b6b; font-weight: bold;">${t.newCommission.toFixed(2)}%</td>
-                                            <td style="padding: 5px;">${new Date(t.timestamp).toISOString().replace('T', ' ').substring(0, 19)}</td>
+                                            <td style="padding: 5px;">${stakingEscapeHtml(formatLocalDateTime(t.timestamp))}</td>
                                         </tr>
                                     `).join('')}
                                 </tbody>
@@ -2942,6 +2942,44 @@ function stakingEscapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[c]));
+}
+
+// ─── Local-timezone date helpers ────────────────────────────────────────────
+// All chain timestamps land on the frontend as JS numbers (ms since epoch) in
+// UTC. The historical convention in this codebase was to render them as
+// "2026-06-09 14:30:45 UTC" via toISOString, which is unambiguous but forces
+// every user to do timezone math in their head. These helpers render the
+// SAME instant in the browser's local timezone with the IANA short name
+// appended ("2026-06-09 07:30:45 PDT") so the value is both readable AND
+// unambiguous. Use formatLocalDateTime for any user-facing display and
+// formatLocalDate for date-only contexts (e.g. chart axis labels, wallet
+// recent-rewards rows). CSV / JSON exports and SEO meta strings deliberately
+// stay in UTC — they're machine-readable, not user display.
+function formatLocalDateTime(ts) {
+    if (ts == null || ts === '') return '';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = n => String(n).padStart(2, '0');
+    const datePart = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const timePart = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    // Append the timezone abbreviation so two users in different zones can
+    // still talk about the same row without ambiguity. Wrapped in try/catch
+    // because Intl.DateTimeFormat with timeZoneName is unavailable on a few
+    // very old browsers — in that case we just drop the suffix.
+    let tz = '';
+    try {
+        const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(d);
+        const tzPart = parts.find(p => p.type === 'timeZoneName');
+        if (tzPart && tzPart.value) tz = ' ' + tzPart.value;
+    } catch (_) { /* fallback: omit tz */ }
+    return `${datePart} ${timePart}${tz}`;
+}
+function formatLocalDate(ts) {
+    if (ts == null || ts === '') return '';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 function stakingShortAddress(addr) {
     if (!addr || addr.length < 18) return addr || '';
@@ -3183,9 +3221,9 @@ function renderStakingRewards(data) {
                 format: row => row.era != null ? String(row.era) : '<span style="color:var(--text-muted);">—</span>'
             },
             {
-                key: 'timestamp', label: 'Date (UTC)',
+                key: 'timestamp', label: 'Date',
                 sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
-                format: row => row.timestamp ? `<span style="white-space:nowrap;">${stakingEscapeHtml(new Date(row.timestamp).toISOString().replace('T', ' ').substring(0, 19))}</span>` : '<span style="color:var(--text-muted);">—</span>'
+                format: row => row.timestamp ? `<span style="white-space:nowrap;">${stakingEscapeHtml(formatLocalDateTime(row.timestamp))}</span>` : '<span style="color:var(--text-muted);">—</span>'
             },
             {
                 key: 'amount', label: 'Amount',
@@ -3915,7 +3953,7 @@ function renderWalletDashboard(data, price) {
             {
                 key: 'timestamp', label: 'Date',
                 sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
-                format: row => `<span style="white-space:nowrap;">${row.timestamp ? new Date(row.timestamp).toLocaleDateString('en-US') : '—'}</span>`
+                format: row => `<span style="white-space:nowrap;">${row.timestamp ? stakingEscapeHtml(formatLocalDate(row.timestamp)) : '—'}</span>`
             }
         ]
     });
@@ -3946,7 +3984,7 @@ function renderWalletDashboard(data, price) {
             {
                 key: 'timestamp', label: 'Date',
                 sort: (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
-                format: row => `<span style="white-space:nowrap;">${row.timestamp ? new Date(row.timestamp).toLocaleDateString('en-US') : '—'}</span>`
+                format: row => `<span style="white-space:nowrap;">${row.timestamp ? stakingEscapeHtml(formatLocalDate(row.timestamp)) : '—'}</span>`
             }
         ]
     });
@@ -4980,7 +5018,7 @@ function renderThread(thread, posts) {
             <div class="discussion-post">
                 <div class="discussion-post-head">
                     <a href="/account/${encodeURIComponent(p.author)}" class="item-link" style="color:var(--brand-secondary);font-weight:600;">${stakingEscapeHtml(p.authorName && p.authorName !== 'Unknown' ? p.authorName : stakingShortAddress(p.author))}</a>
-                    <span style="color:var(--text-muted);font-size:0.75rem;">${new Date(p.createdAt).toLocaleString('en-US')}</span>
+                    <span style="color:var(--text-muted);font-size:0.75rem;">${stakingEscapeHtml(formatLocalDateTime(p.createdAt))}</span>
                 </div>
                 <div class="discussion-post-body">${stakingEscapeHtml(p.content).replace(/\n/g, '<br>')}</div>
             </div>`).join('')
@@ -6333,8 +6371,8 @@ let governanceDetailReturnState = null;
 
 function formatGovTime(ts) {
     if (!ts) return '<span style="color:var(--text-muted);">—</span>';
-    try { return stakingEscapeHtml(new Date(ts).toISOString().replace('T', ' ').substring(0, 19) + ' UTC'); }
-    catch (e) { return '<span style="color:var(--text-muted);">—</span>'; }
+    const formatted = formatLocalDateTime(ts);
+    return formatted ? stakingEscapeHtml(formatted) : '<span style="color:var(--text-muted);">—</span>';
 }
 function formatGovBlockLink(blockNumber) {
     if (blockNumber == null) return '<span style="color:var(--text-muted);">—</span>';
