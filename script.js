@@ -1852,6 +1852,57 @@ async function parseJsonResponse(response) {
     throw new Error(`${response.status} ${response.statusText || hint} (${hint})${bodyPreview ? ' — ' + bodyPreview : ''}`);
 }
 
+// Centralised /api error rendering — recognises the RPC_NOT_READY transient
+// state (HTTP 503 emitted by server.js `requireRpc()`) and shows a friendly
+// "still connecting" panel with a Retry button instead of dumping the raw
+// "Error: Cannot read properties of null (reading 'rpc')" TypeError that used
+// to surface when the user clicked a block / tx / account during the brief
+// window after backend boot where the WsProvider hadn't completed its
+// handshake. Falls back to the original red error line for any other failure.
+//
+//   container — element to write the panel into
+//   err       — Error object; should carry .status (HTTP code) and .code
+//               ('RPC_NOT_READY' for the friendly path) when present
+//   retryFn   — optional function called when the user clicks Retry
+function renderApiError(container, err, retryFn) {
+    if (!container) return;
+    const transient = (err && (err.code === 'RPC_NOT_READY' || err.status === 503));
+    const message = (err && err.message) || 'Unknown error';
+    if (transient) {
+        container.innerHTML = `
+            <div style="padding:48px 24px;text-align:center;color:var(--text-secondary);">
+                <i class='bx bx-loader-alt bx-spin' style="font-size:42px;color:var(--brand-primary);"></i>
+                <h3 style="margin:14px 0 8px 0;color:var(--text-primary);">Connecting to the Polkadex node…</h3>
+                <p style="max-width:520px;margin:0 auto 18px auto;font-size:0.9rem;line-height:1.5;">
+                    ${stakingEscapeHtml(message)}
+                </p>
+                <button type="button" class="staking-download-btn" data-api-error-retry>
+                    <i class='bx bx-refresh'></i> Retry
+                </button>
+            </div>`;
+        const btn = container.querySelector('[data-api-error-retry]');
+        if (btn && typeof retryFn === 'function') btn.addEventListener('click', retryFn);
+    } else {
+        container.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${stakingEscapeHtml(message)}</div>`;
+    }
+}
+
+// Helper that wraps fetch() so the catch block in a caller can act on the
+// HTTP status AND on the server-emitted error.code (e.g. 'RPC_NOT_READY')
+// uniformly. On a non-2xx the returned Error carries both, ready to feed
+// straight into renderApiError().
+async function fetchApiJson(url, options) {
+    const res = await fetch(url, options);
+    const data = await parseJsonResponse(res);
+    if (!res.ok || (data && data.error)) {
+        const err = new Error((data && data.error) || `HTTP ${res.status}`);
+        err.status = res.status;
+        if (data && data.code) err.code = data.code;
+        throw err;
+    }
+    return data;
+}
+
 async function deepSearchNetwork(query) {
     // Guard: an empty query usually means the page was refreshed and
     // `currentSearchQuery` was reset. Calling /api/search/ with no path param
@@ -2375,9 +2426,7 @@ async function fetchAccountDetails(address) {
         canonicalPath: `/account/${address}`
     });
     try {
-        const res = await fetch(`/api/account/${address}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const data = await fetchApiJson(`/api/account/${address}`);
         const label = (data.display && data.display !== 'Unknown') ? data.display : shortAddr;
         updateSeoMeta('account-details', {
             title: `Account ${label} — Polkadex Explorer`,
@@ -2538,7 +2587,7 @@ async function fetchAccountDetails(address) {
             ]
         });
     } catch (e) {
-        accountDetailsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${e.message}</div>`;
+        renderApiError(accountDetailsContainer, e, () => fetchAccountDetails(address));
     }
 }
 
@@ -2551,9 +2600,7 @@ async function fetchBlockDetails(id) {
         canonicalPath: `/block/${id}`
     });
     try {
-        const res = await fetch(`/api/block/${id}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const data = await fetchApiJson(`/api/block/${id}`);
         const blockNum = data.block && data.block.header && data.block.header.number;
         updateSeoMeta('block-details', {
             title: `Block #${blockNum || id} — Polkadex Explorer`,
@@ -2576,7 +2623,7 @@ async function fetchBlockDetails(id) {
         `;
         blockDetailsContainer.innerHTML = html;
     } catch (e) {
-        blockDetailsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${e.message}</div>`;
+        renderApiError(blockDetailsContainer, e, () => fetchBlockDetails(id));
     }
 }
 
@@ -2589,9 +2636,7 @@ async function fetchTxDetails(block, hash) {
         canonicalPath: `/tx/${block}/${hash}`
     });
     try {
-        const res = await fetch(`/api/extrinsic/${block}/${hash}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const data = await fetchApiJson(`/api/extrinsic/${block}/${hash}`);
         updateSeoMeta('tx-details', {
             title: `Transaction ${shortHash}… (${data.event || 'extrinsic'}) — Polkadex Explorer`,
             description: `Polkadex Mainnet transaction ${data.hash || hash} in block #${block}: ${data.event || 'extrinsic'} from ${data.from || 'unknown'} to ${data.to || 'unknown'}, status: ${data.status || 'unknown'}.`,
@@ -2619,7 +2664,7 @@ async function fetchTxDetails(block, hash) {
         `;
         txDetailsContainer.innerHTML = html;
     } catch (e) {
-        txDetailsContainer.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${e.message}</div>`;
+        renderApiError(txDetailsContainer, e, () => fetchTxDetails(block, hash));
     }
 }
 
@@ -2673,9 +2718,7 @@ async function fetchValidatorDetails(address) {
     });
 
     try {
-        const res = await fetch(`/api/validator/${address}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const data = await fetchApiJson(`/api/validator/${address}`);
 
         const validatorLabel = (data.identity && data.identity !== 'Unknown') ? data.identity : shortAddr;
         updateSeoMeta('validator-details', {
@@ -2881,7 +2924,7 @@ async function fetchValidatorDetails(address) {
         }
 
     } catch (e) {
-        container.innerHTML = `<div style="text-align:center; padding: 20px; color: var(--error);">Error: ${e.message}</div>`;
+        renderApiError(container, e, () => fetchValidatorDetails(address));
     }
 }
 

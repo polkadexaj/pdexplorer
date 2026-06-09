@@ -154,6 +154,36 @@ function isRpcReady() {
     return rpcConnected && !!globalApi && globalApi.isConnected;
 }
 
+// Request-handler guard: bail out of any endpoint that needs live RPC access
+// when the WsProvider hasn't completed its handshake yet. Without this, code
+// like `globalApi.rpc.chain.getBlockHash(...)` blows up with the unhelpful
+// "Cannot read properties of null (reading 'rpc')" TypeError, which then
+// surfaces verbatim in the UI. A 503 with Retry-After tells both humans and
+// caches that this is a transient state worth retrying — Cloudflare honors
+// the header and browsers display the friendly message instead of stack-y
+// noise.
+//
+//   Usage:
+//     app.get('/api/block/:id', async (req, res) => {
+//         if (!requireRpc(res)) return;
+//         ...uses globalApi safely...
+//     });
+//
+// Returns true (and does nothing to `res`) when RPC is healthy; returns
+// false and writes a 503 JSON body when not. Callers MUST `return` on false
+// so the rest of the handler doesn't run.
+function requireRpc(res) {
+    if (!globalApi || !globalApi.isConnected) {
+        res.set('Retry-After', '5');
+        res.status(503).json({
+            error: 'Live blockchain data is not available right now — the explorer is still connecting to the Polkadex node. Please refresh in a few seconds.',
+            code: 'RPC_NOT_READY'
+        });
+        return false;
+    }
+    return true;
+}
+
 let isSyncing = false;
 let isSyncingHolders = false;
 let isSyncingTx = false;
@@ -939,7 +969,7 @@ app.get('/api/transactions', (req, res) => {
     } catch (err) { res.status(500).json({ transactions: [], status: 'Error', error: err.message }); }
 });
 app.get('/api/transactions/older', async (req, res) => {
-    if (!globalApi) return res.status(500).json({ error: 'API not ready' });
+    if (!requireRpc(res)) return;
     const limit = Math.min(parseInt(req.query.limit || '100', 10) || 100, 100);
     const maxBlocks = Math.min(readPositiveInteger(req.query.maxBlocks, TX_OLDER_SCAN_BLOCKS), 100000);
     try {
@@ -979,6 +1009,10 @@ app.get('/api/events', (req, res) => {
 
 // --- DETAIL ENDPOINTS (Restored) ---
 app.get('/api/block/:id', async (req, res) => {
+    // Block detail reads finalized chain state, so it MUST have a live RPC
+    // connection. Without this guard the next line would dereference null and
+    // throw "Cannot read properties of null (reading 'rpc')" into the UI.
+    if (!requireRpc(res)) return;
     try {
         const id = req.params.id.trim();
         let hash = id;
@@ -997,6 +1031,7 @@ app.get('/api/block/:id', async (req, res) => {
 });
 
 app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
+    if (!requireRpc(res)) return;
     try {
         const blockId = req.params.block.trim();
         const txHash = req.params.txHash.trim();
@@ -1037,15 +1072,14 @@ app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
 });
 
 app.get('/api/validator/:address', async (req, res) => {
+    if (!requireRpc(res)) return;
     try {
         const address = req.params.address.trim();
 
         let identity = await getIdentity(globalApi, address);
         let controller = address;
-        if (globalApi) {
-            const bondedOpt = await globalApi.query.staking.bonded(address);
-            if (bondedOpt && bondedOpt.isSome) controller = bondedOpt.unwrap().toString();
-        }
+        const bondedOpt = await globalApi.query.staking.bonded(address);
+        if (bondedOpt && bondedOpt.isSome) controller = bondedOpt.unwrap().toString();
 
         let history = db.getValidatorHistory(address);
         let triggers = db.getValidatorTriggers(address);
@@ -1067,7 +1101,7 @@ app.get('/api/search/:query', async (req, res) => {
     // calls below can each stall for tens of seconds while the WsProvider is
     // reconnecting, leaving nginx to time out at its proxy_read_timeout and
     // return an HTML 504 page (which then breaks the frontend's JSON parser).
-    if (!isRpcReady()) return res.status(503).json({ error: 'Chain RPC is reconnecting — please retry in a few seconds.' });
+    if (!requireRpc(res)) return;
     try {
         if (/^\d+$/.test(q)) {
             const hash = await globalApi.rpc.chain.getBlockHash(parseInt(q));
@@ -1095,7 +1129,7 @@ app.get('/api/search/:query', async (req, res) => {
 
 app.get('/api/account/:address', async (req, res) => {
     const address = req.params.address.trim();
-    if (!globalApi) return res.status(500).json({ error: 'API not ready' });
+    if (!requireRpc(res)) return;
     try {
         const accountInfo = await globalApi.query.system.account(address);
         const name = await getIdentity(globalApi, address);
@@ -1418,7 +1452,7 @@ function reconcileMotionThreads(motions) {
 app.get('/api/wallet/:address', async (req, res) => {
     const raw = (req.params.address || '').trim();
     if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex wallet address.' });
-    if (!globalApi) return res.status(503).json({ error: 'API not ready' });
+    if (!requireRpc(res)) return;
     let address;
     try { address = normalizeAddress(raw); }
     catch (e) { return res.status(400).json({ error: 'Invalid Polkadex wallet address.' }); }
