@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import cluster from 'node:cluster';
+import { cpus } from 'node:os';
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import { decodeAddress, encodeAddress, signatureVerify, randomAsHex } from '@polkadot/util-crypto';
 import { u8aWrapBytes, stringToU8a, u8aConcat } from '@polkadot/util';
@@ -847,6 +849,24 @@ function buildSitemapXml() {
            '</urlset>\n';
 }
 
+// --- Cache-Control helpers ---
+// Three tiers, applied to the success path of read-only list endpoints so a
+// CDN (Cloudflare in our deployment) can absorb the bulk of read traffic and
+// the origin only sees ~one request per endpoint per s-maxage window.
+//
+// max-age         = browser cache (per user)
+// s-maxage        = shared-proxy cache (Cloudflare)
+// stale-while-revalidate = serve a stale copy instantly while the proxy
+//                          refreshes asynchronously, so a user never blocks
+//                          on a cache miss caused by an expiry.
+//
+// IMPORTANT: do NOT call these on error responses — Cloudflare obeys explicit
+// caching headers on 5xx and would happily pin a transient error in its edge.
+// We only set Cache-Control on the success path (before res.json with 200).
+function cacheShort(res)  { res.set('Cache-Control', 'public, max-age=5, s-maxage=10, stale-while-revalidate=30'); }   // 10s-fresh-at-CDN — for endpoints fed by the 12s chain indexer
+function cacheMedium(res) { res.set('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=120'); } // 1min-fresh-at-CDN — for endpoints fed by 5–30 min indexers
+function cacheLong(res)   { res.set('Cache-Control', 'public, max-age=300, s-maxage=600, stale-while-revalidate=3600'); } // 10min-fresh-at-CDN — governance, price history, slow-moving lists
+
 app.get('/sitemap.xml', (req, res) => {
     const now = Date.now();
     if (!sitemapCache.xml || (now - sitemapCache.at) > SITEMAP_CACHE_TTL_MS) {
@@ -881,13 +901,17 @@ app.get('/robots.txt', (req, res) => {
 
 // --- LIST ENDPOINTS (served from SQLite) ---
 app.get('/api/validators', (req, res) => {
-    try { res.json(db.getValidators()); }
+    try { cacheMedium(res); res.json(db.getValidators()); }
     catch (err) { res.status(500).json({ validators: [], status: 'Error', error: err.message }); }
 });
 app.get('/api/network-info', async (req, res) => {
     try {
-        res.json(await getNetworkInfo());
+        const data = await getNetworkInfo();
+        cacheMedium(res);
+        res.json(data);
     } catch (err) {
+        // Note: no cache header on the error fallback — Cloudflare must not
+        // pin "Error" status. Browsers retry naturally on the next interval.
         const cacheData = db.getKv('network_info') || { networkInfo: null, lastSync: 0, status: 'Initializing' };
         res.json({ ...cacheData, status: 'Error', error: err.message });
     }
@@ -896,12 +920,14 @@ app.get('/api/holders', async (req, res) => {
     try {
         const cacheData = db.getHolders();
         cacheData.holders = await applyDisplayNameOverridesToHolders(cacheData.holders);
+        cacheMedium(res);
         res.json(cacheData);
     } catch (err) { res.status(500).json({ holders: [], status: 'Error', error: err.message }); }
 });
 app.get('/api/transactions', (req, res) => {
     try {
         const state = db.getSyncState('transactions');
+        cacheShort(res);
         res.json({
             transactions: db.getRecentTransactions(1000),
             totalCount: db.countTransactions(),
@@ -939,12 +965,14 @@ app.get('/api/transactions/older', async (req, res) => {
 app.get('/api/blocks', (req, res) => {
     try {
         const state = db.getSyncState('blocks');
+        cacheShort(res);
         res.json({ blocks: db.getRecentBlocks(200), lastSync: state.lastSync || 0, status: state.status || 'Initializing' });
     } catch (err) { res.status(500).json({ blocks: [], status: 'Error', error: err.message }); }
 });
 app.get('/api/events', (req, res) => {
     try {
         const state = db.getSyncState('events');
+        cacheShort(res);
         res.json({ events: db.getRecentEvents(500), lastSync: state.lastSync || 0, status: state.status || 'Initializing' });
     } catch (err) { res.status(500).json({ events: [], status: 'Error', error: err.message }); }
 });
@@ -1090,6 +1118,7 @@ app.get('/api/account/:address', async (req, res) => {
 app.get('/api/staking-rewards-status', (req, res) => {
     try {
         const s = db.getSyncState('staking_rewards');
+        cacheMedium(res);
         res.json({
             latestScannedBlock: s.latestScannedBlock || 0,
             oldestScannedBlock: s.oldestScannedBlock || 0,
@@ -1173,6 +1202,7 @@ app.get('/api/staking-rewards/:address', async (req, res) => {
 app.get('/api/price-latest', (req, res) => {
     try {
         const state = db.getSyncState('price');
+        cacheMedium(res);
         res.json({ price: db.getLatestPrice(), lastSync: state.lastSync || 0, status: state.status || 'Initializing', configured: !!CMC_API_KEY });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1180,6 +1210,7 @@ app.get('/api/price-history', (req, res) => {
     try {
         const days = Math.min(Math.max(parseInt(req.query.days || '30', 10) || 30, 1), 365);
         const since = Date.now() - days * 24 * 60 * 60 * 1000;
+        cacheLong(res);
         res.json({ history: db.getPriceHistory(since), latest: db.getLatestPrice(), configured: !!CMC_API_KEY });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1202,6 +1233,7 @@ app.get('/api/council', (req, res) => {
         const data = db.getKv('council') || { members: [], runnersUp: [], candidates: [], motions: [], blocksRemaining: 0, termDuration: 0, desiredMembers: 0, desiredRunnersUp: 0, collectivePallet: null };
         data.motionHistory = db.getCouncilMotions();
         data.history = governanceHistoryMeta();
+        cacheLong(res);
         res.json(data);
     } catch (err) {
         console.error('API Error /api/council:', err);
@@ -1222,6 +1254,7 @@ app.get('/api/treasury', (req, res) => {
         };
         data.allProposals = db.getTreasuryProposals();
         data.history = governanceHistoryMeta();
+        cacheLong(res);
         res.json(data);
     } catch (err) {
         console.error('API Error /api/treasury:', err);
@@ -1233,6 +1266,7 @@ app.get('/api/democracy', (req, res) => {
     try {
         const meta = db.getKv('democracy_meta') || {};
         const state = db.getSyncState('democracy');
+        cacheLong(res);
         res.json({
             referendumCount: meta.referendumCount || 0,
             publicPropCount: meta.publicPropCount || 0,
@@ -1317,6 +1351,7 @@ app.post('/api/auth/logout', (req, res) => {
 app.get('/api/discussions', (req, res) => {
     try {
         const kind = (req.query.kind === 'proposal' || req.query.kind === 'motion') ? req.query.kind : null;
+        cacheMedium(res);
         res.json({ threads: db.getThreads(kind) });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2853,7 +2888,11 @@ async function connectRpc() {
     refreshTotalUnlockingInBackground();
 }
 
-async function start() {
+// ---- Per-worker init -------------------------------------------------------
+// Every worker (or the single process in non-clustered mode) opens its own
+// SQLite handle and binds an HTTP listener on PORT. node:cluster shares the
+// listening socket across workers, round-robin-balancing connections.
+function runWorker({ indexer }) {
     // DB init can throw (corrupt SQLite / unwritable bind mount after an
     // unclean reboot). Catch it so the process doesn't exit-loop under
     // `restart: unless-stopped`; the operator can then exec in and inspect.
@@ -2867,9 +2906,20 @@ async function start() {
     // SQLite data, and so nginx's /api proxy gets 200s instead of 502s) even
     // while the chain RPC is still connecting in the background.
     app.listen(PORT, () => {
-        console.log(`Backend indexer listening on port ${PORT}`);
+        const tag = indexer ? 'http+indexer' : 'http-only';
+        const wid = cluster.worker ? `worker ${cluster.worker.id}` : 'standalone';
+        console.log(`Backend listening on port ${PORT} (${wid}, role=${tag})`);
     });
 
+    if (indexer) startIndexerLoops();
+}
+
+// ---- Indexer loops ---------------------------------------------------------
+// Runs in exactly ONE process: either the cluster primary's designated indexer
+// worker, or the standalone process when WORKERS=1. Multiple writers against
+// the same SQLite file would serialize via WAL but waste RPC bandwidth and
+// produce duplicate work, so we enforce the singleton at the cluster level.
+function startIndexerLoops() {
     // Non-blocking: connect to the chain in the background.
     connectRpc().catch(err => console.error('[RPC] connect bootstrap error:', err && err.message ? err.message : err));
 
@@ -2929,4 +2979,74 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err && err.stack ? err.stack : err);
 });
 
-start();
+// ---- Bootstrap: cluster primary vs worker ---------------------------------
+// Topology:
+//   Primary (this file, run as the container's entrypoint) forks N workers.
+//     - Worker 1 runs HTTP + indexer (INDEXER_ROLE=on).
+//     - Workers 2..N run HTTP only.
+//   Cluster automatically round-robins inbound connections across workers,
+//   so all four cores get used for request serving. SQLite with WAL mode
+//   tolerates multi-process readers natively, and the single-writer
+//   invariant is preserved because only the indexer worker mutates the DB.
+//
+//   Crash recovery: if any worker dies, the primary forks a replacement. If
+//   the *indexer* worker was the one that died, the replacement inherits
+//   the role so indexing resumes within a couple of seconds.
+//
+//   WORKERS env:
+//     WORKERS=1   → no clustering, single process (legacy behavior, useful
+//                   for local dev and `node --check`-style smoke tests).
+//     WORKERS=N   → fork N workers (default = cpu count, clamped to ≤8).
+//     WORKERS=0   → equivalent to WORKERS=1.
+const WORKERS = (() => {
+    const raw = process.env.WORKERS;
+    if (raw === '1' || raw === '0') return 1;
+    const n = parseInt(raw || '', 10);
+    if (Number.isFinite(n) && n > 0) return Math.min(n, 16);
+    // Default: one worker per CPU, capped at 8 so we don't blow up on
+    // big-iron hosts (the indexer + RPC connection scale with neither cores
+    // nor workers, so >8 is overkill for the explorer's read load).
+    return Math.min(cpus().length, 8);
+})();
+
+function bootstrapCluster() {
+    if (WORKERS <= 1) {
+        // Single-process mode: behaves exactly like the pre-cluster code.
+        runWorker({ indexer: true });
+        return;
+    }
+
+    if (cluster.isPrimary) {
+        console.log(`[cluster] primary ${process.pid} forking ${WORKERS} worker(s); indexer pinned to worker 1`);
+
+        // Worker.id → boolean: which forked worker holds the indexer role.
+        // Tracked here so a crash + refork can transfer the role intact.
+        const indexerWorkerIds = new Set();
+
+        function forkOne(role) {
+            const env = { ...process.env, INDEXER_ROLE: role === 'indexer' ? 'on' : 'off' };
+            const w = cluster.fork(env);
+            if (role === 'indexer') indexerWorkerIds.add(w.id);
+            return w;
+        }
+
+        forkOne('indexer');
+        for (let i = 1; i < WORKERS; i++) forkOne('http');
+
+        cluster.on('exit', (worker, code, signal) => {
+            const wasIndexer = indexerWorkerIds.has(worker.id);
+            indexerWorkerIds.delete(worker.id);
+            console.warn(`[cluster] worker ${worker.id} (pid ${worker.process.pid}) exited` +
+                ` (code=${code}, signal=${signal || 'none'}, was-indexer=${wasIndexer}) — restarting`);
+            // Preserve the single-indexer invariant: if the indexer worker
+            // died, the replacement takes over that role; otherwise we just
+            // fork a new HTTP-only worker.
+            forkOne(wasIndexer ? 'indexer' : 'http');
+        });
+    } else {
+        // Inside a worker — INDEXER_ROLE was set by the primary above.
+        runWorker({ indexer: process.env.INDEXER_ROLE === 'on' });
+    }
+}
+
+bootstrapCluster();

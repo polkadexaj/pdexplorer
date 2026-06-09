@@ -447,6 +447,46 @@ docker compose ps
 
 If `/api/network-info` returns 502, the backend isn't listening on 3001 — check `docker compose logs backend`. If it returns 200 but with empty/stale data, the RPC connection is down — check `[RPC]` lines.
 
+### Scaling — cluster mode + Cache-Control
+
+The backend uses Node's built-in `cluster` module to spread HTTP traffic across all CPU cores while keeping the chain indexer as a single writer. With Cloudflare in front, the combination raises practical sustained throughput from ~150 req/s (single-process) to several thousand req/s of user-perceived load.
+
+**Topology.** The container's entrypoint runs as the cluster *primary*. It forks N workers (default = CPU count, capped at 8). Exactly one worker is started with `INDEXER_ROLE=on` — that worker handles HTTP *and* runs all the chain sync loops (`syncChainIndex`, `syncStakingRewards`, `syncCouncil`, etc.). The other workers serve HTTP only. Inbound connections are load-balanced across all workers by the OS, so all cores actively serve requests. SQLite's WAL mode handles multi-process readers natively; the single-writer invariant is preserved because only the indexer worker mutates the database.
+
+**Crash recovery.** If any worker exits, the primary forks a replacement. If the *indexer* worker died, the replacement inherits the indexer role automatically so chain indexing resumes within a couple of seconds. Crashes are logged with `[cluster]` prefix to make this visible: `[cluster] worker N (pid …) exited (code=…, signal=…, was-indexer=true) — restarting`.
+
+**Tuning.** Set the `WORKERS` env var to override the default:
+
+| `WORKERS` value | Effect |
+| --- | --- |
+| unset | `min(cpus().length, 8)` — sensible default |
+| `1` | No clustering, single process (legacy behavior, useful for local dev) |
+| `N` | Fork exactly N workers, clamped to ≤16 |
+
+For a 4-core VPS, the default forks 4 workers and uses all four cores. For an 8-core box, 8. For local development on a laptop, set `WORKERS=1` to disable clustering and get cleaner logs.
+
+**Cache-Control tiers.** Read-only `/api` endpoints set `Cache-Control` headers so Cloudflare absorbs the bulk of read traffic — the origin only sees about one request per endpoint per `s-maxage` window regardless of how many users are hitting the site. The three tiers map onto how fast the underlying data changes:
+
+| Tier | Headers | Endpoints |
+| --- | --- | --- |
+| `cacheShort` | `max-age=5, s-maxage=10, stale-while-revalidate=30` | `/api/blocks`, `/api/events`, `/api/transactions` |
+| `cacheMedium` | `max-age=30, s-maxage=60, stale-while-revalidate=120` | `/api/network-info`, `/api/validators`, `/api/holders`, `/api/price-latest`, `/api/discussions`, `/api/staking-rewards-status` |
+| `cacheLong` | `max-age=300, s-maxage=600, stale-while-revalidate=3600` | `/api/council`, `/api/treasury`, `/api/democracy`, `/api/price-history` |
+
+The `stale-while-revalidate` clause means users never block on a cache refresh — Cloudflare serves the stale copy instantly and asynchronously fetches a fresh one. Caches are only set on 200-success responses; errors are never cached so a transient 5xx can't get pinned at the edge.
+
+**Per-user endpoints are NOT cached.** `/api/account/:address`, `/api/staking-rewards/:address`, `/api/block/:id`, `/api/search/:query`, and everything under `/api/auth/*` and `/api/discussions/*/posts` deliberately have no cache headers. They're either per-user, mutation-bearing, or have a URL space large enough that CDN caching wouldn't help.
+
+**Configuring Cloudflare to honor the headers.** Default Cloudflare settings already respect `s-maxage`. If you've enabled "Cache Everything" page rules, make sure they don't override the headers; the per-endpoint headers above are stricter than Cloudflare's auto-cache defaults for HTML and will give you better behavior. Confirm with `curl -sI https://explorer.polkadex.ee/api/network-info` — look for `cf-cache-status: HIT` on the second request.
+
+**Throughput estimates** for a 4-core 16 GB VPS with the cluster + cache combo:
+
+- Origin sustained: ~400–600 req/s mixed traffic (vs ~150 req/s pre-cluster).
+- User-perceived (origin + Cloudflare hits): ~3,000–5,000 req/s for cacheable endpoints.
+- Concurrent active users: easily 5,000+ before noticeable degradation.
+
+The next bottleneck after this is the indexer worker's event loop during heavy backfill windows; if you push further, run the indexer as a separate sidecar container so HTTP workers never see its CPU.
+
 ### Backups
 
 The provision script installs a nightly SQLite backup pipeline as the `backup` phase, which runs as part of the default `all` flow. Once provisioned, no further setup is needed.
