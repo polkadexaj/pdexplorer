@@ -2034,6 +2034,39 @@ h1, h2, h3 { font-weight: 600; }
     color: var(--brand-primary);
     margin-right: 8px;
 }
+
+/* Clickable proposal-id link rendered inside governance tables (treasury,
+   democracy, council). Visually a brand-coloured link, but it's a <button>
+   under the hood so the screen-reader experience reads as an actionable
+   control, not a navigation. The click is captured by a global delegate in
+   wireGovernanceDetailModal which opens the detail overlay. */
+.gov-proposal-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--brand-secondary);
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    transition: color var(--transition-fast);
+}
+.gov-proposal-link:hover { color: var(--brand-primary); text-decoration: underline; }
+.gov-proposal-link:focus-visible {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 2px;
+    border-radius: 3px;
+}
+/* When .gov-proposal-link is ALSO .motion-index (the open-motion card), keep
+   the bigger/bolder appearance of the index but reset the button defaults so
+   it doesn't look like a misaligned form control. */
+.gov-proposal-link.motion-index {
+    color: var(--brand-primary);
+    font-weight: 700;
+    font-size: 0.82rem;
+    margin-right: 8px;
+}
 .motion-title {
     font-size: 0.95rem;
     font-weight: 600;

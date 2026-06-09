@@ -5295,7 +5295,9 @@ function mountDemocracyReferendaTable(refs) {
             {
                 key: 'refIndex', label: 'Referendum', searchable: true,
                 sort: (a, b) => (a.refIndex || 0) - (b.refIndex || 0),
-                format: row => `#${row.refIndex}`
+                // Clickable — opens the governance-detail modal with the
+                // referendum's proposal hash + tally + end block.
+                format: row => `<button type="button" class="gov-proposal-link" data-kind="referendum" data-id="${stakingEscapeHtml(String(row.refIndex))}">#${stakingEscapeHtml(String(row.refIndex))}</button>`
             },
             {
                 key: 'status', label: 'Status',
@@ -5365,7 +5367,9 @@ function mountDemocracyProposalsTable(props) {
             {
                 key: 'index', label: 'Proposal', searchable: true,
                 sort: (a, b) => (a.index || 0) - (b.index || 0),
-                format: row => `#${row.index}`
+                // Clickable — opens the governance-detail modal with the
+                // pre-referendum proposal's hash + deposit + seconds count.
+                format: row => `<button type="button" class="gov-proposal-link" data-kind="public-proposal" data-id="${stakingEscapeHtml(String(row.index))}">#${stakingEscapeHtml(String(row.index))}</button>`
             },
             {
                 key: 'proposerName', label: 'Proposer', searchable: true,
@@ -5710,7 +5714,9 @@ function renderCouncilMotions(data) {
         return `<div class="motion-card">
             <div class="motion-card-head">
                 <div>
-                    <span class="motion-index">${idxLabel}</span>
+                    ${m.hash
+                        ? `<button type="button" class="gov-proposal-link motion-index" data-kind="motion" data-id="${stakingEscapeHtml(m.hash)}" title="View motion details">${stakingEscapeHtml(idxLabel)}</button>`
+                        : `<span class="motion-index">${stakingEscapeHtml(idxLabel)}</span>`}
                     <span class="motion-title">${stakingEscapeHtml(m.title || 'Council Motion')}</span>
                 </div>
                 <span class="reward-badge ${st.badge}">${st.label}</span>
@@ -5758,7 +5764,14 @@ function renderResolvedMotions(data) {
     const resolved = history.filter(m => m.status && m.status !== 'proposed');
     if (!resolved.length) return '';
     const rows = resolved.map(m => {
-        const idx = (m.motionIndex === null || m.motionIndex === undefined) ? '—' : ('#' + m.motionIndex);
+        // The motion # is keyed by the hash (not motionIndex), because that's
+        // what the global click delegate uses to look up the row from
+        // councilData.motionHistory — motionIndex can be null on older
+        // motions, but hash is always present.
+        const idxLabel = (m.motionIndex === null || m.motionIndex === undefined) ? '—' : ('#' + m.motionIndex);
+        const idx = m.hash
+            ? `<button type="button" class="gov-proposal-link" data-kind="motion" data-id="${stakingEscapeHtml(m.hash)}">${stakingEscapeHtml(idxLabel)}</button>`
+            : idxLabel;
         const call = (m.section && m.method) ? `${m.section}.${m.method}` : 'Council Motion';
         const proposer = m.proposer
             ? `<a href="/account/${encodeURIComponent(m.proposer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(treasuryPartyName(m.proposerName, m.proposer))}</a>`
@@ -6166,7 +6179,10 @@ function buildTreasuryColumns(showStatus) {
         {
             key: 'id', label: 'Proposal', searchable: true,
             sort: (a, b) => (a.id || 0) - (b.id || 0),
-            format: row => `#${row.id}`
+            // Clickable — opens the governance-detail modal. The global delegate
+            // in wireGovernanceDetailModal looks the row up by id from
+            // treasuryData and snapshots the active tab for restore-on-close.
+            format: row => `<button type="button" class="gov-proposal-link" data-kind="treasury" data-id="${stakingEscapeHtml(String(row.id))}">#${stakingEscapeHtml(String(row.id))}</button>`
         },
         {
             key: 'beneficiaryName', label: 'Beneficiary', searchable: true,
@@ -6300,6 +6316,221 @@ async function submitTreasuryProposal() {
     if (closeBtn && modal) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; });
     if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
     if (submitTxBtn) submitTxBtn.addEventListener('click', submitTreasuryProposal);
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Governance detail modal — unified view for treasury proposals, council
+// motions, and democracy referenda. Triggered by clicking a proposal/motion/
+// referendum number in any of the governance tables. The modal is a layered
+// overlay (no URL change), so the underlying page state is preserved verbatim
+// while it's open. The close handler additionally snaps the parent page back
+// to the exact tab the user clicked from — see governanceDetailReturnState.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Snapshot of which tab to restore when the modal closes. Captured at open()
+// time. Set to null whenever the modal isn't displayed.
+let governanceDetailReturnState = null;
+
+function formatGovTime(ts) {
+    if (!ts) return '<span style="color:var(--text-muted);">—</span>';
+    try { return stakingEscapeHtml(new Date(ts).toISOString().replace('T', ' ').substring(0, 19) + ' UTC'); }
+    catch (e) { return '<span style="color:var(--text-muted);">—</span>'; }
+}
+function formatGovBlockLink(blockNumber) {
+    if (blockNumber == null) return '<span style="color:var(--text-muted);">—</span>';
+    return `<a href="/block/${blockNumber}" class="item-link" style="color:var(--brand-secondary);">${stakingFormatNumber(blockNumber)}</a>`;
+}
+function formatGovAccountLink(address, displayName) {
+    if (!address) return '<span style="color:var(--text-muted);">—</span>';
+    const label = (displayName && displayName !== 'Unknown') ? displayName : stakingShortAddress(address);
+    return `<a href="/account/${encodeURIComponent(address)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(label)}</a>`;
+}
+function formatGovHash(hash) {
+    if (!hash) return '<span style="color:var(--text-muted);">—</span>';
+    return `<span class="address-cell" style="word-break:break-all;color:var(--brand-secondary);">${stakingEscapeHtml(hash)}</span>`;
+}
+
+// Generic 2-column row used inside the detail body so every kind has the same
+// look without re-implementing the styling at each site.
+function govDetailRow(label, value) {
+    return `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+        <span style="color:var(--text-secondary);font-size:0.85rem;min-width:140px;">${stakingEscapeHtml(label)}</span>
+        <span style="text-align:right;font-size:0.9rem;flex:1;word-break:break-all;">${value}</span>
+    </div>`;
+}
+
+function renderTreasuryDetail(row) {
+    // Treasury proposals don't carry an extrinsic hash directly — the chain's
+    // identifier is the proposal index. The "transaction details" the user
+    // can pivot to live at the proposed/resolved block links.
+    const heading = `Treasury Proposal #${stakingEscapeHtml(String(row.id))}`;
+    return `<h2 style="margin:0 0 8px 0;font-size:1.4rem;">${heading}</h2>
+        <div style="margin-bottom:18px;color:var(--text-muted);font-size:0.85rem;">
+            On-chain treasury spend request. Click the block links below to view the extrinsic that proposed or resolved it.
+        </div>
+        ${govDetailRow('Status', treasuryStatusBadge(row.status))}
+        ${govDetailRow('Proposer', formatGovAccountLink(row.proposer, row.proposerName))}
+        ${govDetailRow('Beneficiary', formatGovAccountLink(row.beneficiary, row.beneficiaryName))}
+        ${govDetailRow('Requested', row.value == null ? '<span style="color:var(--text-muted);">—</span>' : `<strong>${stakingFormatPDEX(row.value)} PDEX</strong>`)}
+        ${govDetailRow('Bond', row.bond == null ? '<span style="color:var(--text-muted);">—</span>' : stakingFormatPDEX(row.bond) + ' PDEX')}
+        ${govDetailRow('Proposed at block', formatGovBlockLink(row.proposedBlock))}
+        ${govDetailRow('Proposed at', formatGovTime(row.proposedAt))}
+        ${govDetailRow('Resolved at block', formatGovBlockLink(row.resolvedBlock))}
+        ${govDetailRow('Resolved at', formatGovTime(row.resolvedAt))}`;
+}
+
+function renderMotionDetail(row) {
+    // Motions carry a real call hash (the SCALE-encoded extrinsic the council
+    // is voting on). Display it prominently as the "Proposal Hash".
+    const idxLabel = (row.motionIndex === null || row.motionIndex === undefined) ? '' : ` #${row.motionIndex}`;
+    const tally = (row.ayes == null && row.nays == null)
+        ? '<span style="color:var(--text-muted);">—</span>'
+        : `${row.ayes || 0} aye / ${row.nays || 0} nay`;
+    const callLabel = (row.section && row.method) ? `${row.section}.${row.method}` : 'Council Motion';
+    const statusBadge = (typeof resolvedMotionBadge === 'function' && row.status && row.status !== 'proposed')
+        ? resolvedMotionBadge(row.status)
+        : `<span class="reward-badge neutral">${stakingEscapeHtml(row.status || 'Open')}</span>`;
+    return `<h2 style="margin:0 0 8px 0;font-size:1.4rem;">Council Motion${idxLabel}</h2>
+        <div style="margin-bottom:18px;color:var(--text-muted);font-size:0.85rem;">
+            Council vote on a privileged on-chain call. The proposal hash uniquely identifies the underlying extrinsic; the resolved block is where the council finalized the vote.
+        </div>
+        ${govDetailRow('Status', statusBadge)}
+        ${govDetailRow('Call', `<code style="font-size:0.85rem;">${stakingEscapeHtml(callLabel)}</code>`)}
+        ${govDetailRow('Proposal hash', formatGovHash(row.hash))}
+        ${govDetailRow('Proposer', formatGovAccountLink(row.proposer, row.proposerName))}
+        ${govDetailRow('Threshold', row.threshold == null ? '<span style="color:var(--text-muted);">—</span>' : String(row.threshold))}
+        ${govDetailRow('Tally', tally)}
+        ${govDetailRow('Proposed at block', formatGovBlockLink(row.proposedBlock))}
+        ${govDetailRow('Proposed at', formatGovTime(row.proposedAt))}
+        ${govDetailRow('Resolved at block', formatGovBlockLink(row.resolvedBlock))}
+        ${govDetailRow('Resolved at', formatGovTime(row.resolvedAt))}`;
+}
+
+function renderReferendumDetail(row) {
+    // Referenda also carry a proposal hash (the call to dispatch on enact).
+    const heading = `Referendum #${stakingEscapeHtml(String(row.refIndex))}`;
+    const tally = row.tallyKnown
+        ? `${stakingFormatPDEX(row.ayes)} aye PDEX / ${stakingFormatPDEX(row.nays)} nay PDEX`
+        : '<span style="color:var(--text-muted);">tally not indexed</span>';
+    return `<h2 style="margin:0 0 8px 0;font-size:1.4rem;">${heading}</h2>
+        <div style="margin-bottom:18px;color:var(--text-muted);font-size:0.85rem;">
+            Public referendum on a runtime call. The proposal hash is the SCALE-encoded extrinsic the chain will dispatch if the referendum passes.
+        </div>
+        ${govDetailRow('Status', democracyStatusBadge(row.status))}
+        ${govDetailRow('Proposal hash', formatGovHash(row.proposal))}
+        ${govDetailRow('Tally', tally)}
+        ${govDetailRow('Turnout', row.tallyKnown ? stakingFormatPDEX(row.turnout) + ' PDEX' : '<span style="color:var(--text-muted);">—</span>')}
+        ${govDetailRow('Threshold', row.threshold ? `<code style="font-size:0.82rem;">${stakingEscapeHtml(row.threshold)}</code>` : '<span style="color:var(--text-muted);">—</span>')}
+        ${govDetailRow('End block', formatGovBlockLink(row.endBlock))}`;
+}
+
+function renderPublicProposalDetail(row) {
+    // Active proposals waiting to be tabled — pre-referendum stage. They have
+    // an index, deposit, seconds count, and a proposal hash.
+    const heading = `Public Proposal #${stakingEscapeHtml(String(row.index))}`;
+    return `<h2 style="margin:0 0 8px 0;font-size:1.4rem;">${heading}</h2>
+        <div style="margin-bottom:18px;color:var(--text-muted);font-size:0.85rem;">
+            A public proposal pending tabling to a referendum. Anyone can "second" it to push it up the queue.
+        </div>
+        ${govDetailRow('Proposal hash', formatGovHash(row.proposal))}
+        ${govDetailRow('Proposer', formatGovAccountLink(row.proposer, row.proposerName))}
+        ${govDetailRow('Deposit', row.deposit == null ? '<span style="color:var(--text-muted);">—</span>' : stakingFormatPDEX(row.deposit) + ' PDEX')}
+        ${govDetailRow('Seconds', row.seconds == null ? '<span style="color:var(--text-muted);">—</span>' : stakingFormatNumber(row.seconds))}`;
+}
+
+function openGovernanceDetailModal({ kind, row, returnPage, returnTab }) {
+    const modal = document.getElementById('governance-detail-modal');
+    const content = document.getElementById('governance-detail-content');
+    if (!modal || !content || !row) return;
+
+    governanceDetailReturnState = { returnPage, returnTab };
+
+    let body = '';
+    if (kind === 'treasury')              body = renderTreasuryDetail(row);
+    else if (kind === 'motion')           body = renderMotionDetail(row);
+    else if (kind === 'referendum')       body = renderReferendumDetail(row);
+    else if (kind === 'public-proposal')  body = renderPublicProposalDetail(row);
+    else body = '<div style="color:var(--text-muted);">Unknown proposal kind.</div>';
+
+    content.innerHTML = body;
+    modal.style.display = 'flex';
+}
+
+function closeGovernanceDetailModal() {
+    const modal = document.getElementById('governance-detail-modal');
+    if (modal) modal.style.display = 'none';
+    const state = governanceDetailReturnState;
+    governanceDetailReturnState = null;
+    if (!state) return;
+    // Restore the tab the user clicked from. Treasury and Democracy each
+    // maintain a single JS-state tab variable; Council is DOM-driven via the
+    // .account-tab buttons, so we synthesize a click on the matching one.
+    if (state.returnPage === 'treasury' && state.returnTab && typeof renderTreasury === 'function') {
+        treasuryTab = state.returnTab;
+        renderTreasury();
+    } else if (state.returnPage === 'democracy' && state.returnTab && typeof renderDemocracy === 'function') {
+        democracyTab = state.returnTab;
+        renderDemocracy();
+    } else if (state.returnPage === 'council' && state.returnTab) {
+        const tabBtn = document.querySelector(`.council-page .account-tab[data-tab="${state.returnTab}"]`);
+        if (tabBtn) tabBtn.click();
+    }
+}
+
+(function wireGovernanceDetailModal() {
+    const modal = document.getElementById('governance-detail-modal');
+    const closeBtn = document.getElementById('close-governance-detail-modal');
+    if (closeBtn) closeBtn.addEventListener('click', closeGovernanceDetailModal);
+    // Click-outside-to-close: only fire when the click landed on the backdrop
+    // itself, not on the panel or its children.
+    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeGovernanceDetailModal(); });
+    // Escape to close.
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal && modal.style.display === 'flex') closeGovernanceDetailModal();
+    });
+
+    // Event delegation for proposal-link clicks. Cells in makeTable / the
+    // resolved-motions table render an inline <button class="gov-proposal-link"
+    // data-kind="…" data-id="…"> per row; we look up the matching record from
+    // the cached data so the modal always gets the full row regardless of
+    // makeTable's internal pagination / sort state.
+    document.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('.gov-proposal-link') : null;
+        if (!btn) return;
+        e.preventDefault();
+        const kind = btn.getAttribute('data-kind');
+        const id = btn.getAttribute('data-id');
+        if (!kind || id == null) return;
+        let row = null;
+        let returnPage = null;
+        let returnTab = null;
+        if (kind === 'treasury' && treasuryData) {
+            const all = Array.isArray(treasuryData.allProposals) ? treasuryData.allProposals : [];
+            row = all.find(p => String(p.id) === String(id));
+            returnPage = 'treasury';
+            returnTab = treasuryTab;
+        } else if (kind === 'motion' && councilData) {
+            // Either an open motion (matched by hash) or a resolved one (by hash too).
+            const open = Array.isArray(councilData.motions) ? councilData.motions : [];
+            const history = Array.isArray(councilData.motionHistory) ? councilData.motionHistory : [];
+            row = open.find(m => m.hash === id) || history.find(m => m.hash === id);
+            returnPage = 'council';
+            const activeTab = document.querySelector('.council-page .account-tab.active');
+            returnTab = activeTab ? activeTab.getAttribute('data-tab') : null;
+        } else if (kind === 'referendum' && democracyData) {
+            const refs = Array.isArray(democracyData.referenda) ? democracyData.referenda : [];
+            row = refs.find(r => String(r.refIndex) === String(id));
+            returnPage = 'democracy';
+            returnTab = democracyTab;
+        } else if (kind === 'public-proposal' && democracyData) {
+            const props = Array.isArray(democracyData.publicProposals) ? democracyData.publicProposals : [];
+            row = props.find(p => String(p.index) === String(id));
+            returnPage = 'democracy';
+            returnTab = democracyTab;
+        }
+        if (!row) return;
+        openGovernanceDetailModal({ kind, row, returnPage, returnTab });
+    });
 })();
 
 init();

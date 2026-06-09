@@ -547,6 +547,19 @@
             </div>
 
             <!-- Treasury Submit Proposal Modal -->
+            <!-- Governance detail modal — opens when the user clicks a
+                 proposal #, motion #, or referendum # in treasury / democracy /
+                 council tables. Renders the proposal's lifecycle (blocks,
+                 times, proposer, call hash) and links into block-detail pages
+                 for the actual on-chain extrinsic. Closing the modal restores
+                 the user to the same tab they clicked from. -->
+            <div id="governance-detail-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass" style="width: 100%; max-width: 720px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1); max-height: 90vh; overflow-y: auto;">
+                    <button id="close-governance-detail-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;" aria-label="Close"><i class='bx bx-x'></i></button>
+                    <div id="governance-detail-content"></div>
+                </div>
+            </div>
+
             <div id="treasury-submit-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px);">
                 <div class="glass" style="width: 100%; max-width: 500px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
                     <button id="close-treasury-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;"><i class='bx bx-x'></i></button>
