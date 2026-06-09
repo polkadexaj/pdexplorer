@@ -2994,7 +2994,17 @@ async function syncStakingRewards() {
 // process before app.listen() or crash it into a restart loop. WsProvider
 // keeps retrying on its own; the 'connected' handler flips rpcConnected and
 // the sync loops (which gate on isRpcReady) resume automatically.
-async function connectRpc() {
+//
+// In cluster mode this is called from EVERY worker — detail endpoints
+// (block/tx/account/validator) query the chain directly via globalApi, and
+// cluster round-robins requests across workers, so each worker needs its
+// own ApiPromise. Only the indexer worker should run the database write
+// loops, though, so callers pass `{ kickSyncsOnConnect: false }` for
+// HTTP-only workers. The post-connect sync kicks survive in this function
+// (rather than living in startIndexerLoops) because they also fire on
+// every RECONNECT — a transient WS drop on the indexer worker would
+// otherwise wait up to one interval tick before catching up.
+async function connectRpc({ kickSyncsOnConnect = true } = {}) {
     const wsProvider = new WsProvider(RPC_ENDPOINTS.length > 1 ? RPC_ENDPOINTS : RPC_ENDPOINTS[0], RPC_AUTO_RECONNECT_MS);
     wsProvider.on('connected', () => {
         rpcConnected = true;
@@ -3033,16 +3043,25 @@ async function connectRpc() {
     // page's "Network Information" panel is hot the moment the chain is up.
     // (The old syncBlocks/syncEvents calls are now subsumed by syncChainIndex,
     // which does one RPC fetch per block and yields both blocks AND events.)
-    syncChainIndex(); syncTransactions(); syncData(); syncHolders();
-    syncStakingRewards(); syncCouncil(); syncTreasury(); syncDemocracy(); syncGovernance();
-    refreshNetworkInfoInBackground();
-    refreshTotalUnlockingInBackground();
+    //
+    // Suppressed on HTTP-only workers in cluster mode — they connect to RPC
+    // so detail endpoints can serve queries, but they must NOT initiate
+    // writes to SQLite. The indexer worker is the single writer.
+    if (kickSyncsOnConnect) {
+        syncChainIndex(); syncTransactions(); syncData(); syncHolders();
+        syncStakingRewards(); syncCouncil(); syncTreasury(); syncDemocracy(); syncGovernance();
+        refreshNetworkInfoInBackground();
+        refreshTotalUnlockingInBackground();
+    }
 }
 
 // ---- Per-worker init -------------------------------------------------------
 // Every worker (or the single process in non-clustered mode) opens its own
-// SQLite handle and binds an HTTP listener on PORT. node:cluster shares the
-// listening socket across workers, round-robin-balancing connections.
+// SQLite handle, opens its own RPC WebSocket, and binds an HTTP listener on
+// PORT. node:cluster shares the listening socket across workers, round-robin-
+// balancing inbound connections. Each worker's globalApi/rpcConnected pair is
+// process-local; the indexer worker is additionally the sole writer to SQLite
+// (single-writer invariant under WAL).
 function runWorker({ indexer }) {
     // DB init can throw (corrupt SQLite / unwritable bind mount after an
     // unclean reboot). Catch it so the process doesn't exit-loop under
@@ -3052,6 +3071,20 @@ function runWorker({ indexer }) {
     } catch (err) {
         console.error('FATAL: database init failed at ' + DATA_DIR + ' — serving may be degraded:', err && err.message ? err.message : err);
     }
+
+    // Every worker opens its own chain WebSocket because the detail endpoints
+    // (block/tx/account/validator/search) call into globalApi directly and
+    // cluster round-robins those requests across all workers. Without this,
+    // ~(N-1)/N of detail-page requests in an N-worker setup return 503
+    // RPC_NOT_READY because the worker has no globalApi to query.
+    //
+    // `kickSyncsOnConnect` decides whether this worker, on (re)connect,
+    // also kicks the chain-index / staking-rewards / governance write loops.
+    // Only the indexer worker should — multiple workers writing the same
+    // SQLite file would still be SAFE (WAL serializes writes) but would waste
+    // RPC bandwidth and produce duplicate work.
+    connectRpc({ kickSyncsOnConnect: !!indexer })
+        .catch(err => console.error('[RPC] connect bootstrap error:', err && err.message ? err.message : err));
 
     // Start the HTTP server FIRST so the API is reachable (serving cached
     // SQLite data, and so nginx's /api proxy gets 200s instead of 502s) even
@@ -3070,10 +3103,12 @@ function runWorker({ indexer }) {
 // worker, or the standalone process when WORKERS=1. Multiple writers against
 // the same SQLite file would serialize via WAL but waste RPC bandwidth and
 // produce duplicate work, so we enforce the singleton at the cluster level.
+//
+// connectRpc() has already been started by runWorker() before this is
+// invoked, so we don't open the WebSocket again here. The immediate sync
+// kicks below all gate on isRpcReady() and become no-ops until the
+// handshake completes; connectRpc's own post-connect kicks then catch up.
 function startIndexerLoops() {
-    // Non-blocking: connect to the chain in the background.
-    connectRpc().catch(err => console.error('[RPC] connect bootstrap error:', err && err.message ? err.message : err));
-
     // Stagger initial kicks so the RPC node isn't slammed by every sync in the
     // same second of startup — that pile-up alone can spike load. The first
     // call still happens immediately so the home page has data quickly; the
