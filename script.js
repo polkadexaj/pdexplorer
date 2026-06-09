@@ -6456,12 +6456,17 @@ function openGovernanceDetailModal({ kind, row, returnPage, returnTab }) {
     modal.style.display = 'flex';
 }
 
-function closeGovernanceDetailModal() {
+function closeGovernanceDetailModal({ restorePage = true } = {}) {
     const modal = document.getElementById('governance-detail-modal');
     if (modal) modal.style.display = 'none';
     const state = governanceDetailReturnState;
     governanceDetailReturnState = null;
-    if (!state) return;
+    // When the modal is closing because the user clicked a link that navigates
+    // AWAY from the governance page (e.g. `<a href="/block/123">`), skip the
+    // tab-restore re-render — the SPA router is about to replace the whole
+    // page anyway, and re-rendering treasury/democracy here would do wasted
+    // work and briefly flash the old page underneath the navigation.
+    if (!state || !restorePage) return;
     // Restore the tab the user clicked from. Treasury and Democracy each
     // maintain a single JS-state tab variable; Council is DOM-driven via the
     // .account-tab buttons, so we synthesize a click on the matching one.
@@ -6480,10 +6485,25 @@ function closeGovernanceDetailModal() {
 (function wireGovernanceDetailModal() {
     const modal = document.getElementById('governance-detail-modal');
     const closeBtn = document.getElementById('close-governance-detail-modal');
-    if (closeBtn) closeBtn.addEventListener('click', closeGovernanceDetailModal);
+    if (closeBtn) closeBtn.addEventListener('click', () => closeGovernanceDetailModal());
     // Click-outside-to-close: only fire when the click landed on the backdrop
-    // itself, not on the panel or its children.
-    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) closeGovernanceDetailModal(); });
+    // itself, not on the panel or its children. We also auto-close the modal
+    // when the user clicks an internal navigation link inside it (e.g. one
+    // of the "block X" links in the detail body) — without this, the SPA
+    // router routes to the new page but our overlay stays painted on top
+    // and hides whatever the user was trying to see. We close with
+    // `restorePage: false` because the SPA router is about to replace the
+    // page that the source tab lived on, so the tab-restore re-render would
+    // be wasted work (and could briefly flash the wrong page underneath).
+    if (modal) modal.addEventListener('click', (e) => {
+        if (e.target === modal) { closeGovernanceDetailModal(); return; }
+        const link = e.target && e.target.closest ? e.target.closest('a') : null;
+        if (link) {
+            const href = link.getAttribute('href');
+            // Same-origin SPA route — close before the router takes over.
+            if (href && href.startsWith('/')) closeGovernanceDetailModal({ restorePage: false });
+        }
+    });
     // Escape to close.
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && modal && modal.style.display === 'flex') closeGovernanceDetailModal();
