@@ -15,6 +15,11 @@ import * as db from './db.js';
 // this file AND in db.js (console is process-global) pick it up automatically,
 // without touching 50+ individual log statements. The `level` tag makes it
 // easy to grep (e.g. `docker logs backend | grep ' ERROR '`).
+//
+// We also filter a small set of known-harmless polkadot.js library warnings
+// that would otherwise flood the log on every chain interaction. Each one is
+// emitted once with a [silenced] note so operators know the filter is active
+// and can investigate if the volume of suppressed messages ever changes.
 (function installTimestampedConsole() {
     const native = {
         log: console.log.bind(console),
@@ -23,7 +28,59 @@ import * as db from './db.js';
         error: console.error.bind(console),
         debug: console.debug ? console.debug.bind(console) : console.log.bind(console)
     };
-    const stamp = (level, fn) => (...args) => fn(`${new Date().toISOString()} ${level}`, ...args);
+
+    // ---- Library-noise filter ----
+    // polkadot.js prints these once per storage decoration / type lookup miss,
+    // which can be hundreds of times a minute under load. They're informational
+    // (the chain keeps working) but they drown out everything else worth
+    // reading.
+    //
+    // Matching: we strip the library's own "YYYY-MM-DD HH:MM:SS" timestamp
+    // prefix (which polkadot.js's logger always emits) then check whether the
+    // remaining text STARTS WITH a known library prefix. Using startsWith —
+    // rather than a free-floating substring search — keeps our own indexer
+    // warns intact even when they happen to quote the same error text inside
+    // a "scan skipped block N: …" wrapper.
+    //
+    // To add an entry: capture an offending line, copy the leading text the
+    // library emits (after its timestamp, if any), and append it here. Each
+    // distinct match is announced exactly once, then suppressed silently.
+    const SUPPRESSED_LIBRARY_PREFIXES = [
+        'Unable to map',                // @polkadot/types: storage decoration miss
+        'API/INIT: Not decorating',     // @polkadot/api: pallet shape doesn't match v14 metadata
+        'API/INIT: api.consts.',        // @polkadot/api: missing const after runtime upgrade
+        'API/INIT: api.query.',         // @polkadot/api: missing query after runtime upgrade
+        'RPC-CORE:',                    // metadata-drift / decoder errors from RPC layer
+        'Unable to decode storage',     // raw decoder error (no RPC-CORE prefix)
+        'has multiple versions, ensure' // @polkadot duplicate-package warning
+    ];
+    const alreadyAnnouncedSuppression = new Set();
+    // Matches the leading "YYYY-MM-DD HH:MM:SS" timestamp polkadot.js's
+    // internal logger adds to every line it emits.
+    const POLKADOTJS_TIMESTAMP_PREFIX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+/;
+
+    function maybeSuppress(fn, level, args) {
+        const first = args && args.length ? String(args[0]) : '';
+        const stripped = first.replace(POLKADOTJS_TIMESTAMP_PREFIX, '');
+        for (const prefix of SUPPRESSED_LIBRARY_PREFIXES) {
+            if (stripped.startsWith(prefix)) {
+                if (!alreadyAnnouncedSuppression.has(prefix)) {
+                    alreadyAnnouncedSuppression.add(prefix);
+                    native.warn(
+                        `${new Date().toISOString()} WARN  [silenced] polkadot.js noise starting with "${prefix}" ` +
+                        `— first occurrence: ${stripped.slice(0, 160)}. Further matches will be suppressed.`
+                    );
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const stamp = (level, fn) => (...args) => {
+        if ((level === 'WARN ' || level === 'ERROR') && maybeSuppress(fn, level, args)) return;
+        fn(`${new Date().toISOString()} ${level}`, ...args);
+    };
     console.log = stamp('INFO ', native.log);
     console.info = stamp('INFO ', native.info);
     console.warn = stamp('WARN ', native.warn);
@@ -531,6 +588,44 @@ async function getBlockTimestampAt(blockHash) {
     }
 }
 
+// Compress polkadot.js's noisy multi-line decode errors into a single short
+// summary suitable for a per-block warn line. The library packs full hex
+// byte dumps and stacked codec context into err.message, which is great for
+// debugging a single failure but turns the log into a wall of noise when
+// hundreds of blocks fail. This keeps the diagnostic intent (what failed,
+// roughly why) without the bytes.
+function shortErrorMessage(err) {
+    let msg = (err && err.message) ? err.message : String(err || '');
+    // Replace long hex byte dumps (8+ hex chars) with an ellipsis.
+    msg = msg.replace(/0x[0-9a-f]{8,}/gi, '0x…');
+    // Collapse multi-line / multi-space into a single line.
+    msg = msg.replace(/\s+/g, ' ').trim();
+    if (msg.length > 200) msg = msg.slice(0, 200) + '…';
+    return msg;
+}
+
+// Read system.events for a historical block using THAT block's runtime
+// metadata instead of the current chain-tip metadata. Without this, decoding
+// blocks produced under an older runtime fails with messages like:
+//   "Unable to decode storage system.events:: createType(Lookup26):: Vec<EventRecord>::
+//    Decoded input doesn't match input, received 0x… (64 bytes), created 0x… (67 bytes)"
+// because the current Lookup26 definition of EventRecord has a different
+// shape than the one in use at that block. `api.at(hash)` returns an
+// ApiDecoration bound to that block's metadata; polkadot.js caches the
+// decoration per runtime version, so this is cheap to call per-block.
+//
+// Returns null on failure (event prune'd, decode genuinely impossible, etc.)
+// so callers can skip the block without a log explosion. The single concise
+// warn is emitted by the caller, not here.
+async function getEventsAtBlock(blockHash) {
+    try {
+        const apiAt = await globalApi.at(blockHash);
+        return await apiAt.query.system.events();
+    } catch (_err) {
+        return null;
+    }
+}
+
 function buildFinancialTransactionFromEvent(record, eventIndex, blockNumber, blockHash, timestamp) {
     const event = record.event;
     if (event.section !== 'balances' || event.method !== 'Transfer' || event.data.length < 3) return null;
@@ -637,10 +732,14 @@ async function scanFinancialTransactions({
         const batchResults = await Promise.all(blockNumbers.map(async blockNumber => {
             try {
                 const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+                // See getEventsAtBlock — uses the block's own runtime metadata
+                // so historical event encodings decode cleanly across runtime
+                // upgrades. Null = skip silently.
                 const [events, timestamp] = await Promise.all([
-                    globalApi.query.system.events.at(blockHash),
+                    getEventsAtBlock(blockHash),
                     getBlockTimestampAt(blockHash)
                 ]);
+                if (!events) return { blockNumber, transactions: [] };
                 const blockTransactions = [];
                 events.forEach((record, eventIndex) => {
                     const tx = buildFinancialTransactionFromEvent(record, eventIndex, blockNumber, blockHash, timestamp);
@@ -648,7 +747,7 @@ async function scanFinancialTransactions({
                 });
                 return { blockNumber, transactions: blockTransactions };
             } catch (err) {
-                console.warn(`Financial transaction scan skipped block ${blockNumber}:`, err.message);
+                console.warn(`Financial transaction scan skipped block ${blockNumber}: ${shortErrorMessage(err)}`);
                 return { blockNumber, transactions: [] };
             }
         }));
@@ -1049,7 +1148,8 @@ app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
         }
         if (!targetExt) return res.status(404).json({ error: "Extrinsic not found in block" });
 
-        const allEvents = await globalApi.query.system.events.at(hash);
+        const allEvents = await getEventsAtBlock(hash);
+        if (!allEvents) return res.status(503).json({ error: 'Cannot decode events at this historical block (the node may have pruned its state).' });
         const txEvents = allEvents.filter(record => record.phase.isApplyExtrinsic && record.phase.asApplyExtrinsic.toNumber() === extIndex);
 
         const timestamp = getBlockTimestamp(signedBlock);
@@ -1877,7 +1977,9 @@ function govStr(x) {
 async function scanBlockForGovernance(blockNumber, collectiveName) {
     try {
         const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
-        const events = await globalApi.query.system.events.at(blockHash);
+        // Decode with the block's OWN runtime metadata — see getEventsAtBlock.
+        const events = await getEventsAtBlock(blockHash);
+        if (!events) return null;
 
         const TREASURY_METHODS = ['Proposed', 'Awarded', 'Rejected', 'SpendApproved'];
         const COLLECTIVE_METHODS = ['Proposed', 'Closed', 'Approved', 'Disapproved', 'Executed', 'MemberExecuted'];
@@ -1958,7 +2060,7 @@ async function scanBlockForGovernance(blockNumber, collectiveName) {
         }
         return { treasury, motions };
     } catch (err) {
-        console.warn(`Governance scan skipped block ${blockNumber}:`, err.message);
+        console.warn(`Governance scan skipped block ${blockNumber}: ${shortErrorMessage(err)}`);
         return null;
     }
 }
@@ -2294,17 +2396,23 @@ async function scanSingleBlock(blockNumber) {
     const blockHash = derived.block.header.hash.toHex();
     const timestamp = getBlockTimestamp(derived);
     const authorAddr = derived.author ? derived.author.toString() : 'System';
+    // `derived.events` is decoded with the CURRENT runtime metadata, which
+    // breaks on every block produced before the latest runtime upgrade
+    // ("createType(Lookup26): Decoded input doesn't match input, 64 vs 67
+    // bytes"). Re-fetch via the block's own ApiDecoration — see
+    // getEventsAtBlock for the full rationale. Fall back to derived.events
+    // only if the historical read fails (e.g. archive node pruned the state).
+    const allEvents = (await getEventsAtBlock(hash)) || derived.events || [];
     const block = {
         number: blockNumber,
         hash: blockHash,
         authorAddress: authorAddr,
         authorName: await getIdentity(globalApi, authorAddr),
         extrinsicsCount: derived.block.extrinsics.length,
-        eventsCount: derived.events ? derived.events.length : 0,
+        eventsCount: allEvents.length,
         timestamp
     };
     const events = [];
-    const allEvents = derived.events || [];
     for (let eventIndex = 0; eventIndex < allEvents.length; eventIndex++) {
         const record = allEvents[eventIndex];
         const eventId = `${blockHash}-${eventIndex}`;
@@ -2521,7 +2629,10 @@ async function syncEvents() {
         while (blocksSearched < 50) {
             try {
                 const signedBlock = await globalApi.rpc.chain.getBlock(currentHash);
-                const allEvents = await globalApi.query.system.events.at(currentHash);
+                // Block-bound metadata — events from this historical block
+                // need its own runtime to decode (see getEventsAtBlock).
+                const allEvents = await getEventsAtBlock(currentHash);
+                if (!allEvents) { blocksSearched++; currentHash = signedBlock.block.header.parentHash; continue; }
                 const blockNumber = signedBlock.block.header.number.toNumber();
                 const timestamp = getBlockTimestamp(signedBlock);
                 const blockHash = signedBlock.block.header.hash.toHex();
@@ -2648,7 +2759,13 @@ function extractPayoutInfo(extrinsic) {
 async function scanBlockForRewards(blockNumber) {
     try {
         const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
-        const events = await globalApi.query.system.events.at(blockHash);
+        // Use the block's OWN runtime metadata for decoding — see getEventsAtBlock
+        // for why. A null return means the block's events can't be decoded
+        // even with historical metadata (typically because the archive node
+        // has pruned that block's state); we skip the block silently in that
+        // case rather than letting the library spew its bytes-dump error.
+        const events = await getEventsAtBlock(blockHash);
+        if (!events) return [];
 
         const hits = [];
         events.forEach((record, eventIndex) => {
@@ -2686,7 +2803,7 @@ async function scanBlockForRewards(blockNumber) {
             };
         });
     } catch (err) {
-        console.warn(`Staking rewards scan skipped block ${blockNumber}:`, err.message);
+        console.warn(`Staking rewards scan skipped block ${blockNumber}: ${shortErrorMessage(err)}`);
         return [];
     }
 }
