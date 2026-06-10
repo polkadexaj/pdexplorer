@@ -355,6 +355,79 @@ export function getBlocksMinMax() {
 // the implied gap. Ordered newest-first so the gap-fill pass works on the
 // freshest missing blocks first (most useful to users browsing recent
 // activity), then walks back over time.
+// ─── Network analytics aggregates ──────────────────────────────────────────
+// Daily time-series of the on-chain activity we already index. Returned as
+// an object of named series; each series is an array of { day, value } where
+// `day` is an ISO date string ('YYYY-MM-DD') in UTC. The window is bounded
+// by `sinceTs` so a 30-day chart doesn't have to scan the whole blocks table.
+//
+// Grouping math: ((timestamp / 86_400_000) | 0) gives the UTC day number
+// since epoch. We expand back to a date string in JS rather than via SQLite
+// strftime because chain timestamps are millis (strftime wants seconds) and
+// converting once at the boundary is clearer than doing it in every query.
+export function getDailyAnalytics(sinceTs) {
+    const since = Number(sinceTs) || 0;
+    const dayToISO = (n) => new Date(n * 86400000).toISOString().substring(0, 10);
+
+    const txRows = db.prepare(`
+        SELECT CAST(timestamp / 86400000 AS INTEGER) AS day,
+               COUNT(*) AS txCount,
+               COALESCE(SUM(numeric_amount), 0) AS txVolume
+        FROM transactions
+        WHERE timestamp >= ?
+        GROUP BY day
+        ORDER BY day ASC
+    `).all(since);
+
+    const blockRows = db.prepare(`
+        SELECT CAST(timestamp / 86400000 AS INTEGER) AS day,
+               COUNT(*) AS blockCount,
+               AVG(extrinsics_count) AS avgExtrinsics,
+               AVG(events_count) AS avgEvents
+        FROM blocks
+        WHERE timestamp >= ?
+        GROUP BY day
+        ORDER BY day ASC
+    `).all(since);
+
+    // Active addresses per UTC day. UNION (not UNION ALL) de-duplicates
+    // address×day pairs, so an account that sent AND received on the same
+    // day is counted once. SQLite's UNION builds the intermediate set in
+    // memory; fine for 30-day windows of typical chain volume.
+    const addrRows = db.prepare(`
+        SELECT day, COUNT(DISTINCT addr) AS activeAddresses FROM (
+            SELECT CAST(timestamp / 86400000 AS INTEGER) AS day, from_addr AS addr
+            FROM transactions WHERE timestamp >= ? AND from_addr IS NOT NULL AND from_addr <> 'System'
+            UNION
+            SELECT CAST(timestamp / 86400000 AS INTEGER) AS day, to_addr AS addr
+            FROM transactions WHERE timestamp >= ? AND to_addr IS NOT NULL AND to_addr <> ''
+        )
+        GROUP BY day
+        ORDER BY day ASC
+    `).all(since, since);
+
+    // Cumulative treasury PDEX awarded (across all eras present in the
+    // governance index). Falls back to an empty series if the treasury
+    // crawler hasn't populated `resolved_block` yet on any rows.
+    const treasuryRows = db.prepare(`
+        SELECT CAST(resolved_at / 86400000 AS INTEGER) AS day,
+               SUM(CAST(value AS REAL)) AS awardedPdex
+        FROM treasury_proposals
+        WHERE status = 'awarded' AND resolved_at >= ?
+        GROUP BY day
+        ORDER BY day ASC
+    `).all(since);
+
+    return {
+        txCount:         txRows.map(r => ({ day: dayToISO(r.day), value: Number(r.txCount) || 0 })),
+        txVolume:        txRows.map(r => ({ day: dayToISO(r.day), value: Number(r.txVolume) || 0 })),
+        blocks:          blockRows.map(r => ({ day: dayToISO(r.day), value: Number(r.blockCount) || 0 })),
+        avgExtrinsics:   blockRows.map(r => ({ day: dayToISO(r.day), value: Number(r.avgExtrinsics) || 0 })),
+        activeAddresses: addrRows.map(r => ({ day: dayToISO(r.day), value: Number(r.activeAddresses) || 0 })),
+        treasuryAwarded: treasuryRows.map(r => ({ day: dayToISO(r.day), value: Number(r.awardedPdex) || 0 }))
+    };
+}
+
 export function getBlockGaps(limit = 50) {
     return db.prepare(`
         SELECT (number + 1) AS gapStart,

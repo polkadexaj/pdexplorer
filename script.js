@@ -1995,6 +1995,13 @@ const ROUTE_SEO = {
                             description: 'Polkadex Treasury balance, approved spending, and active proposals.' },
     'discussions':        { title: 'Discussions — Polkadex Explorer',
                             description: 'On-chain governance discussions for Polkadex referenda, treasury proposals, and council motions.' },
+    'analytics':          { title: 'Network Analytics — Polkadex Explorer',
+                            description: 'Polkadex Mainnet analytics: daily transactions, active addresses, block production, treasury awards, and network KPIs.' },
+    // Personal local-storage page — useful to crawlers as a feature
+    // landing only; no per-user data is indexed.
+    'watchlist':          { title: 'Watchlist — Polkadex Explorer',
+                            description: 'Star Polkadex addresses, validators, referenda, motions, and treasury proposals to track them at a glance.',
+                            noindex: true },
     // /wallet (no address) is a public connect-wallet landing page — index it
     // so it captures searches like "connect Polkadex wallet" or "send PDEX".
     // initWalletPage() flips it to noindex when an address is bound (personal).
@@ -2346,6 +2353,10 @@ function routeTo(target) {
                 initDonatePage();
             } else if (mainTarget === 'discussions') {
                 initDiscussionsPage(detailId);
+            } else if (mainTarget === 'analytics') {
+                fetchAnalyticsData();
+            } else if (mainTarget === 'watchlist') {
+                renderWatchlistPage();
             } else if (mainTarget === 'council') {
                 fetchCouncilData();
             } else if (mainTarget === 'democracy') {
@@ -2453,7 +2464,7 @@ async function fetchAccountDetails(address) {
                 <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;">
                     <tr style="background: rgba(255,255,255,0.05);">
                         <td style="padding: 12px 20px; font-weight: 600; width: 250px;">account</td>
-                        <td style="padding: 12px 20px;" class="address-cell">${data.account} <span onclick="copyToClipboard(this, '${data.account}')" style="cursor: pointer; color: var(--brand-secondary); font-size: 13px; margin-left: 10px;">copy</span></td>
+                        <td style="padding: 12px 20px;" class="address-cell">${data.account} <span onclick="copyToClipboard(this, '${data.account}')" style="cursor: pointer; color: var(--brand-secondary); font-size: 13px; margin-left: 10px;">copy</span> ${watchlistStarButton('address', data.account, (data.display && data.display !== 'Unknown') ? data.display : data.account)}</td>
                     </tr>
                     <tr>
                         <td style="padding: 12px 20px; font-weight: 600;">display</td>
@@ -2705,6 +2716,62 @@ navItems.forEach(item => {
 
 let validatorChart = null;
 
+// ─── Validator scorecard ────────────────────────────────────────────────────
+// Compact stat grid that surfaces the headline metrics a nominator needs to
+// decide whether to back this validator: estimated APY, commission band,
+// active-era rate, slash count, current stake. The backend computes the
+// numbers (see computeValidatorScorecard in server.js) so multiple consumers
+// can share the same definition.
+function renderValidatorScorecard(scorecard) {
+    if (!scorecard) return '';
+    const pad = n => (Number.isFinite(n) ? n : 0);
+    const apy = pad(scorecard.estimatedApy).toFixed(2);
+    const avgComm = pad(scorecard.avgCommission).toFixed(2);
+    const commBand = (scorecard.minCommission === scorecard.maxCommission)
+        ? `${avgComm}%`
+        : `${pad(scorecard.minCommission).toFixed(1)}% – ${pad(scorecard.maxCommission).toFixed(1)}%`;
+    const activeRate = (pad(scorecard.activeEraRate) * 100).toFixed(0);
+    const slashColor = scorecard.slashCount > 0 ? 'var(--error)' : 'var(--success)';
+    const slashLabel = scorecard.slashCount === 0
+        ? 'Clean'
+        : `${scorecard.slashCount} event${scorecard.slashCount === 1 ? '' : 's'}`;
+    return `
+        <div style="margin-bottom: 25px;">
+            <h3 style="font-size: 14px; margin-bottom: 12px; display:flex; align-items:center; gap:8px;">
+                <i class='bx bx-stats' style="color:var(--brand-primary);"></i> Scorecard
+                <span style="color:var(--text-muted);font-weight:400;font-size:0.78rem;">(last ${pad(scorecard.totalEras)} eras)</span>
+            </h3>
+            <div class="staking-summary-grid">
+                <div class="staking-summary-card">
+                    <div class="label">Est. APY</div>
+                    <div class="value accent">${apy}%</div>
+                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">nominator return after commission</div>
+                </div>
+                <div class="staking-summary-card">
+                    <div class="label">Commission</div>
+                    <div class="value">${commBand}</div>
+                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">avg ${avgComm}%</div>
+                </div>
+                <div class="staking-summary-card">
+                    <div class="label">Active eras</div>
+                    <div class="value">${pad(scorecard.activeEras)} <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400;">/ ${pad(scorecard.totalEras)}</span></div>
+                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">${activeRate}% in active set</div>
+                </div>
+                <div class="staking-summary-card">
+                    <div class="label">Slash history</div>
+                    <div class="value" style="color:${slashColor};">${slashLabel}</div>
+                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">commission-spike triggers</div>
+                </div>
+                <div class="staking-summary-card">
+                    <div class="label">Current stake</div>
+                    <div class="value">${stakingFormatPDEX(scorecard.currentStake)} <span class="unit">PDEX</span></div>
+                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">latest indexed era</div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 async function fetchValidatorDetails(address) {
     const container = document.getElementById('validator-details-container');
     if (!container) return;
@@ -2798,7 +2865,7 @@ async function fetchValidatorDetails(address) {
 
         container.innerHTML = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
-                <h2 style="font-size: 18px;">Validator history - ${identityStr}</h2>
+                <h2 style="font-size: 18px;">Validator history - ${identityStr} ${watchlistStarButton('validator', data.address, (data.identity && data.identity !== 'Unknown') ? data.identity : data.address)}</h2>
                 <a href="/validators" style="color: var(--text-secondary); text-decoration: none;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             
@@ -2817,6 +2884,8 @@ async function fetchValidatorDetails(address) {
                     <strong style="display: block; margin-bottom: 5px;">Controller account:</strong>
                     <span class="address-cell">${data.controller}</span> <span onclick="copyToClipboard(this, '${data.controller}')" style="cursor: pointer; color: var(--brand-secondary); font-size: 13px; margin-left: 10px;">copy</span>
                 </div>
+
+                ${renderValidatorScorecard(data.scorecard)}
 
                 <div style="margin-bottom: 25px;">
                     <h3 style="font-size: 14px; margin-bottom: 10px;">Commission trend (30 eras)</h3>
@@ -3199,6 +3268,7 @@ function renderStakingRewards(data) {
             <div class="staking-toolbar-actions">
                 <button class="staking-download-btn" id="staking-dl-csv"><i class='bx bx-download'></i> CSV</button>
                 <button class="staking-download-btn" id="staking-dl-json"><i class='bx bx-download'></i> JSON</button>
+                <button class="staking-download-btn" id="staking-dl-tax" title="Annual rewards summary with PDEX→USD price at era close"><i class='bx bx-receipt'></i> Tax (year…)</button>
             </div>
         </div>
         <div id="staking-rewards-table-container"></div>`;
@@ -3268,6 +3338,8 @@ function renderStakingRewards(data) {
     if (csvBtn) csvBtn.addEventListener('click', downloadStakingRewardsCSV);
     const jsonBtn = document.getElementById('staking-dl-json');
     if (jsonBtn) jsonBtn.addEventListener('click', downloadStakingRewardsJSON);
+    const taxBtn = document.getElementById('staking-dl-tax');
+    if (taxBtn) taxBtn.addEventListener('click', downloadStakingRewardsTaxCSV);
     // The old client-side pagination "Show more" button is no longer needed —
     // makeTable shows all rows by default and the user can drill in via the
     // filter bar instead.
@@ -3351,6 +3423,129 @@ function downloadStakingRewardsJSON() {
         unclaimed: stakingRewardsData.unclaimed
     };
     downloadStakingBlob(`staking-rewards-${stakingRewardsData.address || 'address'}.json`, JSON.stringify(payload, null, 2), 'application/json');
+}
+
+// Tax-ready annual rewards CSV — joins each CLAIMED reward row with the
+// PDEX→USD spot price at the era close, then emits a year-end totals row at
+// the bottom. Unclaimed rewards are intentionally excluded because they
+// haven't actually been received yet (a tax authority cares about realised
+// income, not theoretical entitlement).
+//
+// Price source: the existing /api/price-history endpoint backed by the
+// CoinMarketCap sync. For the v1 we round each reward's timestamp to the
+// nearest indexed price sample — chains produce rewards at era boundaries
+// (Polkadex eras are 24h), so even a single price-per-day suffices for
+// audit-grade accuracy.
+//
+// The current year is selected via a `prompt()` for v1 simplicity — a
+// proper modal is v2. We default to the current calendar year in the
+// user's local timezone.
+async function downloadStakingRewardsTaxCSV() {
+    if (!stakingRewardsData) return;
+    const claimed = (stakingRewardsData.claimed || []).filter(r => r.timestamp);
+    if (!claimed.length) {
+        alert('No claimed rewards yet — nothing to export for tax.');
+        return;
+    }
+    // Bracket of years actually present in the data, so the prompt suggests
+    // a year the user can actually export.
+    const yearsPresent = Array.from(new Set(claimed.map(r => new Date(r.timestamp).getFullYear()))).sort();
+    const defaultYear = String(yearsPresent[yearsPresent.length - 1] || new Date().getFullYear());
+    const yearStr = prompt(`Export claimed rewards for which tax year?\n\nYears with data: ${yearsPresent.join(', ')}`, defaultYear);
+    if (yearStr === null) return; // user cancelled
+    const year = parseInt(yearStr, 10);
+    if (!Number.isFinite(year) || year < 2020 || year > 2100) {
+        alert('That doesn\'t look like a valid year.');
+        return;
+    }
+
+    const yearStart = Date.UTC(year, 0, 1);
+    const yearEnd = Date.UTC(year + 1, 0, 1);
+    const inYear = claimed.filter(r => r.timestamp >= yearStart && r.timestamp < yearEnd);
+    if (!inYear.length) {
+        alert(`No claimed rewards in ${year}.`);
+        return;
+    }
+
+    // Pull a wide enough slice of price history to cover the entire year.
+    // /api/price-history caps at 365 days, which is exactly what we need.
+    let history = [];
+    try {
+        const res = await fetch('/api/price-history?days=365');
+        const data = await res.json();
+        history = Array.isArray(data.history) ? data.history : [];
+    } catch (_) { history = []; }
+    // history is descending by time; we'll binary-pick the closest sample
+    // by absolute time delta. For older eras outside the 365-day window the
+    // function falls through to null → we emit a blank USD cell + flag.
+    const priceForTimestamp = (ts) => {
+        if (!history.length) return null;
+        let best = null;
+        let bestDelta = Infinity;
+        for (const p of history) {
+            const t = Number(p.timestamp);
+            const delta = Math.abs(t - ts);
+            if (delta < bestDelta) { bestDelta = delta; best = p; }
+        }
+        // Reject samples more than 36h away — that's beyond a single era of
+        // drift on Polkadex and would mis-state cost basis.
+        if (best && bestDelta < 36 * 60 * 60 * 1000) return Number(best.price);
+        return null;
+    };
+
+    const header = ['Era', 'Date (UTC)', 'Amount (PDEX)', 'PDEX/USD at era close', 'USD value', 'Validator', 'Block', 'Block Hash'];
+    const lines = [header.join(',')];
+    let totalPdex = 0;
+    let totalUsd = 0;
+    let pricedRows = 0;
+    let unpricedRows = 0;
+    inYear.forEach(r => {
+        const date = formatLocalDateTime(r.timestamp); // header still says UTC for stability; this is local — clarify below
+        const amount = Number(r.amount || 0);
+        totalPdex += amount;
+        const price = priceForTimestamp(r.timestamp);
+        let usdCell = '';
+        if (price != null) {
+            const usd = amount * price;
+            totalUsd += usd;
+            usdCell = usd.toFixed(2);
+            pricedRows++;
+        } else {
+            unpricedRows++;
+        }
+        lines.push([
+            r.era != null ? r.era : '',
+            // Tax authorities prefer ISO-8601 in UTC for unambiguity. Override
+            // the local display here despite the global helper.
+            new Date(r.timestamp).toISOString().replace('T', ' ').substring(0, 19),
+            amount.toFixed(6),
+            price != null ? price.toFixed(6) : '',
+            usdCell,
+            r.validator || '',
+            r.block != null ? r.block : '',
+            r.blockHash || ''
+        ].map(stakingCsvCell).join(','));
+    });
+
+    // Year-end totals row + provenance footer so the file is self-describing
+    // when an accountant opens it months later without the explorer at hand.
+    lines.push('');
+    lines.push(['TOTAL', `${year}`, totalPdex.toFixed(6), '', totalUsd.toFixed(2), '', '', ''].map(stakingCsvCell).join(','));
+    lines.push('');
+    lines.push(`# Polkadex Staking Rewards — Tax Year ${year}`);
+    lines.push(`# Generated: ${new Date().toISOString()}`);
+    lines.push(`# Address: ${stakingRewardsData.address || ''}`);
+    lines.push(`# Rows priced from CoinMarketCap-sourced PDEX/USD history: ${pricedRows}`);
+    if (unpricedRows > 0) {
+        lines.push(`# Rows WITHOUT a price (out of price-history window — fill manually): ${unpricedRows}`);
+    }
+    lines.push(`# Includes only CLAIMED rewards. Unpaid rewards are excluded — they aren't realised income.`);
+
+    downloadStakingBlob(
+        `staking-rewards-${year}-tax-${stakingRewardsData.address || 'address'}.csv`,
+        lines.join('\r\n'),
+        'text/csv;charset=utf-8'
+    );
 }
 
 // --- Wallet Connect + Dashboard ---
@@ -5364,6 +5559,21 @@ function mountDemocracyReferendaTable(refs) {
                 key: 'endBlock', label: 'End Block',
                 sort: (a, b) => (a.endBlock || 0) - (b.endBlock || 0),
                 format: row => stakingFormatNumber(row.endBlock)
+            },
+            {
+                // Voting actions — only meaningful while the referendum is
+                // Ongoing. For Passed/NotPassed rows we just render a dash so
+                // the column stays aligned. The buttons emit a small data
+                // payload; a global delegate (see wireReferendumVoteModal)
+                // opens the vote modal with the right side preselected.
+                key: '__vote', label: 'Vote',
+                format: row => {
+                    if (row.status !== 'Ongoing') return '<span style="color:var(--text-muted);">—</span>';
+                    return `<div style="display:flex;gap:4px;white-space:nowrap;">
+                        <button type="button" class="referendum-vote-trigger reward-filter-btn" data-ref-index="${row.refIndex}" data-side="aye" style="padding:4px 10px;font-size:0.78rem;color:var(--success);border-color:rgba(46,204,113,0.4);" title="Vote Aye">Aye</button>
+                        <button type="button" class="referendum-vote-trigger reward-filter-btn" data-ref-index="${row.refIndex}" data-side="nay" style="padding:4px 10px;font-size:0.78rem;color:#e74c3c;border-color:rgba(231,76,60,0.4);" title="Vote Nay">Nay</button>
+                    </div>`;
+                }
             }
         ]
     });
@@ -6520,6 +6730,143 @@ function closeGovernanceDetailModal({ restorePage = true } = {}) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Referendum voting modal — cast a Standard Aye/Nay vote on an ongoing
+// democracy referendum. Posts `democracy.vote(refIndex, { Standard: { vote,
+// balance } })` via the existing submitSignedTx flow (which handles wallet
+// selection, fee estimation, and error surface). After a successful tx we
+// re-fetch democracy data so the row's tally updates.
+// ─────────────────────────────────────────────────────────────────────────────
+let pendingReferendumVote = null;   // { refIndex, side: 'aye'|'nay' }
+
+function openReferendumVoteModal(refIndex, side) {
+    const modal = document.getElementById('referendum-vote-modal');
+    if (!modal) return;
+    pendingReferendumVote = { refIndex: Number(refIndex), side: side === 'nay' ? 'nay' : 'aye' };
+
+    const idxLabel = document.getElementById('referendum-vote-modal-idx');
+    if (idxLabel) idxLabel.textContent = '#' + pendingReferendumVote.refIndex;
+
+    // Preselect the side button the user clicked. Pure styling toggle.
+    document.querySelectorAll('.referendum-side-btn').forEach(b => {
+        const isActive = b.getAttribute('data-side') === pendingReferendumVote.side;
+        if (isActive) {
+            if (pendingReferendumVote.side === 'aye') {
+                b.style.background = 'rgba(46, 204, 113, 0.1)';
+                b.style.borderColor = 'var(--success)';
+                b.style.color = 'var(--success)';
+            } else {
+                b.style.background = 'rgba(231, 76, 60, 0.1)';
+                b.style.borderColor = '#e74c3c';
+                b.style.color = '#e74c3c';
+            }
+        } else {
+            b.style.background = 'rgba(255,255,255,0.02)';
+            b.style.borderColor = 'var(--border-color)';
+            b.style.color = 'var(--text-secondary)';
+        }
+    });
+
+    const stored = getStoredWallet();
+    const warn = document.getElementById('referendum-vote-modal-wallet-warning');
+    const active = document.getElementById('referendum-vote-active-wallet');
+    const errEl = document.getElementById('referendum-vote-error');
+    if (warn) warn.style.display = stored ? 'none' : 'block';
+    if (active) active.textContent = stored || '--';
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    // Reset the amount field on each open so a stale value doesn't carry over
+    // from an earlier proposal. Conviction default stays at Locked1x (the
+    // most common case for an engaged voter).
+    const amt = document.getElementById('referendum-vote-amount');
+    if (amt) amt.value = '';
+    const conv = document.getElementById('referendum-vote-conviction');
+    if (conv) conv.value = 'Locked1x';
+
+    modal.style.display = 'flex';
+}
+
+function closeReferendumVoteModal() {
+    const modal = document.getElementById('referendum-vote-modal');
+    if (modal) modal.style.display = 'none';
+    pendingReferendumVote = null;
+}
+
+async function submitReferendumVote() {
+    if (!pendingReferendumVote) return;
+    const errEl = document.getElementById('referendum-vote-error');
+    const showErr = m => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    const amtInput = document.getElementById('referendum-vote-amount');
+    const convInput = document.getElementById('referendum-vote-conviction');
+    const amt = parseFloat(amtInput ? amtInput.value : '');
+    const conviction = convInput ? convInput.value : 'Locked1x';
+
+    if (isNaN(amt) || amt <= 0) return showErr('Enter a positive PDEX amount to lock behind your vote.');
+    if (amt > 1e15) return showErr('That amount exceeds plausible balances — double-check the value.');
+
+    const balancePlanck = BigInt(Math.floor(amt * 1e12)).toString();
+    const aye = pendingReferendumVote.side === 'aye';
+    const refIndex = pendingReferendumVote.refIndex;
+
+    await submitSignedTx({
+        // democracy.vote takes a Compact<u32> referendum index and an
+        // AccountVote enum. We always emit the Standard variant — Split votes
+        // (separate aye/nay balances) are an advanced feature for v2.
+        buildTx: api => api.tx.democracy.vote(refIndex, {
+            Standard: {
+                vote: { aye, conviction },
+                balance: balancePlanck
+            }
+        }),
+        label: `Referendum #${refIndex} ${aye ? 'aye' : 'nay'} vote`,
+        button: document.getElementById('submit-referendum-vote-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Submit Vote',
+        onError: showErr,
+        onSuccess: () => {
+            closeReferendumVoteModal();
+            // Refetch after a short delay so the chain has time to include
+            // and the indexer has time to pick up the new tally.
+            setTimeout(fetchDemocracyData, 2500);
+        }
+    });
+}
+
+(function wireReferendumVoteModal() {
+    const modal = document.getElementById('referendum-vote-modal');
+    const closeBtn = document.getElementById('close-referendum-vote-modal');
+    const submitBtn = document.getElementById('submit-referendum-vote-btn');
+    if (closeBtn) closeBtn.addEventListener('click', closeReferendumVoteModal);
+    if (modal) modal.addEventListener('click', e => { if (e.target === modal) closeReferendumVoteModal(); });
+    if (submitBtn) submitBtn.addEventListener('click', submitReferendumVote);
+    // Aye/Nay side toggle inside the modal (lets the user change their mind
+    // without closing and re-opening).
+    document.querySelectorAll('.referendum-side-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (!pendingReferendumVote) return;
+            pendingReferendumVote.side = btn.getAttribute('data-side');
+            openReferendumVoteModal(pendingReferendumVote.refIndex, pendingReferendumVote.side);
+        });
+    });
+    // Escape closes.
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && modal && modal.style.display === 'flex') closeReferendumVoteModal();
+    });
+    // Event delegation for the per-row Aye/Nay buttons rendered into the
+    // referenda table by mountDemocracyReferendaTable. We attach to the
+    // document so it works regardless of when the table is (re)rendered.
+    document.addEventListener('click', e => {
+        const btn = e.target && e.target.closest ? e.target.closest('.referendum-vote-trigger') : null;
+        if (!btn) return;
+        e.preventDefault();
+        const refIndex = btn.getAttribute('data-ref-index');
+        const side = btn.getAttribute('data-side');
+        if (refIndex != null) openReferendumVoteModal(refIndex, side);
+    });
+})();
+
 (function wireGovernanceDetailModal() {
     const modal = document.getElementById('governance-detail-modal');
     const closeBtn = document.getElementById('close-governance-detail-modal');
@@ -6588,6 +6935,363 @@ function closeGovernanceDetailModal({ restorePage = true } = {}) {
         }
         if (!row) return;
         openGovernanceDetailModal({ kind, row, returnPage, returnTab });
+    });
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics dashboard — KPI cards + 4 daily time-series charts driven by the
+// /api/analytics/{snapshot,timeseries} endpoints.
+//
+// Chart.js instances are tracked in `analyticsChartHandles` so subsequent
+// re-renders (date-range change, refresh) destroy the old canvas before
+// creating a new one — Chart.js leaks canvas + listeners otherwise.
+// ─────────────────────────────────────────────────────────────────────────────
+let analyticsChartHandles = {};
+let analyticsRangeDays = 30;
+
+async function fetchAnalyticsData() {
+    const el = document.getElementById('analytics-content');
+    if (!el) return;
+    el.innerHTML = '<div style="padding:48px;text-align:center;color:var(--text-secondary);"><i class="bx bx-loader-alt bx-spin" style="font-size:32px;"></i><div style="margin-top:10px;">Loading analytics…</div></div>';
+
+    try {
+        const [snapshot, ts] = await Promise.all([
+            fetchApiJson('/api/analytics/snapshot'),
+            fetchApiJson('/api/analytics/timeseries?days=' + analyticsRangeDays)
+        ]);
+        renderAnalyticsPage(snapshot, ts);
+    } catch (e) {
+        renderApiError(el, e, () => fetchAnalyticsData());
+    }
+}
+
+function renderAnalyticsPage(snapshot, ts) {
+    const el = document.getElementById('analytics-content');
+    if (!el) return;
+    const series = (ts && ts.series) || {};
+
+    // KPI strip — the headline numbers the user expects "above the fold"
+    // before scrolling into the charts. All from the snapshot endpoint.
+    const totalIssuance = Number(snapshot.totalIssuance) || 0;
+    const totalStaked = Number(snapshot.totalStaked) || 0;
+    const stakingPct = (Number(snapshot.stakingRatio) || 0) * 100;
+
+    const kpiCard = (label, value, sub) =>
+        `<div class="staking-summary-card">
+            <div class="label">${stakingEscapeHtml(label)}</div>
+            <div class="value">${value}</div>
+            ${sub ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;">${sub}</div>` : ''}
+        </div>`;
+
+    // Pill row for changing the date range. Re-uses the existing reward-filter
+    // styling so the look stays consistent with other tunable filters.
+    const rangePill = (days, label) =>
+        `<button class="reward-filter-btn${analyticsRangeDays === days ? ' active' : ''}" data-analytics-range="${days}">${label}</button>`;
+
+    el.innerHTML = `
+        <div class="list-container glass">
+            <div class="list-header">
+                <h2>Network Analytics</h2>
+                <span style="color:var(--text-muted);font-size:0.78rem;">Last sync ${stakingEscapeHtml(formatLocalDateTime(snapshot.lastSync) || '—')}</span>
+            </div>
+            <div style="padding:20px;">
+                <div class="staking-summary-grid">
+                    ${kpiCard('Indexed blocks',       stakingFormatNumber(snapshot.indexedBlocks), 'blocks in the local index')}
+                    ${kpiCard('Indexed transactions', stakingFormatNumber(snapshot.indexedTransactions), 'all-time')}
+                    ${kpiCard('Validators',           stakingFormatNumber(snapshot.validatorCount), `active era #${snapshot.activeEra}`)}
+                    ${kpiCard('Nominators',           stakingFormatNumber(snapshot.nominatorCount), 'currently nominating')}
+                    ${kpiCard('Total staked',         `${stakingFormatPDEX(totalStaked)} <span class="unit">PDEX</span>`, `${stakingPct.toFixed(2)}% of issuance`)}
+                    ${kpiCard('Total issuance',       `${stakingFormatPDEX(totalIssuance)} <span class="unit">PDEX</span>`, 'circulating + locked')}
+                </div>
+
+                <div class="staking-toolbar" style="margin-top:20px;">
+                    <div class="reward-filter">
+                        ${rangePill(7,  'Last 7 days')}
+                        ${rangePill(30, 'Last 30 days')}
+                        ${rangePill(90, 'Last 90 days')}
+                        ${rangePill(365,'Last year')}
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(360px, 1fr));gap:18px;margin-top:18px;">
+                    ${analyticsChartCard('Daily transactions',  'analytics-chart-tx-count',   `${series.txCount?.length || 0} day(s) of data`)}
+                    ${analyticsChartCard('Daily PDEX volume',   'analytics-chart-tx-volume', 'sum of transfer amounts per day')}
+                    ${analyticsChartCard('Daily active addresses', 'analytics-chart-addrs', 'distinct addresses involved per day')}
+                    ${analyticsChartCard('Daily blocks produced', 'analytics-chart-blocks', `avg ${series.avgExtrinsics?.length ? Number(series.avgExtrinsics[series.avgExtrinsics.length-1].value).toFixed(1) : '—'} extrinsics/block recently`)}
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Destroy any prior Chart.js instances before re-mounting so canvases
+    // don't leak on date-range toggles.
+    Object.values(analyticsChartHandles).forEach(c => { try { c.destroy(); } catch (_) {} });
+    analyticsChartHandles = {};
+
+    drawAnalyticsBarChart('analytics-chart-tx-count',   series.txCount,         'Transactions',   '#e6007a');
+    drawAnalyticsLineChart('analytics-chart-tx-volume',  series.txVolume,        'PDEX volume',    '#00d4ff');
+    drawAnalyticsLineChart('analytics-chart-addrs',      series.activeAddresses, 'Active addresses','#2ecc71');
+    drawAnalyticsBarChart('analytics-chart-blocks',     series.blocks,          'Blocks',         '#9b59b6');
+
+    // Range pill click handlers — re-fetch with the new day count.
+    el.querySelectorAll('[data-analytics-range]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const d = parseInt(btn.getAttribute('data-analytics-range'), 10);
+            if (Number.isFinite(d) && d > 0) {
+                analyticsRangeDays = d;
+                fetchAnalyticsData();
+            }
+        });
+    });
+}
+
+function analyticsChartCard(title, canvasId, subtitle) {
+    return `<div class="glass" style="padding:16px;border-radius:var(--radius-sm);">
+        <div style="margin-bottom:10px;">
+            <div style="font-size:0.95rem;font-weight:600;color:var(--text-primary);">${stakingEscapeHtml(title)}</div>
+            ${subtitle ? `<div style="font-size:0.72rem;color:var(--text-muted);">${stakingEscapeHtml(subtitle)}</div>` : ''}
+        </div>
+        <div style="height:220px;position:relative;"><canvas id="${stakingEscapeHtml(canvasId)}"></canvas></div>
+    </div>`;
+}
+
+function drawAnalyticsBarChart(canvasId, series, label, color) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !Array.isArray(series) || !window.Chart) return;
+    analyticsChartHandles[canvasId] = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: series.map(p => p.day),
+            datasets: [{
+                label,
+                data: series.map(p => p.value),
+                backgroundColor: color,
+                borderColor: color,
+                borderWidth: 0
+            }]
+        },
+        options: analyticsChartOptions()
+    });
+}
+
+function drawAnalyticsLineChart(canvasId, series, label, color) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !Array.isArray(series) || !window.Chart) return;
+    analyticsChartHandles[canvasId] = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: series.map(p => p.day),
+            datasets: [{
+                label,
+                data: series.map(p => p.value),
+                borderColor: color,
+                backgroundColor: color + '33',
+                fill: true,
+                tension: 0.3,
+                pointRadius: 2,
+                pointHoverRadius: 4
+            }]
+        },
+        options: analyticsChartOptions()
+    });
+}
+
+// Shared Chart.js options — single source so all the analytics charts
+// look identical (dark grid, no legend, compact ticks).
+function analyticsChartOptions() {
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    label: ctx => ' ' + (ctx.dataset.label || '') + ': ' + Number(ctx.parsed.y).toLocaleString('en-US', { maximumFractionDigits: 4 })
+                }
+            }
+        },
+        scales: {
+            x: {
+                ticks: { color: '#888', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 },
+                grid:  { color: 'rgba(255,255,255,0.04)' }
+            },
+            y: {
+                beginAtZero: true,
+                ticks: {
+                    color: '#888',
+                    callback: v => Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 })
+                },
+                grid:  { color: 'rgba(255,255,255,0.04)' }
+            }
+        }
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Watchlist — localStorage-backed star/unstar across the explorer.
+//
+// Storage shape (single key, JSON-encoded):
+//   {
+//     "<kind>:<id>": { kind, id, label, addedAt },
+//     ...
+//   }
+// kinds: 'address' | 'validator' | 'referendum' | 'motion' | 'treasury' |
+//        'public-proposal' | 'block'
+//
+// Why a single map rather than per-kind arrays: cheap O(1) lookup at every
+// star-icon render to decide whether to show the filled or outline icon, and
+// trivial to atomically rewrite on add/remove.
+// ─────────────────────────────────────────────────────────────────────────────
+const WATCHLIST_STORAGE_KEY = 'pdex_watchlist_v1';
+
+function getWatchlist() {
+    try {
+        const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch (_) { return {}; }
+}
+function setWatchlist(map) {
+    try { localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(map)); }
+    catch (_) { /* storage full / disabled — silently ignore */ }
+}
+function watchlistKey(kind, id) { return `${kind}:${id}`; }
+function isWatched(kind, id) {
+    const m = getWatchlist();
+    return Object.prototype.hasOwnProperty.call(m, watchlistKey(kind, id));
+}
+function addToWatchlist(kind, id, label) {
+    const m = getWatchlist();
+    m[watchlistKey(kind, id)] = { kind, id: String(id), label: String(label || id), addedAt: Date.now() };
+    setWatchlist(m);
+    // Notify any open page (e.g. /watchlist) so it can re-render.
+    document.dispatchEvent(new CustomEvent('watchlist:change'));
+}
+function removeFromWatchlist(kind, id) {
+    const m = getWatchlist();
+    delete m[watchlistKey(kind, id)];
+    setWatchlist(m);
+    document.dispatchEvent(new CustomEvent('watchlist:change'));
+}
+function toggleWatchlist(kind, id, label) {
+    if (isWatched(kind, id)) removeFromWatchlist(kind, id);
+    else addToWatchlist(kind, id, label);
+}
+
+// Star button renderer — drop this into any cell/header that should be
+// toggleable. The data-* attributes drive a single global click delegate
+// (see wireWatchlistStars) so the icon works no matter when its container
+// is mounted into the DOM.
+function watchlistStarButton(kind, id, label) {
+    const filled = isWatched(kind, id);
+    const icon = filled ? 'bxs-star' : 'bx-star';
+    const color = filled ? 'var(--brand-primary)' : 'var(--text-muted)';
+    const title = filled ? 'Remove from watchlist' : 'Add to watchlist';
+    return `<button type="button" class="watchlist-star" data-watch-kind="${stakingEscapeHtml(kind)}" data-watch-id="${stakingEscapeHtml(String(id))}" data-watch-label="${stakingEscapeHtml(String(label || id))}" title="${title}" aria-label="${title}" style="background:none;border:none;padding:2px 4px;cursor:pointer;color:${color};vertical-align:middle;line-height:1;font-size:1rem;"><i class='bx ${icon}'></i></button>`;
+}
+
+// Render the dedicated /watchlist page — grouped sections by kind, each with
+// the addedAt timestamp and a quick-link to the underlying detail page.
+function renderWatchlistPage() {
+    const container = document.getElementById('watchlist-content');
+    if (!container) return;
+    const map = getWatchlist();
+    const items = Object.values(map).sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+
+    if (!items.length) {
+        container.innerHTML = `
+            <div class="glass" style="padding:48px 24px;text-align:center;">
+                <i class='bx bx-star' style="font-size:48px;color:var(--text-muted);"></i>
+                <h2 style="margin:16px 0 8px 0;">Your watchlist is empty</h2>
+                <p style="color:var(--text-secondary);max-width:520px;margin:0 auto;">
+                    Click the <i class='bx bx-star' style="color:var(--text-muted);"></i> star next to any address, validator, referendum, motion, or treasury proposal to keep it here. The list lives in your browser only — clearing site data resets it.
+                </p>
+            </div>`;
+        return;
+    }
+
+    // Group by kind. The label sort order below is deliberate — addresses/
+    // validators (frequent re-checks) come before governance items (slow-
+    // moving). Each kind links into its existing detail page so the user
+    // doesn't need a new lookup endpoint.
+    const groups = {
+        validator:        { label: 'Validators',           pathFor: id => `/validator/${encodeURIComponent(id)}` },
+        address:          { label: 'Accounts',             pathFor: id => `/account/${encodeURIComponent(id)}` },
+        referendum:       { label: 'Referenda',            pathFor: () => `/democracy` },
+        motion:           { label: 'Council Motions',      pathFor: () => `/council` },
+        treasury:         { label: 'Treasury Proposals',   pathFor: () => `/treasury` },
+        'public-proposal':{ label: 'Public Proposals',     pathFor: () => `/democracy` },
+        block:            { label: 'Blocks',               pathFor: id => `/block/${encodeURIComponent(id)}` }
+    };
+    let html = `<div class="list-container glass">
+        <div class="list-header"><h2>Watchlist <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;">(${items.length} item${items.length === 1 ? '' : 's'})</span></h2>
+            <button type="button" id="watchlist-clear-all" class="staking-download-btn" style="padding:6px 14px;font-size:0.78rem;"><i class='bx bx-trash'></i> Clear all</button>
+        </div>`;
+    for (const [kind, meta] of Object.entries(groups)) {
+        const ofKind = items.filter(i => i.kind === kind);
+        if (!ofKind.length) continue;
+        html += `<div style="padding:14px 20px;border-top:1px solid var(--border-color);">
+            <h3 style="font-size:0.85rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin:0 0 10px 0;">${stakingEscapeHtml(meta.label)} <span style="color:var(--text-muted);font-weight:400;">(${ofKind.length})</span></h3>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+                ${ofKind.map(it => `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:rgba(255,255,255,0.02);border-radius:6px;">
+                    <div style="min-width:0;flex:1;">
+                        <a href="${meta.pathFor(it.id)}" class="item-link" style="color:var(--brand-secondary);font-weight:500;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${stakingEscapeHtml(it.label || it.id)}</a>
+                        <div style="color:var(--text-muted);font-size:0.72rem;margin-top:2px;">added ${stakingEscapeHtml(formatLocalDateTime(it.addedAt))}</div>
+                    </div>
+                    ${watchlistStarButton(it.kind, it.id, it.label)}
+                </div>`).join('')}
+            </div>
+        </div>`;
+    }
+    html += `</div>`;
+    container.innerHTML = html;
+
+    const clearBtn = document.getElementById('watchlist-clear-all');
+    if (clearBtn) clearBtn.addEventListener('click', () => {
+        if (!confirm('Remove every item from your watchlist? This can\'t be undone.')) return;
+        setWatchlist({});
+        renderWatchlistPage();
+    });
+}
+
+(function wireWatchlistStars() {
+    // Global click delegate so every star icon, regardless of when the
+    // page that contains it was rendered, toggles the right entry.
+    document.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('.watchlist-star') : null;
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const kind = btn.getAttribute('data-watch-kind');
+        const id = btn.getAttribute('data-watch-id');
+        const label = btn.getAttribute('data-watch-label') || id;
+        if (!kind || !id) return;
+        toggleWatchlist(kind, id, label);
+        // Update only this icon in place so we don't blow away surrounding
+        // table state (sort/filter/pagination). The new state is read
+        // straight from localStorage.
+        const filled = isWatched(kind, id);
+        const i = btn.querySelector('i');
+        if (i) {
+            i.classList.toggle('bxs-star', filled);
+            i.classList.toggle('bx-star', !filled);
+        }
+        btn.style.color = filled ? 'var(--brand-primary)' : 'var(--text-muted)';
+        btn.title = filled ? 'Remove from watchlist' : 'Add to watchlist';
+        btn.setAttribute('aria-label', btn.title);
+    });
+
+    // Live-refresh the /watchlist page when the localStorage changes (either
+    // via toggles on the same page, or via another tab — the 'storage'
+    // event fires across tabs).
+    document.addEventListener('watchlist:change', () => {
+        if (document.querySelector('.watchlist-page')?.style.display !== 'none') renderWatchlistPage();
+    });
+    window.addEventListener('storage', (e) => {
+        if (e.key === WATCHLIST_STORAGE_KEY) {
+            if (document.querySelector('.watchlist-page')?.style.display !== 'none') renderWatchlistPage();
+        }
     });
 })();
 

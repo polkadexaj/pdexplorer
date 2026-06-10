@@ -1190,9 +1190,55 @@ app.get('/api/validator/:address', async (req, res) => {
             triggers = loadedHistory.triggers.slice().sort((a, b) => b.era - a.era);
         }
 
-        res.json({ address: address, identity: identity, controller: controller, history: history, triggers: triggers });
+        // Derived metrics for the validator scorecard. Computed here rather
+        // than on the frontend so every caller (UI, API consumers, future
+        // alerts) gets identical numbers.
+        const scorecard = computeValidatorScorecard(history, triggers);
+
+        res.json({ address, identity, controller, history, triggers, scorecard });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// Pure function — derives summary metrics from a validator's per-era history.
+// Returns null when there's no history (caller should hide the card in that
+// case). Kept as a free function so we can also wire it into an alerts pipeline
+// later without re-fetching from the chain.
+function computeValidatorScorecard(history, triggers) {
+    if (!Array.isArray(history) || history.length === 0) return null;
+    // Only count eras where the validator was actually in the active set
+    // (stake > 0). Idle eras would otherwise drag the APY average down to
+    // zero and misrepresent the validator's actual performance.
+    const activeEntries = history.filter(h => Number(h.stake) > 0);
+    const totalEras = history.length;
+    const activeEras = activeEntries.length;
+    const activeEraRate = totalEras ? activeEras / totalEras : 0;
+
+    const commissions = history.map(h => Number(h.commission) || 0);
+    const avgCommission = commissions.reduce((s, c) => s + c, 0) / Math.max(commissions.length, 1);
+    const minCommission = commissions.length ? Math.min(...commissions) : 0;
+    const maxCommission = commissions.length ? Math.max(...commissions) : 0;
+
+    // APY estimate — average across the active eras. Using the active subset
+    // avoids the misleading "0% APY" pull from idle eras (which encode no
+    // payout, not a payout of zero).
+    const apys = activeEntries.map(h => Number(h.apy) || 0);
+    const estimatedApy = apys.length ? apys.reduce((s, a) => s + a, 0) / apys.length : 0;
+
+    const currentStake = Number(history[0] && history[0].stake) || 0;
+
+    return {
+        estimatedApy,        // mean APY over active eras
+        avgCommission,       // mean commission over all eras in history window
+        minCommission,
+        maxCommission,
+        activeEras,          // eras where stake > 0
+        totalEras,           // total eras in the history window
+        activeEraRate,       // 0..1
+        currentStake,        // PDEX in the most recent era we have
+        slashCount: Array.isArray(triggers) ? triggers.length : 0,
+        historyWindow: totalEras
+    };
+}
 
 app.get('/api/search/:query', async (req, res) => {
     const q = req.params.query.trim();
@@ -1488,6 +1534,56 @@ app.get('/api/discussions', (req, res) => {
         cacheMedium(res);
         res.json({ threads: db.getThreads(kind) });
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ANALYTICS ENDPOINTS ---
+// Daily time-series aggregates derived from the existing chain index, plus
+// a point-in-time snapshot of staking metrics from the network-info cache.
+// Lives behind the same medium-cache TTL as other slow-moving lists so
+// Cloudflare absorbs the bulk of traffic.
+app.get('/api/analytics/timeseries', (req, res) => {
+    try {
+        const days = Math.min(Math.max(parseInt(req.query.days || '30', 10) || 30, 1), 365);
+        const sinceTs = Date.now() - days * 24 * 60 * 60 * 1000;
+        cacheMedium(res);
+        res.json({ days, since: sinceTs, series: db.getDailyAnalytics(sinceTs) });
+    } catch (err) {
+        console.error('API Error /api/analytics/timeseries:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Snapshot of the current chain state — counts and ratios used by the
+// dashboard's KPI cards. Reads from the existing network_info KV (kept hot
+// by refreshNetworkInfoInBackground) so this is cheap to call.
+app.get('/api/analytics/snapshot', (req, res) => {
+    try {
+        const ni = db.getKv('network_info') || {};
+        const network = ni.networkInfo || {};
+        cacheMedium(res);
+        res.json({
+            // Counts of things in the indexer's database.
+            indexedBlocks: db.countBlocks(),
+            indexedEvents: db.countEvents(),
+            indexedTransactions: db.countTransactions(),
+            indexedReferenda: db.countDemocracyReferenda(),
+            indexedThreads: db.countThreads(),
+            // Chain-state network info (populated by refreshNetworkInfoInBackground).
+            totalIssuance: network.totalIssuance || 0,
+            totalStaked: network.totalStaked || 0,
+            stakingRatio: (network.totalIssuance && Number(network.totalIssuance) > 0)
+                ? (Number(network.totalStaked) / Number(network.totalIssuance))
+                : 0,
+            validatorCount: network.validatorCount || 0,
+            nominatorCount: network.nominatorCount || 0,
+            activeEra: network.activeEra || 0,
+            lastSync: ni.lastSync || 0,
+            status: ni.status || 'Initializing'
+        });
+    } catch (err) {
+        console.error('API Error /api/analytics/snapshot:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/discussions/:id', (req, res) => {
