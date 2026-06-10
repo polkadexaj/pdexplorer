@@ -2694,10 +2694,25 @@ async function fetchTxDetails(block, hash) {
     });
     try {
         const data = await fetchApiJson(`/api/extrinsic/${block}/${hash}`);
+
+        // The backend's ±2 fallback may have located the tx in a neighbour
+        // block. Quietly correct the URL via replaceState so the user can
+        // share the right link without seeing a flash of "not found" first.
+        // We also flag the correction in a small banner above the table so
+        // they know what happened.
+        let correctionBanner = '';
+        if (data.correctedFrom != null && Number.isFinite(data.block) && data.block !== data.correctedFrom) {
+            try { history.replaceState(null, '', '/tx/' + data.block + '/' + data.hash); } catch (_) {}
+            correctionBanner = `<div style="margin: 0 20px 12px; padding: 10px 14px; background: rgba(245, 166, 35, 0.1); border: 1px solid rgba(245, 166, 35, 0.3); border-radius: 4px; font-size: 0.82rem; color: var(--text-secondary);">
+                <i class='bx bx-info-circle' style="vertical-align: middle; color: #f5a623;"></i>
+                The link pointed at block #${data.correctedFrom}, but the transaction is actually in block #${data.block}. The URL has been corrected — likely a chain reorg between when the link was generated and when it was opened.
+            </div>`;
+        }
+
         updateSeoMeta('tx-details', {
             title: `Transaction ${shortHash}… (${data.event || 'extrinsic'}) — Polkadex Explorer`,
-            description: `Polkadex Mainnet transaction ${data.hash || hash} in block #${block}: ${data.event || 'extrinsic'} from ${data.from || 'unknown'} to ${data.to || 'unknown'}, status: ${data.status || 'unknown'}.`,
-            canonicalPath: `/tx/${block}/${hash}`
+            description: `Polkadex Mainnet transaction ${data.hash || hash} in block #${data.block}: ${data.event || 'extrinsic'} from ${data.from || 'unknown'} to ${data.to || 'unknown'}, status: ${data.status || 'unknown'}.`,
+            canonicalPath: '/tx/' + data.block + '/' + (data.hash || hash)
         });
 
         let html = `
@@ -2705,6 +2720,7 @@ async function fetchTxDetails(block, hash) {
                 <h2>Tx: ${data.hash}</h2>
                 <a href="#" data-close-detail="transactions" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;" title="Close" aria-label="Close"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
+            ${correctionBanner}
             <div style="padding: 20px;">
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px; text-align: left;">
                     <tr><td style="padding: 10px; font-weight: bold; width: 150px;">Time</td><td style="padding: 10px;">${stakingEscapeHtml(formatLocalDateTime(data.time))}</td></tr>
@@ -2721,8 +2737,76 @@ async function fetchTxDetails(block, hash) {
         `;
         txDetailsContainer.innerHTML = html;
     } catch (e) {
+        // Special case: "Extrinsic not found in block" (after the backend's
+        // own ±2 neighbour-block fallback already failed). Render a recovery
+        // card with a button that scans recent blocks for the hash. Common
+        // cause: a stale link from before a chain reorg moved the tx more
+        // than 2 blocks away, or a hand-edited URL with the wrong block.
+        if (e && e.status === 404 && /Extrinsic not found/i.test(e.message || '')) {
+            renderTxNotFoundCard(block, hash);
+            return;
+        }
         renderApiError(txDetailsContainer, e, () => fetchTxDetails(block, hash));
     }
+}
+
+// Recovery UX for the "Extrinsic not found in block N" 404. Offers a button
+// that calls /api/extrinsic-by-hash/:txHash to scan recent blocks. On a hit
+// the user is redirected to the corrected /tx/<actual_block>/<hash> URL;
+// on a miss we direct them to the deep search as a final escape.
+function renderTxNotFoundCard(block, hash) {
+    if (!txDetailsContainer) return;
+    const shortHash = (hash || '').substring(0, 12);
+    txDetailsContainer.innerHTML = `
+        <div class="list-container glass" style="padding: 40px 28px;">
+            <div style="text-align: center; max-width: 580px; margin: 0 auto;">
+                <i class='bx bx-search-alt' style="font-size: 42px; color: var(--brand-primary); opacity: 0.7;"></i>
+                <h2 style="margin: 14px 0 8px;">Transaction not in block #${stakingEscapeHtml(String(block))}</h2>
+                <p style="color: var(--text-secondary); font-size: 0.9rem; line-height: 1.6;">
+                    The link pointed at <code style="color: var(--brand-secondary); font-size: 0.82rem;">${stakingEscapeHtml(shortHash)}…</code>
+                    in block #${stakingEscapeHtml(String(block))}, but no extrinsic with that hash is in that block (or in the two blocks on either side).
+                    This is usually a stale link from before a chain reorg moved the transaction elsewhere.
+                </p>
+                <div style="display: flex; gap: 10px; justify-content: center; margin-top: 22px; flex-wrap: wrap;">
+                    <button type="button" id="tx-recover-btn" class="staking-download-btn" style="padding: 10px 22px; background: var(--brand-primary); color: white; border-color: var(--brand-primary);">
+                        <i class='bx bx-search'></i> Search recent blocks for this hash
+                    </button>
+                    <a href="/search?q=${encodeURIComponent(hash)}" class="staking-download-btn" style="padding: 10px 22px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+                        <i class='bx bx-globe'></i> Deep network search
+                    </a>
+                </div>
+                <div id="tx-recover-status" style="margin-top: 16px; font-size: 0.85rem; color: var(--text-muted);"></div>
+            </div>
+        </div>`;
+
+    const btn = document.getElementById('tx-recover-btn');
+    const status = document.getElementById('tx-recover-status');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const origHtml = btn.innerHTML;
+        btn.innerHTML = "<i class='bx bx-loader-alt bx-spin'></i> Scanning recent blocks…";
+        try {
+            const data = await fetchApiJson('/api/extrinsic-by-hash/' + encodeURIComponent(hash));
+            if (data.found && Number.isFinite(data.block)) {
+                if (status) status.innerHTML = `Found in block #${data.block}. Redirecting…`;
+                // Use the SPA router so the page transitions in-app rather
+                // than reloading the shell.
+                navigateTo('tx/' + data.block + '/' + data.txHash);
+                return;
+            }
+            if (status) {
+                status.innerHTML = `Not found in the last ${data.scanned || 'N'} blocks (scanned ${data.fromBlock || ''} down to ${data.toBlock || ''}). ` +
+                    `Try the deep network search, or paste the hash on a chain-aware archive node directly.`;
+            }
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+        } catch (err) {
+            if (status) status.innerHTML = `Search failed: ${stakingEscapeHtml(err.message || 'unknown error')}.`;
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+        }
+    });
 }
 
 // Kept for backward compatibility — if a third-party link still drops a "#X"

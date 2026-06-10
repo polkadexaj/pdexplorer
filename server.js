@@ -1192,26 +1192,91 @@ app.get('/api/block/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Normalise an extrinsic hash as it might appear in a URL or shared link:
+//   "0xABcd…"  → "0xabcd…"          (case-insensitive)
+//   "abcd…"    → "0xabcd…"          (missing 0x prefix)
+//   "  0x…  "  → "0x…"              (stray whitespace)
+// Returns null when the input doesn't look like a 32-byte hex hash so the
+// caller can short-circuit with a 400 instead of doing pointless RPC work.
+function normalizeExtrinsicHash(raw) {
+    if (typeof raw !== 'string') return null;
+    let s = raw.trim().toLowerCase();
+    if (!s.startsWith('0x')) s = '0x' + s;
+    if (!/^0x[0-9a-f]{64}$/.test(s)) return null;
+    return s;
+}
+
+// Inspect a single block's extrinsics for one matching `txHash`. Returns
+// { extIndex, targetExt, blockNumber } on hit or null on miss. Pulled out
+// of the route handler so the ±2 neighbour-block fallback can reuse it
+// without duplicating the iteration.
+async function findExtrinsicInBlock(blockNumberOrHash, txHash) {
+    let blockHash = blockNumberOrHash;
+    if (/^\d+$/.test(String(blockNumberOrHash))) {
+        try {
+            blockHash = await globalApi.rpc.chain.getBlockHash(parseInt(blockNumberOrHash, 10));
+        } catch (_e) { return null; }
+    }
+    let signedBlock;
+    try { signedBlock = await globalApi.rpc.chain.getBlock(blockHash); }
+    catch (_e) { return null; }
+    if (!signedBlock) return null;
+    const extrinsics = signedBlock.block.extrinsics || [];
+    for (let i = 0; i < extrinsics.length; i++) {
+        if (extrinsics[i].hash.toHex() === txHash) {
+            return {
+                extIndex: i,
+                targetExt: extrinsics[i],
+                signedBlock,
+                blockHash,
+                blockNumber: signedBlock.block.header.number.toNumber()
+            };
+        }
+    }
+    return null;
+}
+
 app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
     if (!requireRpc(res)) return;
     try {
         const blockId = req.params.block.trim();
-        const txHash = req.params.txHash.trim();
-        let hash = blockId;
-        if (/^\d+$/.test(blockId)) hash = await globalApi.rpc.chain.getBlockHash(parseInt(blockId));
+        const rawHash = req.params.txHash.trim();
+        const txHash = normalizeExtrinsicHash(rawHash);
+        if (!txHash) return res.status(400).json({ error: 'Invalid transaction hash format. Expect a 32-byte hex string (66 chars including 0x).' });
 
-        const signedBlock = await globalApi.rpc.chain.getBlock(hash);
-        if (!signedBlock) return res.status(404).json({ error: "Block not found" });
+        // Try the requested block first.
+        let hit = await findExtrinsicInBlock(blockId, txHash);
 
-        const extrinsics = signedBlock.block.extrinsics;
-        let extIndex = -1;
-        let targetExt = null;
-        for (let i = 0; i < extrinsics.length; i++) {
-            if (extrinsics[i].hash.toHex() === txHash) { extIndex = i; targetExt = extrinsics[i]; break; }
+        // ±2 fallback. Only safe when the URL contained a block NUMBER (we
+        // can do arithmetic on it); a block-hash URL points at one specific
+        // block, so we don't try to guess neighbours from it. The most
+        // common "wrong block" case is an off-by-one from a chain reorg
+        // between the time a link was generated and clicked.
+        const triedBlocks = [blockId];
+        if (!hit && /^\d+$/.test(blockId)) {
+            const target = parseInt(blockId, 10);
+            for (const delta of [-1, 1, -2, 2]) {
+                const candidate = target + delta;
+                if (candidate < 0) continue;
+                triedBlocks.push(String(candidate));
+                hit = await findExtrinsicInBlock(String(candidate), txHash);
+                if (hit) break;
+            }
         }
-        if (!targetExt) return res.status(404).json({ error: "Extrinsic not found in block" });
 
-        const allEvents = await getEventsAtBlock(hash);
+        if (!hit) {
+            return res.status(404).json({
+                error: "Extrinsic not found in block",
+                txHash,
+                searchedBlocks: triedBlocks,
+                // Hint the frontend so it can surface the "search recent blocks"
+                // escape hatch instead of just showing a dead-end error.
+                hint: 'try-recent-search'
+            });
+        }
+
+        const { extIndex, targetExt, signedBlock, blockHash, blockNumber } = hit;
+        const allEvents = await getEventsAtBlock(blockHash);
         if (!allEvents) return res.status(503).json({ error: 'Cannot decode events at this historical block (the node may have pruned its state).' });
         const txEvents = allEvents.filter(record => record.phase.isApplyExtrinsic && record.phase.asApplyExtrinsic.toNumber() === extIndex);
 
@@ -1219,9 +1284,16 @@ app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
         const status = getExtrinsicStatus(allEvents, extIndex);
         const summary = getExtrinsicAmountSummary(targetExt);
 
+        // If we found the tx in a neighbour block, surface `correctedFrom`
+        // so the frontend can replaceState the URL onto the right block.
+        const correctedFrom = (/^\d+$/.test(blockId) && parseInt(blockId, 10) !== blockNumber)
+            ? parseInt(blockId, 10)
+            : null;
+
         res.json({
             hash: txHash,
-            block: signedBlock.block.header.number.toNumber(),
+            block: blockNumber,
+            correctedFrom,
             time: timestamp,
             event: `${targetExt.method.section} -> ${targetExt.method.method}`,
             from: targetExt.isSigned ? targetExt.signer.toString() : "System",
@@ -1232,6 +1304,58 @@ app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
             events: txEvents.map(e => e.toHuman().event)
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Locate a transaction by hash when the user has the hash but not the
+// correct block number. Scans backwards from the chain head up to a
+// capped window (default 200 blocks; ?recent=N to widen, max 2000).
+// Useful as a fallback when /api/extrinsic/:block/:txHash 404s — the
+// frontend's tx-detail error UX hits this to recover the right URL.
+//
+// Returns either:
+//   { found: true,  block, txHash }                 → frontend redirects
+//   { found: false, txHash, scanned, fromBlock, toBlock } → suggest deep search
+//
+// Note: deliberately scans the chain (RPC) rather than the SQLite index
+// because the tx might exist on chain but not yet in our event index
+// (e.g. during a backfill gap). The chain is the source of truth here.
+app.get('/api/extrinsic-by-hash/:txHash', async (req, res) => {
+    if (!requireRpc(res)) return;
+    try {
+        const txHash = normalizeExtrinsicHash(req.params.txHash);
+        if (!txHash) return res.status(400).json({ error: 'Invalid transaction hash format. Expect a 32-byte hex string (66 chars including 0x).' });
+
+        // Cap the scan so a runaway query can't burn through the RPC node.
+        // 200 blocks ≈ 40 minutes of chain history at 12s/block — covers
+        // the "stale link" use case without scanning forever. Raise via
+        // ?recent= if you really need to (max 2000 = ~6h).
+        const requested = parseInt(req.query.recent, 10);
+        const recent = Math.min(Math.max(Number.isFinite(requested) ? requested : 200, 1), 2000);
+
+        const head = (await globalApi.rpc.chain.getHeader()).number.toNumber();
+        const fromBlock = head;
+        const toBlock = Math.max(0, head - recent + 1);
+        let scanned = 0;
+
+        // Walk backwards. We chunk into small concurrent batches (8 at a
+        // time) so a 200-block scan completes in ~2-3 seconds on a healthy
+        // node instead of ~20s serially.
+        const BATCH = 8;
+        for (let top = fromBlock; top >= toBlock; top -= BATCH) {
+            const chunk = [];
+            for (let n = top; n > top - BATCH && n >= toBlock; n--) chunk.push(n);
+            scanned += chunk.length;
+            const results = await Promise.all(chunk.map(n => findExtrinsicInBlock(String(n), txHash)));
+            const found = results.find(r => r && r.targetExt);
+            if (found) {
+                return res.json({ found: true, block: found.blockNumber, txHash, scanned });
+            }
+        }
+        res.json({ found: false, txHash, scanned, fromBlock, toBlock });
+    } catch (err) {
+        console.error('API Error /api/extrinsic-by-hash/:txHash:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/validator/:address', async (req, res) => {
