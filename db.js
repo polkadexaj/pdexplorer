@@ -236,6 +236,26 @@ CREATE TABLE IF NOT EXISTS address_label_reports (
   PRIMARY KEY (label_address, label_signer, reporter)
 );
 CREATE INDEX IF NOT EXISTS idx_label_reports_label ON address_label_reports(label_address, label_signer);
+
+-- Per-indexer, per-block retry queue. When a sparse indexer (staking
+-- rewards, governance, transactions) fails to scan a single block, the
+-- catch block records a row here instead of silently skipping. The
+-- indexer's gap-fill phase pops the oldest rows on the next tick,
+-- retries them, and clears them on success. The PK guarantees one row
+-- per (indexer, block) so duplicate failures just bump the attempts
+-- counter via upsert.
+CREATE TABLE IF NOT EXISTS scan_failures (
+  indexer     TEXT NOT NULL,
+  block       INTEGER NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 1,
+  last_error  TEXT,
+  first_at    INTEGER NOT NULL,
+  last_at     INTEGER NOT NULL,
+  PRIMARY KEY (indexer, block)
+);
+-- Lookup index for the oldest-first retry order used by getScanFailures.
+CREATE INDEX IF NOT EXISTS idx_scan_failures_replay
+    ON scan_failures(indexer, attempts, last_at);
 `;
 
 // Idempotent ALTER TABLE ADD COLUMN — checks PRAGMA table_info first so it
@@ -996,6 +1016,71 @@ export function countAddressLabels() {
 }
 export function countLabelVotes() {
     return db.prepare('SELECT COUNT(*) AS c FROM address_label_votes').get().c;
+}
+
+// ─── Scan-failure retry queue ──────────────────────────────────────────────
+// Per-indexer record of blocks that errored on first scan. The gap-fill
+// phase in each indexer's sync function reads from here, retries each
+// entry, and clears it on success. Rows that hit the retry cap stay in
+// the table for operator inspection but are no longer returned by
+// getScanFailures.
+
+// Idempotent upsert. First insertion records first_at + initial error;
+// subsequent failures for the same (indexer, block) increment the attempts
+// counter and overwrite last_error / last_at so the operator can see the
+// latest reason and oldest first_at side by side.
+export function recordScanFailure(indexer, block, errMessage) {
+    const now = Date.now();
+    const msg = String(errMessage || '').slice(0, 500);
+    db.prepare(`
+        INSERT INTO scan_failures (indexer, block, attempts, last_error, first_at, last_at)
+        VALUES (?, ?, 1, ?, ?, ?)
+        ON CONFLICT(indexer, block) DO UPDATE SET
+            attempts   = attempts + 1,
+            last_error = excluded.last_error,
+            last_at    = excluded.last_at
+    `).run(indexer, block, msg, now, now);
+}
+
+// Clear a single (indexer, block) entry — called after a retry succeeds.
+export function clearScanFailure(indexer, block) {
+    db.prepare('DELETE FROM scan_failures WHERE indexer = ? AND block = ?').run(indexer, block);
+}
+
+// Return up to `limit` failures for the given indexer, oldest first,
+// excluding rows that have exceeded the retry cap. Caller decides what
+// to do with the cap — surface the row in a UI, log it, or just leave
+// it alone. Rows above the cap stay in the table forever (no auto-prune)
+// since they're a signal that something is genuinely broken for that
+// block.
+export function getScanFailures(indexer, limit = 20, maxAttempts = 10) {
+    return db.prepare(`
+        SELECT block, attempts, last_error AS lastError,
+               first_at AS firstAt, last_at AS lastAt
+        FROM scan_failures
+        WHERE indexer = ? AND attempts < ?
+        ORDER BY last_at ASC
+        LIMIT ?
+    `).all(indexer, maxAttempts, limit);
+}
+
+// Counts split by "retrying" (under cap) vs "permanent" (at/over cap) so
+// operators can quickly tell whether the queue is just busy or whether
+// blocks are genuinely stuck.
+export function countScanFailures(indexer, maxAttempts = 10) {
+    const row = db.prepare(`
+        SELECT
+            SUM(CASE WHEN attempts <  ? THEN 1 ELSE 0 END) AS retrying,
+            SUM(CASE WHEN attempts >= ? THEN 1 ELSE 0 END) AS permanent,
+            COUNT(*) AS total
+        FROM scan_failures
+        WHERE indexer = ?
+    `).get(maxAttempts, maxAttempts, indexer);
+    return {
+        retrying:  Number(row && row.retrying)  || 0,
+        permanent: Number(row && row.permanent) || 0,
+        total:     Number(row && row.total)     || 0
+    };
 }
 
 // --- one-time migration of legacy JSON caches ---

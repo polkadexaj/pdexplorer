@@ -137,6 +137,16 @@ const STAKING_REWARDS_INTERVAL_MS   = readPositiveInteger(process.env.STAKING_RE
 const GOVERNANCE_INDEXER_INTERVAL_MS = readPositiveInteger(process.env.GOVERNANCE_INDEXER_INTERVAL_MS, 30 * 1000);
 const CHAIN_INDEX_INTERVAL_MS       = readPositiveInteger(process.env.CHAIN_INDEX_INTERVAL_MS,       12 * 1000);
 
+// Gap-fill (scan_failures retry queue) tuning. SCAN_GAP_FILL_BATCH is how
+// many failures each indexer pops + retries per tick; SCAN_MAX_ATTEMPTS is
+// the per-row retry cap — above that the row stays in the table as a
+// "permanent skip" for operator inspection but is no longer retried.
+// Together they bound per-tick CPU/RPC load: with three indexers, defaults
+// give ~60 retries/minute of capacity, enough to drain a multi-hour
+// outage in roughly half an hour after the chain comes back.
+const SCAN_GAP_FILL_BATCH = readPositiveInteger(process.env.SCAN_GAP_FILL_BATCH, 20);
+const SCAN_MAX_ATTEMPTS   = readPositiveInteger(process.env.SCAN_MAX_ATTEMPTS,   10);
+
 // --- Chain index tuning (blocks + events combined indexer) ----------------
 // The chain indexer keeps two watermarks: latestScannedBlock (forward, head)
 // and backfillCursor (descending, genesis-ward), so a missed window during an
@@ -714,6 +724,33 @@ function mergeFinancialTransactions(existingTransactions, incomingTransactions) 
         .slice(0, TX_CACHE_LIMIT);
 }
 
+// Scan one block for financial-transaction (transfer) events. Extracted
+// from scanFinancialTransactions's inline Promise.all so the gap-fill
+// retry phase in syncTransactions can share the same logic. Returns
+// { blockNumber, transactions, ok } — see scanBlockForRewards for the
+// rationale on the two-field shape.
+async function scanBlockForTransactions(blockNumber) {
+    try {
+        const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+        const [events, timestamp] = await Promise.all([
+            getEventsAtBlock(blockHash),
+            getBlockTimestampAt(blockHash)
+        ]);
+        if (!events) return { blockNumber, transactions: [], ok: true };
+        const blockTransactions = [];
+        events.forEach((record, eventIndex) => {
+            const tx = buildFinancialTransactionFromEvent(record, eventIndex, blockNumber, blockHash, timestamp);
+            if (tx) blockTransactions.push(tx);
+        });
+        return { blockNumber, transactions: blockTransactions, ok: true };
+    } catch (err) {
+        const short = shortErrorMessage(err);
+        console.warn(`Financial transaction scan skipped block ${blockNumber}: ${short}`);
+        db.recordScanFailure('transactions', blockNumber, short);
+        return { blockNumber, transactions: [], ok: false };
+    }
+}
+
 async function scanFinancialTransactions({
     startBlock,
     stopBlock = 0,
@@ -734,28 +771,9 @@ async function scanFinancialTransactions({
         }
         if (blockNumbers.length === 0) break;
 
-        const batchResults = await Promise.all(blockNumbers.map(async blockNumber => {
-            try {
-                const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
-                // See getEventsAtBlock — uses the block's own runtime metadata
-                // so historical event encodings decode cleanly across runtime
-                // upgrades. Null = skip silently.
-                const [events, timestamp] = await Promise.all([
-                    getEventsAtBlock(blockHash),
-                    getBlockTimestampAt(blockHash)
-                ]);
-                if (!events) return { blockNumber, transactions: [] };
-                const blockTransactions = [];
-                events.forEach((record, eventIndex) => {
-                    const tx = buildFinancialTransactionFromEvent(record, eventIndex, blockNumber, blockHash, timestamp);
-                    if (tx) blockTransactions.push(tx);
-                });
-                return { blockNumber, transactions: blockTransactions };
-            } catch (err) {
-                console.warn(`Financial transaction scan skipped block ${blockNumber}: ${shortErrorMessage(err)}`);
-                return { blockNumber, transactions: [] };
-            }
-        }));
+        // Per-block scan logic now lives in scanBlockForTransactions —
+        // shared with the gap-fill retry phase in syncTransactions.
+        const batchResults = await Promise.all(blockNumbers.map(scanBlockForTransactions));
 
         scannedBlocks += blockNumbers.length;
         lastScannedBlock = blockNumbers[blockNumbers.length - 1];
@@ -2459,7 +2477,10 @@ async function scanBlockForGovernance(blockNumber, collectiveName) {
             if (ev.section === 'treasury' && TREASURY_METHODS.includes(ev.method)) relevant.push(ev);
             else if (ev.section === collectiveName && COLLECTIVE_METHODS.includes(ev.method)) relevant.push(ev);
         });
-        if (!relevant.length) return null;
+        // Clean scan with no governance events of interest in this block.
+        // Returned as ok=true so the gap-fill retry phase clears the
+        // failure row instead of treating it as another error.
+        if (!relevant.length) return { treasury: [], motions: [], ok: true };
 
         const timestamp = await getBlockTimestampAt(blockHash);
         const treasury = [];
@@ -2528,10 +2549,12 @@ async function scanBlockForGovernance(blockNumber, collectiveName) {
                 }
             }
         }
-        return { treasury, motions };
+        return { treasury, motions, ok: true };
     } catch (err) {
-        console.warn(`Governance scan skipped block ${blockNumber}: ${shortErrorMessage(err)}`);
-        return null;
+        const short = shortErrorMessage(err);
+        console.warn(`Governance scan skipped block ${blockNumber}: ${short}`);
+        db.recordScanFailure('governance', blockNumber, short);
+        return { treasury: [], motions: [], ok: false };
     }
 }
 
@@ -2629,6 +2652,34 @@ async function syncGovernance() {
             } else {
                 backfillComplete = true;
             }
+        }
+
+        // GAP-FILL PASS — retry blocks recorded in scan_failures by previous
+        // ticks. Same recovery pattern as the staking-rewards indexer: clear
+        // the failure row on a clean re-scan, leave it (with bumped attempts)
+        // on another error.
+        const govFailures = db.getScanFailures('governance', SCAN_GAP_FILL_BATCH, SCAN_MAX_ATTEMPTS);
+        if (govFailures.length) {
+            const recoveredTreasury = [];
+            const recoveredMotions = [];
+            let recovered = 0;
+            let stillFailing = 0;
+            for (const f of govFailures) {
+                const r = await scanBlockForGovernance(f.block, collectiveName);
+                if (r && r.ok) {
+                    for (const t of r.treasury) recoveredTreasury.push(t);
+                    for (const m of r.motions) recoveredMotions.push(m);
+                    db.clearScanFailure('governance', f.block);
+                    recovered++;
+                } else {
+                    stillFailing++;
+                }
+            }
+            if (recoveredTreasury.length || recoveredMotions.length) {
+                await applyGovernanceRecords(recoveredTreasury, recoveredMotions);
+            }
+            const stats = db.countScanFailures('governance', SCAN_MAX_ATTEMPTS);
+            console.log(`[governance] gap-fill: ${recovered} recovered, ${stillFailing} still failing (${stats.retrying} retrying / ${stats.permanent} permanent in queue)`);
         }
 
         db.setSyncState('governance', {
@@ -3073,6 +3124,30 @@ async function syncTransactions() {
         }
 
         db.insertTransactions(scan.transactions);
+
+        // GAP-FILL PASS — same recovery pattern as the staking-rewards
+        // and governance indexers. Pop oldest failures, retry each via
+        // scanBlockForTransactions, clear on success.
+        const txFailures = db.getScanFailures('transactions', SCAN_GAP_FILL_BATCH, SCAN_MAX_ATTEMPTS);
+        if (txFailures.length) {
+            const recoveredTx = [];
+            let recovered = 0;
+            let stillFailing = 0;
+            for (const f of txFailures) {
+                const r = await scanBlockForTransactions(f.block);
+                if (r.ok) {
+                    for (const t of r.transactions) recoveredTx.push(t);
+                    db.clearScanFailure('transactions', f.block);
+                    recovered++;
+                } else {
+                    stillFailing++;
+                }
+            }
+            if (recoveredTx.length) db.insertTransactions(recoveredTx);
+            const stats = db.countScanFailures('transactions', SCAN_MAX_ATTEMPTS);
+            console.log(`[transactions] gap-fill: ${recovered} recovered, ${stillFailing} still failing (${stats.retrying} retrying / ${stats.permanent} permanent in queue)`);
+        }
+
         db.setSyncState('transactions', {
             lastSync: Date.now(),
             status: 'Synced',
@@ -3225,7 +3300,16 @@ function extractPayoutInfo(extrinsic) {
     catch (e) { return { era: null, validator: null }; }
 }
 
-// Scan a single block; returns an array of reward records (usually empty).
+// Scan a single block for reward events.
+//
+// Returns: { rewards: Array<RewardRow>, ok: boolean }
+//   ok=true  — scan completed cleanly (rewards may be empty if no payouts
+//              happened in this block, which is the common case)
+//   ok=false — scan threw and we recorded the failure in scan_failures;
+//              rewards is always [] in that case
+// The two-field return lets the gap-fill phase distinguish a successful
+// "no events" scan (clear the failure row) from another failure (leave the
+// row so the attempts counter that recordScanFailure just bumped sticks).
 async function scanBlockForRewards(blockNumber) {
     try {
         const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
@@ -3235,14 +3319,17 @@ async function scanBlockForRewards(blockNumber) {
         // has pruned that block's state); we skip the block silently in that
         // case rather than letting the library spew its bytes-dump error.
         const events = await getEventsAtBlock(blockHash);
-        if (!events) return [];
+        // No events decodable for this block — treat as a clean "no rewards"
+        // scan so the gap-fill phase doesn't keep retrying a permanently-
+        // un-decodable historical block.
+        if (!events) return { rewards: [], ok: true };
 
         const hits = [];
         events.forEach((record, eventIndex) => {
             const parsed = parseRewardedEvent(record);
             if (parsed) hits.push({ record, parsed, eventIndex });
         });
-        if (hits.length === 0) return [];
+        if (hits.length === 0) return { rewards: [], ok: true };
 
         // Only fetch the full block (for era/validator context) when the block
         // actually contains payouts — most blocks do not.
@@ -3252,7 +3339,7 @@ async function scanBlockForRewards(blockNumber) {
         ]);
         const blockHashHex = blockHash.toHex();
 
-        return hits.map(({ record, parsed, eventIndex }) => {
+        const rewards = hits.map(({ record, parsed, eventIndex }) => {
             let era = null;
             let validator = null;
             if (record.phase.isApplyExtrinsic) {
@@ -3272,9 +3359,12 @@ async function scanBlockForRewards(blockNumber) {
                 timestamp
             };
         });
+        return { rewards, ok: true };
     } catch (err) {
-        console.warn(`Staking rewards scan skipped block ${blockNumber}: ${shortErrorMessage(err)}`);
-        return [];
+        const short = shortErrorMessage(err);
+        console.warn(`Staking rewards scan skipped block ${blockNumber}: ${short}`);
+        db.recordScanFailure('staking_rewards', blockNumber, short);
+        return { rewards: [], ok: false };
     }
 }
 
@@ -3295,8 +3385,12 @@ async function scanStakingRewards({ startBlock, stopBlock, maxBlocks }) {
         const batchResults = await Promise.all(blockNumbers.map(scanBlockForRewards));
         scannedBlocks += blockNumbers.length;
         oldestScannedBlock = blockNumbers[blockNumbers.length - 1];
-        for (const blockRewards of batchResults) {
-            for (const reward of blockRewards) rewards.push(reward);
+        for (const result of batchResults) {
+            // scanBlockForRewards returns { rewards, ok } now (see its
+            // docstring). Failures are already recorded in scan_failures
+            // by the scanner's catch — we just collect the successful
+            // rewards here.
+            for (const reward of result.rewards) rewards.push(reward);
         }
     }
     return { rewards, scannedBlocks, oldestScannedBlock };
@@ -3445,6 +3539,38 @@ async function syncStakingRewards() {
             } else {
                 backfillComplete = true;
             }
+        }
+
+        // GAP-FILL PASS — retry blocks that errored on a previous scan.
+        // Pop the SCAN_GAP_FILL_BATCH oldest entries from scan_failures and
+        // re-attempt each via the same per-block scanner. On success, the
+        // failure row is cleared. On another failure, recordScanFailure
+        // (called from the scanner's catch block) bumps the attempts counter
+        // — once a row exceeds SCAN_MAX_ATTEMPTS it falls out of the
+        // getScanFailures() query and stays in the table as a permanent skip
+        // for the operator to investigate by hand.
+        const failures = db.getScanFailures('staking_rewards', SCAN_GAP_FILL_BATCH, SCAN_MAX_ATTEMPTS);
+        if (failures.length) {
+            let recovered = 0;
+            let stillFailing = 0;
+            for (const f of failures) {
+                const retry = await scanBlockForRewards(f.block);
+                db.insertStakingRewards(retry.rewards.map(toRewardRow));
+                if (retry.ok) {
+                    // Successful re-scan (with or without rewards) — clear
+                    // the failure row so future ticks don't re-attempt.
+                    db.clearScanFailure('staking_rewards', f.block);
+                    recovered++;
+                } else {
+                    // Scanner's catch already bumped the attempts counter
+                    // via recordScanFailure — leave the row in place so
+                    // the next tick picks it up again (or, after attempts
+                    // exceeds the cap, leaves it for operator inspection).
+                    stillFailing++;
+                }
+            }
+            const stats = db.countScanFailures('staking_rewards', SCAN_MAX_ATTEMPTS);
+            console.log(`[staking_rewards] gap-fill: ${recovered} recovered, ${stillFailing} still failing (${stats.retrying} retrying / ${stats.permanent} permanent in queue)`);
         }
 
         db.setSyncState('staking_rewards', { initialized, latestScannedBlock, oldestScannedBlock, backfillCursor, backfillComplete, lastSync: Date.now(), status: 'Synced' });
