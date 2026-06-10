@@ -1242,7 +1242,11 @@ app.get('/api/extrinsic/:block/:txHash', async (req, res) => {
         const blockId = req.params.block.trim();
         const rawHash = req.params.txHash.trim();
         const txHash = normalizeExtrinsicHash(rawHash);
-        if (!txHash) return res.status(400).json({ error: 'Invalid transaction hash format. Expect a 32-byte hex string (66 chars including 0x).' });
+        if (!txHash) return res.status(400).json({
+            error: "That doesn't look like a transaction hash — it should be 64 hex characters (optionally prefixed with 0x).",
+            txHash: rawHash,
+            hint: 'invalid-format'
+        });
 
         // Try the requested block first.
         let hit = await findExtrinsicInBlock(blockId, txHash);
@@ -1323,7 +1327,11 @@ app.get('/api/extrinsic-by-hash/:txHash', async (req, res) => {
     if (!requireRpc(res)) return;
     try {
         const txHash = normalizeExtrinsicHash(req.params.txHash);
-        if (!txHash) return res.status(400).json({ error: 'Invalid transaction hash format. Expect a 32-byte hex string (66 chars including 0x).' });
+        if (!txHash) return res.status(400).json({
+            error: "That doesn't look like a transaction hash — it should be 64 hex characters (optionally prefixed with 0x).",
+            txHash: rawHash,
+            hint: 'invalid-format'
+        });
 
         // Cap the scan so a runaway query can't burn through the RPC node.
         // 200 blocks ≈ 40 minutes of chain history at 12s/block — covers

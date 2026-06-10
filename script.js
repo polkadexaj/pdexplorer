@@ -726,7 +726,10 @@ function renderTransactions() {
         const shortFrom = tx.from.substring(0, 8) + '...';
         let shortTo = tx.to.toString();
         if (shortTo.length > 10) shortTo = shortTo.substring(0, 8) + '...';
-        const titleHtml = tx.eventDerived
+        // Belt-and-braces: link to /block/ if the row is event-derived OR the
+        // hash isn't a real tx hash (defensive against any new sources that
+        // forget to set eventDerived).
+        const titleHtml = (tx.eventDerived || !looksLikeTxHash(tx.hash))
             ? `<a href="/block/${tx.block}" class="item-title">${shortHash}</a>`
             : `<a href="/tx/${tx.block}/${tx.hash}" class="item-title">${shortHash}</a>`;
 
@@ -1082,7 +1085,9 @@ function renderFullTransactions() {
                     sort: (a, b) => String(a.hash || '').localeCompare(String(b.hash || '')),
                     format: row => {
                         const short = (row.hash || '').substring(0, 10) + '…';
-                        return row.eventDerived
+                        // Same belt-and-braces: send event-id rows to the
+                        // block, where the event actually lives.
+                        return (row.eventDerived || !looksLikeTxHash(row.hash))
                             ? `<a href="/block/${row.block}" class="item-link">${stakingEscapeHtml(short)}</a>`
                             : `<a href="/tx/${row.block}/${row.hash}" class="item-link">${stakingEscapeHtml(short)}</a>`;
                     }
@@ -1446,7 +1451,10 @@ function renderFullEvents() {
                     format: row => {
                         const displayHash = row.txHash || row.hash || '';
                         const shortHash = displayHash.substring(0, 15) + '…';
-                        const link = row.txHash
+                        // Only render the /tx/ link when txHash is a real hash
+                        // shape. Reward events without an enclosing extrinsic
+                        // fall through to the event-id span.
+                        const link = (row.txHash && looksLikeTxHash(row.txHash))
                             ? `<a href="/tx/${row.block}/${row.txHash}" class="item-link" style="font-size:12px; color: var(--brand-secondary); opacity:0.8;">tx: ${stakingEscapeHtml(shortHash)}</a>`
                             : `<span style="font-size:12px; color: var(--text-secondary); opacity:0.8;">event: ${stakingEscapeHtml(shortHash)}</span>`;
                         return `<a href="/block/${row.block}" class="item-link">${row.block}</a><br>${link}`;
@@ -2573,7 +2581,18 @@ async function fetchAccountDetails(address) {
                 {
                     key: 'hash', label: 'Txn Hash', searchable: true,
                     sort: (a, b) => String(a.hash || '').localeCompare(String(b.hash || '')),
-                    format: row => `<a href="/tx/${row.block}/${row.hash}" class="item-link" style="color: var(--brand-secondary);">${stakingEscapeHtml((row.hash || '').substring(0, 25))}…</a>`
+                    format: row => {
+                        const short = stakingEscapeHtml((row.hash || '').substring(0, 25)) + '…';
+                        // The /api/account-details endpoint mixes real
+                        // extrinsics with event-derived rows whose "hash" is
+                        // 'event-<block>-<idx>'. Linking those to /tx/…
+                        // produced a 400 "Invalid hash format" — route
+                        // event-id rows to /block/ instead, where the event
+                        // actually lives.
+                        return (row.eventDerived || !looksLikeTxHash(row.hash))
+                            ? `<a href="/block/${row.block}" class="item-link" style="color: var(--brand-secondary);">${short}</a>`
+                            : `<a href="/tx/${row.block}/${row.hash}" class="item-link" style="color: var(--brand-secondary);">${short}</a>`;
+                    }
                 },
                 {
                     key: 'amount', label: 'Method / Action', searchable: true,
@@ -2684,7 +2703,28 @@ async function fetchBlockDetails(id) {
     }
 }
 
+// True iff the string looks like a valid 32-byte extrinsic hash. We accept
+// hex with either case and an optional 0x prefix; the server's own normalizer
+// canonicalises before storing. Anything else (event IDs like
+// 'event-12220204-2', empty strings, short prefixes, garbage from a
+// hand-edited URL) returns false so we can render the recovery card without
+// ever round-tripping to the server for a guaranteed 400.
+function looksLikeTxHash(s) {
+    if (typeof s !== 'string') return false;
+    const trimmed = s.trim();
+    const withoutPrefix = trimmed.toLowerCase().startsWith('0x') ? trimmed.slice(2) : trimmed;
+    return /^[0-9a-f]{64}$/i.test(withoutPrefix);
+}
+
 async function fetchTxDetails(block, hash) {
+    // Guard rail: when the URL segment can't possibly be a tx hash (e.g., an
+    // event ID copied into the tx route), skip the server round-trip and go
+    // straight to the recovery card with a tailored message. Common path:
+    // user clicks an event-derived row whose hash is 'event-<block>-<idx>'.
+    if (!looksLikeTxHash(hash)) {
+        renderTxNotFoundCard(block, hash, { reason: 'invalid-format' });
+        return;
+    }
     if (txDetailsContainer) txDetailsContainer.innerHTML = '<div style="text-align:center; padding: 20px;">Fetching transaction details...</div>';
     const shortHash = (hash || '').substring(0, 12);
     updateSeoMeta('tx-details', {
@@ -2746,6 +2786,14 @@ async function fetchTxDetails(block, hash) {
             renderTxNotFoundCard(block, hash);
             return;
         }
+        // Matches the server's `hint: 'invalid-format'` 400 — same UX as the
+        // client-side looksLikeTxHash guard above. Defensive: if a future
+        // call path bypasses the route-level guard, the recovery card still
+        // shows instead of a red error line.
+        if (e && e.status === 400 && /doesn't look like a transaction hash/i.test(e.message || '')) {
+            renderTxNotFoundCard(block, hash, { reason: 'invalid-format' });
+            return;
+        }
         renderApiError(txDetailsContainer, e, () => fetchTxDetails(block, hash));
     }
 }
@@ -2754,24 +2802,56 @@ async function fetchTxDetails(block, hash) {
 // that calls /api/extrinsic-by-hash/:txHash to scan recent blocks. On a hit
 // the user is redirected to the corrected /tx/<actual_block>/<hash> URL;
 // on a miss we direct them to the deep search as a final escape.
-function renderTxNotFoundCard(block, hash) {
+function renderTxNotFoundCard(block, hash, opts) {
     if (!txDetailsContainer) return;
+    const reason = (opts && opts.reason) || 'not-found';
     const shortHash = (hash || '').substring(0, 12);
+    const blockSafe = stakingEscapeHtml(String(block));
+    const hashSafe = stakingEscapeHtml(shortHash);
+    const hashIsEventId = typeof hash === 'string' && /^event-/i.test(hash);
+
+    // Compose the headline / body / primary CTA based on why we landed here.
+    // Three cases:
+    //   1. invalid-format + event-id  → URL came from a misrouted event row.
+    //      Best action: take the user to the block, where the event lives.
+    //   2. invalid-format + other     → hand-edited URL or garbled clipboard.
+    //      Best action: deep search, no point scanning recent blocks.
+    //   3. not-found                   → server's ±2 fallback already failed.
+    //      Best action: scan recent blocks for the hash (chain reorg fallback).
+    let headline, body, primaryButtonHtml, primaryAction;
+    if (reason === 'invalid-format' && hashIsEventId) {
+        headline = `Looking for an event, not a transaction`;
+        body = `This link points to an event identifier (<code style="color: var(--brand-secondary); font-size: 0.82rem;">${hashSafe}…</code>),
+            not a transaction hash. Events live inside blocks — view block #${blockSafe} to see the full list of events that ran in it.`;
+        primaryButtonHtml = `<i class='bx bx-cube'></i> View block #${blockSafe}`;
+        primaryAction = () => navigateTo('block/' + block);
+    } else if (reason === 'invalid-format') {
+        headline = `That doesn't look like a transaction hash`;
+        body = `A transaction hash is 64 hexadecimal characters (with an optional <code style="color: var(--brand-secondary); font-size: 0.82rem;">0x</code> prefix).
+            What we got — <code style="color: var(--brand-secondary); font-size: 0.82rem;">${hashSafe}…</code> — is the wrong shape, so it can't match any extrinsic on chain.
+            The link is probably hand-edited or copied wrong.`;
+        primaryButtonHtml = `<i class='bx bx-globe'></i> Try a deep search`;
+        primaryAction = () => navigateTo('search?q=' + encodeURIComponent(hash || ''));
+    } else {
+        headline = `Transaction not in block #${blockSafe}`;
+        body = `The link pointed at <code style="color: var(--brand-secondary); font-size: 0.82rem;">${hashSafe}…</code>
+            in block #${blockSafe}, but no extrinsic with that hash is in that block (or in the two blocks on either side).
+            This is usually a stale link from before a chain reorg moved the transaction elsewhere.`;
+        primaryButtonHtml = `<i class='bx bx-search'></i> Search recent blocks for this hash`;
+        primaryAction = 'scan-recent'; // sentinel — wired below
+    }
+
     txDetailsContainer.innerHTML = `
         <div class="list-container glass" style="padding: 40px 28px;">
             <div style="text-align: center; max-width: 580px; margin: 0 auto;">
                 <i class='bx bx-search-alt' style="font-size: 42px; color: var(--brand-primary); opacity: 0.7;"></i>
-                <h2 style="margin: 14px 0 8px;">Transaction not in block #${stakingEscapeHtml(String(block))}</h2>
-                <p style="color: var(--text-secondary); font-size: 0.9rem; line-height: 1.6;">
-                    The link pointed at <code style="color: var(--brand-secondary); font-size: 0.82rem;">${stakingEscapeHtml(shortHash)}…</code>
-                    in block #${stakingEscapeHtml(String(block))}, but no extrinsic with that hash is in that block (or in the two blocks on either side).
-                    This is usually a stale link from before a chain reorg moved the transaction elsewhere.
-                </p>
+                <h2 style="margin: 14px 0 8px;">${headline}</h2>
+                <p style="color: var(--text-secondary); font-size: 0.9rem; line-height: 1.6;">${body}</p>
                 <div style="display: flex; gap: 10px; justify-content: center; margin-top: 22px; flex-wrap: wrap;">
                     <button type="button" id="tx-recover-btn" class="staking-download-btn" style="padding: 10px 22px; background: var(--brand-primary); color: white; border-color: var(--brand-primary);">
-                        <i class='bx bx-search'></i> Search recent blocks for this hash
+                        ${primaryButtonHtml}
                     </button>
-                    <a href="/search?q=${encodeURIComponent(hash)}" class="staking-download-btn" style="padding: 10px 22px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+                    <a href="/search?q=${encodeURIComponent(hash || '')}" class="staking-download-btn" style="padding: 10px 22px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
                         <i class='bx bx-globe'></i> Deep network search
                     </a>
                 </div>
@@ -2782,6 +2862,13 @@ function renderTxNotFoundCard(block, hash) {
     const btn = document.getElementById('tx-recover-btn');
     const status = document.getElementById('tx-recover-status');
     if (!btn) return;
+
+    // For the two "invalid-format" branches, the primary CTA navigates within
+    // the SPA — wire that and skip the recent-blocks scan path entirely.
+    if (typeof primaryAction === 'function') {
+        btn.addEventListener('click', () => primaryAction());
+        return;
+    }
     btn.addEventListener('click', async () => {
         btn.disabled = true;
         const origHtml = btn.innerHTML;
@@ -4675,7 +4762,14 @@ function renderWalletDashboard(data, price, rewardsPayload) {
         columns: [
             {
                 key: 'hash', label: 'Hash',
-                format: row => `<a href="/tx/${row.block}/${row.hash}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(row.hash))}</a>`
+                format: row => {
+                    const short = stakingEscapeHtml(stakingShortAddress(row.hash));
+                    // Same defence as the account-details table: event-derived
+                    // rows have synthetic 'event-…' hashes — link to block.
+                    return (row.eventDerived || !looksLikeTxHash(row.hash))
+                        ? `<a href="/block/${row.block}" class="item-link" style="color:var(--brand-secondary);">${short}</a>`
+                        : `<a href="/tx/${row.block}/${row.hash}" class="item-link" style="color:var(--brand-secondary);">${short}</a>`;
+                }
             },
             {
                 key: 'direction', label: 'Direction',
