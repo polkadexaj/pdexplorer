@@ -60,8 +60,19 @@ import * as db from './db.js';
     const POLKADOTJS_TIMESTAMP_PREFIX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+/;
 
     function maybeSuppress(fn, level, args) {
-        const first = args && args.length ? String(args[0]) : '';
-        const stripped = first.replace(POLKADOTJS_TIMESTAMP_PREFIX, '');
+        // polkadot.js's logger calls console.error(timestamp, ' RPC-CORE:',
+        // '...message...') as THREE separate arguments — not as a pre-joined
+        // single string. An earlier version of this matcher only looked at
+        // args[0] (the timestamp), so the RPC-CORE prefix in args[1] was
+        // never seen and the error leaked through. Join all args first so
+        // the match runs against the same text the operator sees in the
+        // terminal, then strip the leading timestamp + any whitespace so
+        // startsWith() can do its job.
+        if (!args || !args.length) return false;
+        const joined = args.map(a => (typeof a === 'string') ? a : (() => {
+            try { return String(a); } catch (_) { return ''; }
+        })()).join(' ');
+        const stripped = joined.replace(POLKADOTJS_TIMESTAMP_PREFIX, '').trimStart();
         for (const prefix of SUPPRESSED_LIBRARY_PREFIXES) {
             if (stripped.startsWith(prefix)) {
                 if (!alreadyAnnouncedSuppression.has(prefix)) {
