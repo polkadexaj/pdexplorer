@@ -448,6 +448,11 @@ async function computeNetworkInfo() {
         minStake: Math.min(...stakes),
         averageStake: average(stakes),
         avgStakePerAccount: activeNominators.size ? totalStake / activeNominators.size : 0,
+        // `totalIssuance` is needed by the analytics snapshot endpoint (and
+        // any future "staking ratio" derivation that doesn't want to reverse
+        // it from totalBondingPercent). Keep it in the cached object so the
+        // /api/analytics/snapshot reader doesn't have to call the chain.
+        totalIssuance,
         totalBonding: totalStake,
         totalBondingPercent: totalIssuance ? (totalStake / totalIssuance) * 100 : 0,
         totalUnbonding: totalUnlocking,
@@ -1845,10 +1850,20 @@ app.get('/api/analytics/timeseries', (req, res) => {
 // Snapshot of the current chain state — counts and ratios used by the
 // dashboard's KPI cards. Reads from the existing network_info KV (kept hot
 // by refreshNetworkInfoInBackground) so this is cheap to call.
+//
+// Field-name note: the cached `networkInfo` shape lives in getNetworkInfo()
+// above. Validators / nominators are nested objects with { active, total };
+// total staked is `totalBonding` (not `totalStaked`). Earlier versions of
+// this endpoint read the wrong paths and surfaced 0s in the UI — keep this
+// mapping in sync with any future networkInfo shape change.
 app.get('/api/analytics/snapshot', (req, res) => {
     try {
         const ni = db.getKv('network_info') || {};
         const network = ni.networkInfo || {};
+        const validators = network.validators || {};
+        const nominators = network.nominators || {};
+        const totalIssuance = Number(network.totalIssuance) || 0;
+        const totalStaked = Number(network.totalBonding) || 0;
         cacheMedium(res);
         res.json({
             // Counts of things in the indexer's database.
@@ -1858,13 +1873,17 @@ app.get('/api/analytics/snapshot', (req, res) => {
             indexedReferenda: db.countDemocracyReferenda(),
             indexedThreads: db.countThreads(),
             // Chain-state network info (populated by refreshNetworkInfoInBackground).
-            totalIssuance: network.totalIssuance || 0,
-            totalStaked: network.totalStaked || 0,
-            stakingRatio: (network.totalIssuance && Number(network.totalIssuance) > 0)
-                ? (Number(network.totalStaked) / Number(network.totalIssuance))
-                : 0,
-            validatorCount: network.validatorCount || 0,
-            nominatorCount: network.nominatorCount || 0,
+            totalIssuance,
+            totalStaked,
+            stakingRatio: totalIssuance > 0 ? totalStaked / totalIssuance : 0,
+            // Prefer the active-set count for the KPI card — it's what most
+            // observers mean by "validator count" on a Substrate chain.
+            // `totalValidators` / `totalNominators` ship the full registered
+            // count alongside for callers that want both.
+            validatorCount: Number(validators.active) || 0,
+            totalValidators: Number(validators.total) || 0,
+            nominatorCount: Number(nominators.active) || 0,
+            totalNominators: Number(nominators.total) || 0,
             activeEra: network.activeEra || 0,
             lastSync: ni.lastSync || 0,
             status: ni.status || 'Initializing'

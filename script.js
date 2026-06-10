@@ -3577,6 +3577,40 @@ function setStoredWallet(addr) {
         else localStorage.removeItem(WALLET_STORAGE_KEY);
     } catch (e) { }
 }
+
+// "Last used" address — a SEPARATE memory that survives `disconnectWallet()`.
+//
+//   `WALLET_STORAGE_KEY`        — currently-connected address. Cleared on
+//                                 disconnect.
+//   `LAST_USED_ADDRESS_KEY`     — the last address the user explicitly
+//                                 picked from a wallet extension. Persists
+//                                 even after disconnect so the auto-pick
+//                                 in `tryAutoSelectFirstWallet()` can
+//                                 honour a multi-account user's preference
+//                                 the next time they revisit My Account.
+//
+// Written by `selectWallet()` (the path manual-button-click and auto-pick
+// both flow through), never written by `setStoredWallet('')`.
+const LAST_USED_ADDRESS_KEY = 'pdex_last_used_wallet_address';
+function getLastUsedAddress() {
+    try {
+        const v = localStorage.getItem(LAST_USED_ADDRESS_KEY) || '';
+        if (!v) return '';
+        // Same legacy coercion the stored-wallet getter does — older entries
+        // may be in the generic SS58 form.
+        const pdex = toPolkadexAddress(v);
+        if (pdex && pdex !== v) {
+            try { localStorage.setItem(LAST_USED_ADDRESS_KEY, pdex); } catch (e) { }
+            return pdex;
+        }
+        return v;
+    } catch (e) { return ''; }
+}
+function setLastUsedAddress(addr) {
+    try {
+        if (addr) localStorage.setItem(LAST_USED_ADDRESS_KEY, toPolkadexAddress(addr));
+    } catch (e) { }
+}
 function refreshConnectWalletButton() {
     const btn = document.getElementById('connect-wallet-btn');
     const label = document.getElementById('connect-wallet-label');
@@ -3737,6 +3771,11 @@ function selectWallet(address) {
     // localStorage, and dashboard all show the chain-specific "e…" address.
     const pdex = toPolkadexAddress(address);
     setStoredWallet(pdex);
+    // Record the explicit choice in the last-used memory so a future visit
+    // (even after the user has disconnected and a wallet extension now
+    // exposes several accounts) can prefer it over the first-in-the-list
+    // default. See `tryAutoSelectFirstWallet()`.
+    setLastUsedAddress(pdex);
     refreshConnectWalletButton();
     navigateTo('wallet/' + pdex);
 }
@@ -3781,12 +3820,89 @@ function initWalletPage(address) {
         else root.innerHTML = '<div class="list-container glass" style="padding:32px;color:var(--error);">Invalid Polkadex address.</div>';
         return;
     }
+    // No address in the URL — user clicked "My Account" from the sidebar.
+    // Decide where to land them on three rules (in priority order):
+    //
+    //   1. If a wallet address is already remembered in localStorage
+    //      (`getStoredWallet()`), navigate directly to /wallet/<addr>.
+    //      replace:true so the back button still lands on the previous page,
+    //      not on a transient /wallet entry.
+    //
+    //   2. If no stored address but the wallet extension already exposes
+    //      accounts to this tab, auto-pick the FIRST account (the user's
+    //      explicit preference — "use the first wallet in the list").
+    //      Done async so the connect panel still paints instantly while
+    //      the extension is being queried; if the auto-pick lands, it
+    //      replaces the panel with the dashboard.
+    //
+    //   3. Otherwise show the connect panel as before (search-indexable,
+    //      lists every detected extension account as a button).
+    const stored = getStoredWallet();
+    if (stored && isValidPolkadexAddress(stored)) {
+        navigateTo('wallet/' + stored, { replace: true });
+        return;
+    }
+
     // Public connect-wallet landing: indexable + rich HowTo/FAQ structured
     // data so search engines surface us for "connect Polkadex wallet" and
     // "how to send PDEX" queries.
     updateSeoMeta('wallet', { canonicalPath: '/wallet', noindex: false });
     setRouteJsonLd(buildWalletConnectJsonLd());
     renderWalletConnectPanel(root);
+
+    // Fire-and-forget auto-pick. Throws are swallowed (user-rejected extension
+    // permission, no extension, etc.) so we never break the connect panel.
+    tryAutoSelectFirstWallet();
+}
+
+// Background helper used by initWalletPage when no address is in the URL
+// and nothing is stored locally. Picks one account from the wallet
+// extension's injected list and selects it.
+//
+// Priority for which account to pick:
+//   1. Last-used address (`getLastUsedAddress()`), if it's currently in
+//      the extension's list. This honours a multi-account user's prior
+//      choice across disconnect → reconnect cycles, so they always land
+//      on "their" address rather than whichever the extension happens to
+//      list first.
+//   2. Otherwise, the first account in the injected list (matches the
+//      user's spec: "If none were used, use the first wallet in the list").
+//
+// Safe to race with manual selection — re-checks `getStoredWallet()` and
+// the current route after the async account fetch to avoid clobbering
+// whatever the user picked manually or navigated to while we were waiting.
+async function tryAutoSelectFirstWallet() {
+    try {
+        // Bail early if the user clicked an account between us starting and
+        // getting here — for example, while the extension's permission
+        // prompt was open.
+        if (getStoredWallet()) return;
+        const accounts = await getInjectedAccounts();
+        if (!accounts || !accounts.length) return;
+        // Late-bind these gates AFTER the async wait so they're checked
+        // against the freshest state, not stale captures from start time.
+        if (getStoredWallet()) return;
+        const here = readRouteFromLocation();
+        if (here !== 'wallet') return;
+
+        // Prefer the address the user previously picked from this same
+        // extension. The `lastUsed` value may belong to a different wallet
+        // or to a since-removed account — in either case we fall through
+        // to the first injected account below.
+        const lastUsed = getLastUsedAddress();
+        let chosen = null;
+        if (lastUsed) {
+            chosen = accounts.find(a => isSameAddress(a.address, lastUsed)) || null;
+        }
+        if (!chosen) chosen = accounts[0];
+        if (!chosen || !isValidPolkadexAddress(chosen.address)) return;
+        // Mirror the manual-selection path: persist + navigate, so the
+        // wallet topbar pill and SEO meta both update consistently.
+        selectWallet(chosen.address);
+    } catch (e) {
+        // Permission-denied / no-extension / etc. — silently fall back to
+        // the connect panel that's already on screen.
+    }
 }
 
 // Build the "Open in mobile wallet" deep-link card list. Rendered as an extra
@@ -7335,11 +7451,20 @@ async function renderAccountLabelEditor(address) {
         return `<div class="label-row ${l.vetoed || hiddenByReports ? 'hidden-label' : ''}" data-signer="${stakingEscapeHtml(l.signer)}" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid rgba(255,255,255,0.04);">
             ${ l.isSelf
                 ? '' // self-labels don't get vote arrows (the score doesn't drive their ranking)
-                : `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:32px;">
-                    <button type="button" class="label-vote-btn" data-vote="1"  title="Upvote"   ${session ? '' : 'disabled'} style="background:none;border:none;cursor:${session?'pointer':'not-allowed'};color:${myVote===1?'var(--success)':'var(--text-muted)'};padding:0;font-size:1.1rem;line-height:1;"><i class='bx bx-chevron-up'></i></button>
+                : (() => {
+                    // Buttons are enabled whenever the user has a connected
+                    // wallet — the action handler transparently signs in if
+                    // there's no session yet (see ensureLabelSession). Only
+                    // truly-anonymous visitors get a disabled state with a
+                    // tooltip pointing to the connect flow.
+                    const canVote = !!(session || getStoredWallet());
+                    const tip = session ? 'Vote' : (getStoredWallet() ? 'Sign in to vote (one-time signature)' : 'Connect a wallet to vote');
+                    return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:32px;">
+                    <button type="button" class="label-vote-btn" data-vote="1"  title="${stakingEscapeHtml(tip)}" ${canVote ? '' : 'disabled'} style="background:none;border:none;cursor:${canVote?'pointer':'not-allowed'};color:${myVote===1?'var(--success)':'var(--text-muted)'};padding:0;font-size:1.1rem;line-height:1;"><i class='bx bx-chevron-up'></i></button>
                     <span style="font-size:0.82rem;font-weight:600;color:var(--text-primary);min-width:24px;text-align:center;">${l.score > 0 ? '+' : ''}${l.score}</span>
-                    <button type="button" class="label-vote-btn" data-vote="-1" title="Downvote" ${session ? '' : 'disabled'} style="background:none;border:none;cursor:${session?'pointer':'not-allowed'};color:${myVote===-1?'var(--error)':'var(--text-muted)'};padding:0;font-size:1.1rem;line-height:1;"><i class='bx bx-chevron-down'></i></button>
-                </div>`
+                    <button type="button" class="label-vote-btn" data-vote="-1" title="${stakingEscapeHtml(tip)}" ${canVote ? '' : 'disabled'} style="background:none;border:none;cursor:${canVote?'pointer':'not-allowed'};color:${myVote===-1?'var(--error)':'var(--text-muted)'};padding:0;font-size:1.1rem;line-height:1;"><i class='bx bx-chevron-down'></i></button>
+                </div>`;
+                })()
             }
             <div style="flex:1;min-width:0;">
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -7363,9 +7488,19 @@ async function renderAccountLabelEditor(address) {
     };
 
     // ─ Suggest form ───────────────────────────────────────────────────────
+    // Three CTA states:
+    //   1. Signed in              → full suggest form
+    //   2. Wallet connected, no session → "Sign in" button (signs a challenge
+    //      with the connected wallet — no reconnection needed). This was a
+    //      common user-confusion case: people saw "Connect your wallet" even
+    //      after connecting, because labels need a session token, not just
+    //      an address.
+    //   3. No wallet at all       → "Connect a wallet" link to /wallet.
+    const connectedAddress = getStoredWallet();
     const mineLabel = session ? (community.find(c => c.signer === session.address) || (selfRow && selfRow.signer === session.address ? selfRow : null)) : null;
-    const suggestForm = session
-        ? `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);">
+    let suggestForm;
+    if (session) {
+        suggestForm = `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);">
                 <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px 0;">${isOwner ? 'Set your label' : 'Suggest a label'}</h4>
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                     <input type="text" id="account-label-input" maxlength="64" placeholder="${isOwner ? 'Foundation Wallet, Cold Storage #1, …' : 'Binance hot wallet, Polkadex Sudo, …'}" value="${stakingEscapeHtml(mineLabel ? mineLabel.label : '')}" style="flex:1;min-width:220px;padding:8px 12px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:inherit;font-size:0.85rem;">
@@ -7373,11 +7508,23 @@ async function renderAccountLabelEditor(address) {
                 </div>
                 <div id="account-label-status" style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);">${isOwner
                     ? 'Owner labels (verified by signature) always outrank community suggestions.'
-                    : 'Your suggestion will appear in this list. The community votes on it; the address owner can veto.'}</div>
-            </div>`
-        : `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);color:var(--text-muted);font-size:0.82rem;">
-                <a href="/wallet" class="item-link" style="color:var(--brand-secondary);">Connect your wallet</a> to suggest or vote on labels.
+                    : 'Your suggestion will appear in this list. The community votes on it; the address owner can veto.'}
+                    Signed in as <code style="font-size:0.72rem;">${stakingEscapeHtml(stakingShortAddress(session.address))}</code>.</div>
+            </div>`;
+    } else if (connectedAddress) {
+        suggestForm = `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);">
+                <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px 0;">Sign in to suggest &amp; vote</h4>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <button type="button" id="account-label-signin" class="staking-download-btn" style="padding:8px 18px;font-size:0.82rem;background:var(--brand-primary);color:white;border-color:var(--brand-primary);"><i class='bx bx-log-in'></i> Sign in with wallet</button>
+                    <span style="color:var(--text-muted);font-size:0.78rem;">connected as <code style="font-size:0.72rem;">${stakingEscapeHtml(stakingShortAddress(connectedAddress))}</code></span>
+                </div>
+                <div style="margin-top:8px;color:var(--text-muted);font-size:0.78rem;">One-time signature proves you own this address — no transaction, no gas. The same session also lets you post on the discussion board.</div>
+            </div>`;
+    } else {
+        suggestForm = `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);color:var(--text-muted);font-size:0.82rem;">
+                <a href="/wallet" class="item-link" style="color:var(--brand-secondary);">Connect a wallet</a> to suggest or vote on labels.
            </div>`;
+    }
 
     // ─ Layout ─────────────────────────────────────────────────────────────
     slot.innerHTML = `
@@ -7401,6 +7548,24 @@ async function renderAccountLabelEditor(address) {
         if (reportBtn) reportBtn.addEventListener('click', () => labelReport(address, signer, reportBtn));
         const vetoBtn = row.querySelector('.label-veto-btn');
         if (vetoBtn) vetoBtn.addEventListener('click', () => labelVeto(address, signer, vetoBtn));
+    });
+
+    // ─ Wire "Sign in with wallet" button — visible only when a wallet
+    //   address is in localStorage but no discussion-board session exists.
+    //   Runs the same one-time signature flow the discussion board uses,
+    //   then re-renders the panel so the suggest form replaces the button.
+    const signinBtn = document.getElementById('account-label-signin');
+    if (signinBtn) signinBtn.addEventListener('click', async () => {
+        signinBtn.disabled = true;
+        const origHtml = signinBtn.innerHTML;
+        signinBtn.innerHTML = "<i class='bx bx-loader-alt bx-spin'></i> Check your wallet…";
+        const ok = await discussSignIn();
+        if (ok) {
+            renderAccountLabelEditor(address);
+        } else {
+            signinBtn.disabled = false;
+            signinBtn.innerHTML = origHtml;
+        }
     });
 
     // ─ Wire suggest form ──────────────────────────────────────────────────
@@ -7433,9 +7598,22 @@ async function renderAccountLabelEditor(address) {
     });
 }
 
+// Returns a live discussion-board session, signing in transparently if a
+// wallet is connected but no session exists yet. The label action buttons
+// (vote/report/veto) all call this so a connected user can click an up-arrow
+// without first realising they also need to sign a challenge. Returns null
+// if there's no wallet at all (caller should silently no-op in that case).
+async function ensureLabelSession() {
+    const existing = getDiscussSession();
+    if (existing) return existing;
+    if (!getStoredWallet()) return null;
+    const ok = await discussSignIn();
+    return ok ? getDiscussSession() : null;
+}
+
 // ─── Row actions (vote / delete / report / veto) ────────────────────────────
 async function labelVote(address, signer, vote, btn) {
-    const session = getDiscussSession();
+    const session = await ensureLabelSession();
     if (!session) return;
     btn.disabled = true;
     try {
@@ -7485,7 +7663,7 @@ async function labelDeleteMine(address, signer, btn) {
 }
 
 async function labelReport(address, signer, btn) {
-    const session = getDiscussSession();
+    const session = await ensureLabelSession();
     if (!session) return;
     const reason = prompt('Briefly, why is this label inappropriate? (optional)') || '';
     btn.disabled = true;
@@ -7507,7 +7685,7 @@ async function labelReport(address, signer, btn) {
 }
 
 async function labelVeto(address, signer, btn) {
-    const session = getDiscussSession();
+    const session = await ensureLabelSession();
     if (!session || session.address !== address) return;
     const labels = addressLabelsCache.get(address) || [];
     const row = labels.find(l => l.signer === signer);
@@ -7550,20 +7728,48 @@ async function fetchAnalyticsData() {
     el.innerHTML = '<div style="padding:48px;text-align:center;color:var(--text-secondary);"><i class="bx bx-loader-alt bx-spin" style="font-size:32px;"></i><div style="margin-top:10px;">Loading analytics…</div></div>';
 
     try {
-        const [snapshot, ts] = await Promise.all([
+        // Price history lives behind a separate endpoint (it predates the
+        // analytics aggregator and is reused by the wallet dashboard chart).
+        // We fetch it in parallel and tolerate a 404/unconfigured CMC key —
+        // the analytics page still renders the rest of the charts even when
+        // the price feed is dark.
+        const [snapshot, ts, priceData] = await Promise.all([
             fetchApiJson('/api/analytics/snapshot'),
-            fetchApiJson('/api/analytics/timeseries?days=' + analyticsRangeDays)
+            fetchApiJson('/api/analytics/timeseries?days=' + analyticsRangeDays),
+            fetchApiJson('/api/price-history?days=' + analyticsRangeDays).catch(() => ({ history: [] }))
         ]);
-        renderAnalyticsPage(snapshot, ts);
+        renderAnalyticsPage(snapshot, ts, priceData);
     } catch (e) {
         renderApiError(el, e, () => fetchAnalyticsData());
     }
 }
 
-function renderAnalyticsPage(snapshot, ts) {
+function renderAnalyticsPage(snapshot, ts, priceData) {
     const el = document.getElementById('analytics-content');
     if (!el) return;
     const series = (ts && ts.series) || {};
+
+    // Normalize the price-history response into the same { day, value }
+    // shape the other series use, so we can feed it through the same
+    // chart helpers. `priceData.history` is descending by timestamp;
+    // reverse to ascending so the x-axis reads left-to-right oldest→newest.
+    const priceSeries = ((priceData && priceData.history) || [])
+        .slice()
+        .reverse()
+        .map(p => ({ day: formatLocalDate(p.timestamp), value: Number(p.price) || 0 }));
+    const latestPrice = priceSeries.length ? priceSeries[priceSeries.length - 1].value : null;
+
+    // Same normalization for treasury awards — the v1 dashboard plumbed
+    // this through `getDailyAnalytics()` but never rendered it. The series
+    // is already in { day, value } shape; we only need the cumulative sum
+    // so the chart shows the running total trending up over time.
+    const treasuryDaily = Array.isArray(series.treasuryAwarded) ? series.treasuryAwarded : [];
+    let cumulativePdex = 0;
+    const treasuryCumulative = treasuryDaily.map(p => {
+        cumulativePdex += Number(p.value) || 0;
+        return { day: p.day, value: cumulativePdex };
+    });
+    const treasuryTotal = cumulativePdex;
 
     // KPI strip — the headline numbers the user expects "above the fold"
     // before scrolling into the charts. All from the snapshot endpoint.
@@ -7593,8 +7799,16 @@ function renderAnalyticsPage(snapshot, ts) {
                 <div class="staking-summary-grid">
                     ${kpiCard('Indexed blocks',       stakingFormatNumber(snapshot.indexedBlocks), 'blocks in the local index')}
                     ${kpiCard('Indexed transactions', stakingFormatNumber(snapshot.indexedTransactions), 'all-time')}
-                    ${kpiCard('Validators',           stakingFormatNumber(snapshot.validatorCount), `active era #${snapshot.activeEra}`)}
-                    ${kpiCard('Nominators',           stakingFormatNumber(snapshot.nominatorCount), 'currently nominating')}
+                    ${kpiCard(
+                        'Validators',
+                        `${stakingFormatNumber(snapshot.validatorCount)} <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400;">/ ${stakingFormatNumber(snapshot.totalValidators || snapshot.validatorCount)}</span>`,
+                        `active / registered · era #${snapshot.activeEra}`
+                    )}
+                    ${kpiCard(
+                        'Nominators',
+                        `${stakingFormatNumber(snapshot.nominatorCount)} <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400;">/ ${stakingFormatNumber(snapshot.totalNominators || snapshot.nominatorCount)}</span>`,
+                        'active / registered'
+                    )}
                     ${kpiCard('Total staked',         `${stakingFormatPDEX(totalStaked)} <span class="unit">PDEX</span>`, `${stakingPct.toFixed(2)}% of issuance`)}
                     ${kpiCard('Total issuance',       `${stakingFormatPDEX(totalIssuance)} <span class="unit">PDEX</span>`, 'circulating + locked')}
                 </div>
@@ -7613,6 +7827,20 @@ function renderAnalyticsPage(snapshot, ts) {
                     ${analyticsChartCard('Daily PDEX volume',   'analytics-chart-tx-volume', 'sum of transfer amounts per day')}
                     ${analyticsChartCard('Daily active addresses', 'analytics-chart-addrs', 'distinct addresses involved per day')}
                     ${analyticsChartCard('Daily blocks produced', 'analytics-chart-blocks', `avg ${series.avgExtrinsics?.length ? Number(series.avgExtrinsics[series.avgExtrinsics.length-1].value).toFixed(1) : '—'} extrinsics/block recently`)}
+                    ${analyticsChartCard(
+                        'PDEX / USD',
+                        'analytics-chart-price',
+                        priceSeries.length
+                            ? `latest ${latestPrice != null ? '$' + Number(latestPrice).toLocaleString('en-US', { maximumFractionDigits: 6 }) : '—'} · CoinMarketCap`
+                            : 'price feed not configured (set CMC_API_KEY)'
+                    )}
+                    ${analyticsChartCard(
+                        'Treasury awards (cumulative)',
+                        'analytics-chart-treasury',
+                        treasuryTotal > 0
+                            ? `${stakingFormatPDEX(treasuryTotal)} PDEX awarded across the window`
+                            : 'no treasury payouts in this window'
+                    )}
                 </div>
             </div>
         </div>
@@ -7627,6 +7855,13 @@ function renderAnalyticsPage(snapshot, ts) {
     drawAnalyticsLineChart('analytics-chart-tx-volume',  series.txVolume,        'PDEX volume',    '#00d4ff');
     drawAnalyticsLineChart('analytics-chart-addrs',      series.activeAddresses, 'Active addresses','#2ecc71');
     drawAnalyticsBarChart('analytics-chart-blocks',     series.blocks,          'Blocks',         '#9b59b6');
+    // Price line — only when CMC is configured AND has returned data. The
+    // helper no-ops if the canvas is missing or the series is empty.
+    drawAnalyticsLineChart('analytics-chart-price',     priceSeries,            'USD',            '#f5a623');
+    // Treasury cumulative line — climbs with every awarded proposal.
+    // Shown even when the day list is empty so the empty-state subtitle
+    // explains the situation.
+    drawAnalyticsLineChart('analytics-chart-treasury',  treasuryCumulative,     'PDEX awarded',   '#9b59b6');
 
     // Range pill click handlers — re-fetch with the new day count.
     el.querySelectorAll('[data-analytics-range]').forEach(btn => {
