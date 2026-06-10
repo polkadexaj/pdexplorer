@@ -962,7 +962,15 @@ const SITEMAP_STATIC_ROUTES = [
     // "connect Polkadex wallet" / "send PDEX" / "Nova Wallet" search intent.
     // /wallet/:addr is intentionally not listed (personal).
     { path: '/wallet',            changefreq: 'monthly', priority: '0.6' },
-    { path: '/donate',            changefreq: 'monthly', priority: '0.3' }
+    { path: '/donate',            changefreq: 'monthly', priority: '0.3' },
+    // Network analytics dashboard — recently added, KPIs update hourly so a
+    // higher changefreq is appropriate.
+    { path: '/analytics',         changefreq: 'hourly',  priority: '0.7' },
+    // Static legal pages — low changefreq but want them indexed so users
+    // searching for "Polkadex explorer privacy" land on the right page.
+    { path: '/privacy',           changefreq: 'yearly',  priority: '0.4' },
+    { path: '/cookies',           changefreq: 'yearly',  priority: '0.4' }
+    // Note: /watchlist intentionally omitted (noindex — personal page).
 ];
 const SITEMAP_TOP_VALIDATORS = readPositiveInteger(process.env.SITEMAP_TOP_VALIDATORS, 100);
 const SITEMAP_RECENT_BLOCKS  = readPositiveInteger(process.env.SITEMAP_RECENT_BLOCKS, 200);

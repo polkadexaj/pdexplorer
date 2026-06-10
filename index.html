@@ -891,6 +891,118 @@
                 </div>
             </div>
 
+            <!-- Privacy Policy Page -->
+            <!-- Static, indexable policy describing the explorer's data
+                 practices. Lives at /privacy. Targets users searching for
+                 "Polkadex explorer privacy" / "Polkadex GDPR" / "what does
+                 the Polkadex explorer store about me". Content owns its own
+                 H1/H2 hierarchy so the page reads as a standalone document
+                 for both humans and crawlers. -->
+            <div class="legal-page page-section" data-page="privacy" style="display: none;">
+                <div class="list-container glass" style="max-width: 860px; margin: 0 auto;">
+                    <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 24px;">
+                        <h1 style="margin: 0; font-size: 1.6rem;">Privacy Policy</h1>
+                        <span style="color: var(--text-secondary); font-size: 0.82rem;">Last updated: June 2026</span>
+                    </div>
+                    <div style="padding: 30px 32px; line-height: 1.7; color: var(--text-secondary); font-size: 0.95rem;">
+                        <p style="color: var(--text-primary);"><strong>Short version.</strong> The Polkadex Explorer is a read-only window onto a public blockchain. We don't run analytics, we don't set tracking cookies, we don't sell or share data with third parties. We store a handful of small items in your browser's local storage to remember your preferences, and our server logs the kind of request data a normal web server logs.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">1. Who we are</h2>
+                        <p>The Polkadex Explorer (explorer.polkadex.ee) is operated by the Polkadex Foundation. This policy covers the explorer specifically; the Foundation's wider organisational privacy policy is available at the <a href="https://github.com/Polkadex-Substrate/Docs/blob/master/Polkadex_Privacy_Policy.pdf" target="_blank" rel="noopener" class="item-link">Polkadex Privacy Policy</a>.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">2. What we store about you</h2>
+                        <p>The explorer stores three kinds of data:</p>
+                        <p><strong style="color: var(--text-primary);">a) On-chain data.</strong> All blocks, extrinsics, events, balances, validators, governance proposals, and votes you see on this site are <em>already public</em> on the Polkadex Mainnet. We index them so you can browse them efficiently. Anyone with a Polkadex node has access to the same data. We cannot delete on-chain data — that's a property of the blockchain itself, not of this explorer.</p>
+                        <p><strong style="color: var(--text-primary);">b) Local storage on your device.</strong> We keep a small set of keys in your browser's <code style="background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 3px; color: var(--brand-secondary);">localStorage</code> so the explorer remembers your choices between visits. See the <a href="/cookies" class="item-link">Cookie &amp; Storage Notice</a> for the full list. This data never leaves your device unless you explicitly sign a transaction or post a community label.</p>
+                        <p><strong style="color: var(--text-primary);">c) Server logs.</strong> Our backend logs the standard request data a web server records: source IP (often a Cloudflare IP, since we're behind Cloudflare), user-agent, requested URL, response code, and timestamp. We use these to debug errors and measure traffic shape. Logs are retained for 30 days and then rotated out.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">3. Wallet addresses and signatures</h2>
+                        <p>If you connect a wallet, the explorer reads your account's public address from your wallet extension. Public addresses are not personal data on their own under most privacy frameworks — they are pseudonymous identifiers anyone can derive from a public key — but they can become personal if linked to your identity, which is something <em>you</em> control. We never request your private key, mnemonic, or secret seed phrase. Any wallet extension that asks the explorer for these is malicious.</p>
+                        <p>When you post a community label, a discussion message, or a vote, your wallet signs the action with your private key. The signed payload — including your address and the signature — is stored on our server (for labels and discussions) or broadcast to the chain (for votes). You can ask us to remove labels, votes, or discussion messages you authored; contact us via the channels listed below.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">4. Third-party services</h2>
+                        <p>The explorer integrates with:</p>
+                        <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">Cloudflare</strong> as a CDN and DDoS shield. Cloudflare sees your IP. Their privacy policy is at <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener" class="item-link">cloudflare.com/privacypolicy</a>.</p>
+                        <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">Browser wallet extensions</strong> (Polkadot.js, Talisman, SubWallet, Nova Wallet) when you click Connect Wallet. The explorer doesn't share any data with them; they expose your account list to us with your explicit permission.</p>
+                        <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">A PDEX price feed</strong> (CoinGecko/Coinpaprika public API) that runs server-side. Your browser does not contact these endpoints directly.</p>
+                        <p>We do not load Google Analytics, Mixpanel, Segment, advertising pixels, or any other analytics/tracking script. The explorer's JavaScript bundle is self-hosted; there are no third-party scripts loaded from external CDNs that could fingerprint you.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">5. Your rights (GDPR / UK GDPR / CCPA)</h2>
+                        <p>You have the right to (a) know what personal data we hold about you, (b) request a copy, (c) request correction or deletion, and (d) object to processing. For the explorer specifically:</p>
+                        <p style="margin-left: 14px;">— <em>Local storage:</em> clear it any time via your browser settings, or click "Reset preferences" on the <a href="/cookies" class="item-link">Cookies page</a>.</p>
+                        <p style="margin-left: 14px;">— <em>Community labels, votes, discussion messages:</em> message us with the wallet that signed them (we'll verify via a fresh signature) and we'll delete them.</p>
+                        <p style="margin-left: 14px;">— <em>Server access logs:</em> we don't have a way to identify you within them unless you tell us your IP and time-window, but if you do, we'll delete matching entries on request.</p>
+                        <p style="margin-left: 14px;">— <em>On-chain data:</em> we cannot delete this. It's on the blockchain, not on our server.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">6. Children</h2>
+                        <p>The explorer isn't directed at children under 16. We don't knowingly process data from anyone under 16. If you believe a child has used the explorer in a way that needs attention, contact us.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">7. Changes to this policy</h2>
+                        <p>We'll update the "Last updated" date at the top of this page when this policy changes. Material changes will also be announced on our community channels.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">8. Contact</h2>
+                        <p>Open an issue at <a href="https://github.com/Polkadex-Substrate" target="_blank" rel="noopener" class="item-link">github.com/Polkadex-Substrate</a> or reach the team via the official channels listed at <a href="https://polkadex.ee" target="_blank" rel="noopener" class="item-link">polkadex.ee</a>.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cookies & Local Storage Notice Page -->
+            <!-- Plain-English description of every localStorage key the
+                 explorer writes, so a privacy-conscious user knows exactly
+                 what is on their device. Lives at /cookies. The "Reset all"
+                 button clears every pdex_* key and reloads the page. -->
+            <div class="legal-page page-section" data-page="cookies" style="display: none;">
+                <div class="list-container glass" style="max-width: 860px; margin: 0 auto;">
+                    <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 24px;">
+                        <h1 style="margin: 0; font-size: 1.6rem;">Cookie &amp; Storage Notice</h1>
+                        <span style="color: var(--text-secondary); font-size: 0.82rem;">Last updated: June 2026</span>
+                    </div>
+                    <div style="padding: 30px 32px; line-height: 1.7; color: var(--text-secondary); font-size: 0.95rem;">
+                        <p style="color: var(--text-primary);"><strong>The Polkadex Explorer does not set tracking cookies.</strong> We use your browser's <code style="background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 3px; color: var(--brand-secondary);">localStorage</code> to remember your preferences between visits. Local storage stays on your device and is never sent over the network to us — unlike cookies, which are sent with every request.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">What we store</h2>
+                        <p>Every key the explorer writes is prefixed with <code style="background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 3px; color: var(--brand-secondary);">pdex_</code> for easy identification. Here's the full list:</p>
+
+                        <div style="margin-top: 18px; overflow-x: auto;">
+                            <table style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+                                <thead>
+                                    <tr style="border-bottom: 1px solid var(--border-color);">
+                                        <th style="text-align: left; padding: 10px 12px; color: var(--text-primary); font-weight: 600;">Key</th>
+                                        <th style="text-align: left; padding: 10px 12px; color: var(--text-primary); font-weight: 600;">What it stores</th>
+                                        <th style="text-align: left; padding: 10px 12px; color: var(--text-primary); font-weight: 600;">Why</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_wallet</code></td><td style="padding: 10px 12px;">Connected wallet address and source extension name.</td><td style="padding: 10px 12px;">So the My Account page works without re-connecting on every reload.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_last_used_address</code></td><td style="padding: 10px 12px;">The most recently active address when your wallet has multiple accounts.</td><td style="padding: 10px 12px;">So we can default to the right account instead of always picking the first one.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_watchlist</code></td><td style="padding: 10px 12px;">Addresses, validators, and governance items you've starred.</td><td style="padding: 10px 12px;">So your watchlist follows you across sessions.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_labels_session</code></td><td style="padding: 10px 12px;">Short-lived signed bearer token (about 24 hours) for posting/voting on community labels.</td><td style="padding: 10px 12px;">So you don't have to re-sign every time you vote on a label.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_tour_seen_v1</code></td><td style="padding: 10px 12px;">A boolean flag once you've completed the onboarding tour.</td><td style="padding: 10px 12px;">So we don't pop the tour up again every visit.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_banner_dismissed</code></td><td style="padding: 10px 12px;">A flag set when you dismiss the storage notice banner.</td><td style="padding: 10px 12px;">So we don't show it again.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_apr_period</code></td><td style="padding: 10px 12px;">The APR-history window you last picked (7d / 30d / 90d / 6m / 1y / all-time).</td><td style="padding: 10px 12px;">So your selection persists on the My Account page.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">What we do NOT store</h2>
+                        <p>We do not set any tracking cookies. We do not load Google Analytics, Mixpanel, Segment, advertising pixels, or any other third-party analytics or tracking script. There are no third-party scripts in the explorer's HTML — every script you see runs from explorer.polkadex.ee.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">Sessions</h2>
+                        <p>We use <code style="background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 3px; color: var(--brand-secondary);">sessionStorage</code> (cleared when you close the tab) for one transient flag: <code style="color: var(--brand-secondary);">pdex_skip_auto_pick</code> — set when you click "Switch wallet" so we don't immediately re-pick the same account.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">Reset everything</h2>
+                        <p>You can clear every <code style="color: var(--brand-secondary);">pdex_*</code> key in your browser at any time. The button below removes them all and reloads the page.</p>
+                        <button type="button" id="cookies-reset-btn" class="staking-download-btn" style="margin-top: 12px; padding: 10px 22px; background: var(--brand-primary); color: white; border-color: var(--brand-primary); cursor: pointer;">
+                            <i class='bx bx-refresh'></i> Reset all preferences
+                        </button>
+                        <p style="margin-top: 8px; font-size: 0.82rem; color: var(--text-muted);">Equivalent to clearing site data in your browser's developer tools.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">Read more</h2>
+                        <p>See our <a href="/privacy" class="item-link">Privacy Policy</a> for the full picture, including server logs, third-party services we integrate with, and how to exercise your data-subject rights.</p>
+                    </div>
+                </div>
+            </div>
+
             <!-- Search Page -->
             <div class="search-page page-section" data-page="search" style="display: none;">
                 <div class="list-container glass">
@@ -969,13 +1081,38 @@
                     <span>Copyright &copy; 2026 Polkadex Foundation</span>
                     <div class="footer-legal">
                         <a href="https://github.com/Polkadex-Substrate/Docs/blob/master/Polkadex_Terms_of_Use.pdf" target="_blank" rel="noopener">Terms</a>
-                        <a href="https://github.com/Polkadex-Substrate/Docs/blob/master/Polkadex_Privacy_Policy.pdf" target="_blank" rel="noopener">Privacy</a>
+                        <!-- Explorer-specific privacy / storage notice. The
+                             Foundation's wider org-level privacy policy is
+                             linked from the /privacy page itself. -->
+                        <a href="/privacy">Privacy</a>
+                        <a href="/cookies">Cookies</a>
                     </div>
                 </div>
             </footer>
 
         </main>
     </div>
+
+    <!-- Storage notice banner. Plain language, dismissable. Shown to every
+         visitor until they click OK; preference stored in localStorage as
+         pdex_banner_dismissed (the very key they're consenting to). Not a
+         consent gate — the explorer is read-only and storage is functional,
+         not behavioural, so this is informational like an email signature.
+         CSS in styles.css; show/hide logic in script.js. -->
+    <div id="storage-notice-banner" style="display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 1050; padding: 14px 22px; background: rgba(20, 16, 28, 0.96); border-top: 1px solid var(--brand-primary); backdrop-filter: blur(8px); box-shadow: 0 -6px 24px rgba(0,0,0,0.4);">
+        <div style="max-width: 1100px; margin: 0 auto; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+            <i class='bx bx-info-circle' style="font-size: 22px; color: var(--brand-secondary); flex-shrink: 0;"></i>
+            <p style="margin: 0; flex: 1; min-width: 260px; font-size: 0.88rem; color: var(--text-secondary); line-height: 1.5;">
+                This site uses your browser's <strong style="color: var(--text-primary);">local storage</strong> (not tracking cookies) to remember your wallet, watchlist, and preferences. We do not run analytics, set advertising cookies, or share your data with third parties.
+                <a href="/cookies" style="color: var(--brand-secondary); text-decoration: underline;">See what we store</a>.
+            </p>
+            <div style="display: flex; gap: 8px; flex-shrink: 0;">
+                <a href="/privacy" class="staking-download-btn" style="padding: 8px 14px; font-size: 0.82rem; text-decoration: none; color: var(--text-primary);">Learn more</a>
+                <button type="button" id="storage-notice-dismiss" class="staking-download-btn" style="padding: 8px 18px; font-size: 0.82rem; background: var(--brand-primary); color: white; border-color: var(--brand-primary); cursor: pointer;">OK, got it</button>
+            </div>
+        </div>
+    </div>
+
     <script type="module" src="script.js"></script>
 </body>
 </html>

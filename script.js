@@ -2066,7 +2066,14 @@ const ROUTE_SEO = {
     'block-details':      { title: 'Block — Polkadex Explorer',
                             description: 'Polkadex block details: extrinsics, events, author, and timestamp.' },
     'tx-details':         { title: 'Transaction — Polkadex Explorer',
-                            description: 'Polkadex transaction details: signer, call, status, and events.' }
+                            description: 'Polkadex transaction details: signer, call, status, and events.' },
+    // Static legal/info pages. Targets users searching specifically for
+    // "Polkadex explorer privacy", "Polkadex GDPR", "Polkadex explorer
+    // cookies" — keep titles keyword-rich without keyword-stuffing.
+    'privacy':            { title: 'Privacy Policy — Polkadex Explorer',
+                            description: 'How the Polkadex Explorer handles your data: no tracking cookies, no third-party analytics, GDPR-compliant data subject rights.' },
+    'cookies':            { title: 'Cookie & Storage Notice — Polkadex Explorer',
+                            description: 'The Polkadex Explorer does not set tracking cookies. Plain-English list of every localStorage key we use, what it stores, and why.' }
 };
 
 // Update <title>, meta[description], canonical, and Open Graph / Twitter tags
@@ -2138,6 +2145,89 @@ function setRouteJsonLd(json) {
     el.id = ID;
     el.textContent = text;
     document.head.appendChild(el);
+}
+
+// JSON-LD WebPage schema for the static legal pages (/privacy, /cookies).
+// Marks them as primary content rather than SPA boilerplate so crawlers can
+// confidently surface them for direct queries like "Polkadex explorer
+// privacy policy" or "Polkadex GDPR".
+function injectLegalPageJsonLd(target) {
+    const pageMeta = {
+        privacy: {
+            url: SITE_ORIGIN + '/privacy',
+            name: 'Privacy Policy — Polkadex Explorer',
+            description: 'How the Polkadex Explorer handles your data: no tracking cookies, no third-party analytics, GDPR-compliant data subject rights.'
+        },
+        cookies: {
+            url: SITE_ORIGIN + '/cookies',
+            name: 'Cookie & Storage Notice — Polkadex Explorer',
+            description: 'The Polkadex Explorer does not set tracking cookies. Plain-English list of every localStorage key we use, what it stores, and why.'
+        }
+    }[target];
+    if (!pageMeta) return;
+    setRouteJsonLd({
+        '@context': 'https://schema.org',
+        '@type': 'WebPage',
+        '@id': pageMeta.url,
+        url: pageMeta.url,
+        name: pageMeta.name,
+        description: pageMeta.description,
+        inLanguage: 'en',
+        isPartOf: { '@type': 'WebSite', name: 'Polkadex Explorer', url: SITE_ORIGIN },
+        dateModified: '2026-06-01'
+    });
+}
+
+// Wire the Reset button on /cookies. Clears every pdex_* key from
+// localStorage + sessionStorage (both window-scoped) and reloads the page so
+// the user sees a clean state. We don't try to be cute about which keys to
+// keep — the user clicked Reset, so we honour that exactly.
+function wireCookiesResetButton() {
+    const btn = document.getElementById('cookies-reset-btn');
+    if (!btn || btn.dataset.wired === '1') return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', () => {
+        if (!confirm('Clear all explorer preferences? You will need to reconnect your wallet and re-confirm dismissed notices.')) return;
+        try {
+            // Walk a snapshot of keys since removeItem mutates the live list.
+            for (const store of [localStorage, sessionStorage]) {
+                const keys = [];
+                for (let i = 0; i < store.length; i++) {
+                    const k = store.key(i);
+                    if (k && k.startsWith('pdex_')) keys.push(k);
+                }
+                keys.forEach(k => store.removeItem(k));
+            }
+        } catch (e) {
+            console.warn('[cookies-reset] storage clear failed:', e && e.message);
+        }
+        location.reload();
+    });
+}
+
+// Storage-notice banner wiring. Shown until dismissed; dismissal preference
+// is itself stored in pdex_banner_dismissed (acknowledged in the banner copy
+// and the /cookies table). Auto-loads on first DOMContentLoaded.
+const BANNER_KEY = 'pdex_banner_dismissed';
+function initStorageNoticeBanner() {
+    const el = document.getElementById('storage-notice-banner');
+    if (!el) return;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(BANNER_KEY) === '1'; } catch (_) {}
+    if (dismissed) return;
+    el.style.display = 'block';
+    const btn = document.getElementById('storage-notice-dismiss');
+    if (btn) btn.addEventListener('click', () => {
+        try { localStorage.setItem(BANNER_KEY, '1'); } catch (_) {}
+        el.style.display = 'none';
+    });
+}
+// Run after the DOM is parsed. script.js is a module, so this fires after
+// HTML parsing has completed.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initStorageNoticeBanner);
+} else {
+    initStorageNoticeBanner();
 }
 
 // Reusable HowTo + FAQ schemas for the connect-wallet page. These help search
@@ -2418,6 +2508,14 @@ function routeTo(target) {
                 // of staring at an empty results panel with a deep-search
                 // button that has nothing to query.
                 if (!currentSearchQuery) renderSearchPrompt();
+            } else if (mainTarget === 'privacy' || mainTarget === 'cookies') {
+                // /privacy and /cookies are fully static HTML — no fetcher.
+                // Inject a route-scoped JSON-LD WebPage entry so crawlers
+                // recognise these as canonical legal documents rather than
+                // SPA shells. Also wire the cookies-page Reset button if
+                // we're on /cookies.
+                injectLegalPageJsonLd(mainTarget);
+                if (mainTarget === 'cookies') wireCookiesResetButton();
             }
         } else {
             page.style.display = 'none';
