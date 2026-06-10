@@ -1,5 +1,5 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
-import { decodeAddress, encodeAddress } from '@polkadot/util-crypto';
+import { decodeAddress, encodeAddress, createKeyMulti, sortAddresses } from '@polkadot/util-crypto';
 
 // Polkadex chain SS58 prefix. Addresses encoded with this prefix all start
 // with the character "e", which is what we want to show the user — even
@@ -2464,7 +2464,9 @@ async function fetchAccountDetails(address) {
                 <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;">
                     <tr style="background: rgba(255,255,255,0.05);">
                         <td style="padding: 12px 20px; font-weight: 600; width: 250px;">account</td>
-                        <td style="padding: 12px 20px;" class="address-cell">${data.account} <span onclick="copyToClipboard(this, '${data.account}')" style="cursor: pointer; color: var(--brand-secondary); font-size: 13px; margin-left: 10px;">copy</span> ${watchlistStarButton('address', data.account, (data.display && data.display !== 'Unknown') ? data.display : data.account)}</td>
+                        <td style="padding: 12px 20px;" class="address-cell address-with-label" data-address="${stakingEscapeHtml(data.account)}">${data.account} <span onclick="copyToClipboard(this, '${data.account}')" style="cursor: pointer; color: var(--brand-secondary); font-size: 13px; margin-left: 10px;">copy</span> ${watchlistStarButton('address', data.account, (data.display && data.display !== 'Unknown') ? data.display : data.account)}
+                            <div id="account-label-editor"></div>
+                        </td>
                     </tr>
                     <tr>
                         <td style="padding: 12px 20px; font-weight: 600;">display</td>
@@ -2513,6 +2515,11 @@ async function fetchAccountDetails(address) {
         // Now that the container divs exist, mount the two makeTable
         // instances. Re-running fetchAccountDetails creates new instances
         // each time; that's fine because the outer DOM was replaced.
+        // Pull the self-label for this address (if any) and render the
+        // inline editor when the viewer is the owner. Both are async and
+        // independent of the makeTable mounts below.
+        ensureAddressLabel(data.account);
+        renderAccountLabelEditor(data.account);
         makeTable({
             container: document.getElementById('account-tx-table'),
             rows: data.transactions || [],
@@ -4122,7 +4129,8 @@ function renderWalletDashboard(data, price) {
         <div class="list-container glass">
             <div class="list-header"><h2>Recent Transactions</h2><a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View account</a></div>
             <div id="wallet-recent-tx-table"></div>
-        </div>`;
+        </div>
+        <div id="wallet-advanced-section"></div>`;
 
     // Mount the two small tables. These are typically short snapshots
     // (top ~10 rows), but giving them the same filter/sort affordances as
@@ -4198,6 +4206,11 @@ function renderWalletDashboard(data, price) {
         scheduleWalletSigningRechecks(data);
     }
     if (priceHistory.length) renderWalletPriceChart(priceHistory);
+    // Mount the Advanced section (proxies + multisig). Fires regardless of
+    // ownership — proxies that delegate FROM this address are public chain
+    // state, and the multisig calculator works without an active session.
+    // Add/Remove proxy buttons are gated on isOwnWallet inside the renderer.
+    renderWalletAdvancedSection(data.address || data.account, isOwnWallet);
 }
 
 // Wire up the four wallet action buttons. Idempotent — re-binding after a
@@ -6939,6 +6952,588 @@ async function submitReferendumVote() {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Wallet Advanced — Proxies + Multisig
+//
+// Two read+act features that exist on every Substrate runtime but are
+// historically buried in Polkadot.js Apps. Surfacing them in the explorer
+// keeps users from having to leave for routine ops.
+//
+//   Proxies. Read /api/proxies/<addr>, render rows. Add via `proxy.addProxy
+//   (delegate, type, delay)`; remove via `proxy.removeProxy`. Proxy types
+//   come from /api/proxy-types (read off chain metadata).
+//
+//   Multisig. v1 ships read-only:
+//     - Address calculator. Given a list of signers + threshold, derives
+//       the deterministic multisig address client-side via createKeyMulti.
+//     - Pending approvals viewer. Renders entries from
+//       /api/multisigs/<addr> so a depositor can see what's outstanding.
+//   Approve / cancel signing flows are v2 (need timepoint/threshold
+//   tracking and call-decode UX).
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function renderWalletAdvancedSection(address, isOwnWallet) {
+    const slot = document.getElementById('wallet-advanced-section');
+    if (!slot || !address) return;
+    // Render the static shell first so the user sees something immediately;
+    // the proxy + multisig fetches populate their respective sub-cards.
+    slot.innerHTML = `
+        <div class="list-container glass" style="margin-top: 20px;">
+            <div class="list-header">
+                <h2><i class='bx bx-shield-quarter' style="vertical-align:middle;color:var(--brand-secondary);"></i> Advanced</h2>
+                <span style="color:var(--text-muted);font-size:0.78rem;">Delegate signing &amp; coordinate multisig</span>
+            </div>
+
+            <div style="padding: 20px;">
+                <h3 style="font-size:0.95rem;margin:0 0 12px 0;">
+                    <span class="glossary-term" data-term="proxy">Proxies</span>
+                    <span style="color:var(--text-muted);font-weight:400;font-size:0.78rem;">delegates that can sign for this account</span>
+                </h3>
+                <div id="wallet-proxy-list" style="margin-bottom: 14px;">
+                    <div style="color:var(--text-muted);font-size:0.85rem;">Loading proxies…</div>
+                </div>
+                ${isOwnWallet ? `<div id="wallet-proxy-add" style="border-top:1px solid var(--border-color);padding-top:14px;margin-top:6px;"></div>` : ''}
+            </div>
+
+            <div style="padding: 20px; border-top: 1px solid var(--border-color);">
+                <h3 style="font-size:0.95rem;margin:0 0 12px 0;">
+                    <span class="glossary-term" data-term="multisig">Multisig</span>
+                    <span style="color:var(--text-muted);font-weight:400;font-size:0.78rem;">derive the address &amp; view pending calls</span>
+                </h3>
+                <div id="wallet-multisig-calc"></div>
+                <div id="wallet-multisig-pending" style="margin-top: 18px;"></div>
+            </div>
+        </div>`;
+
+    renderProxyList(address, isOwnWallet);
+    if (isOwnWallet) renderAddProxyForm(address);
+    renderMultisigCalculator();
+    renderMultisigPending(address);
+}
+
+// ── Proxies ─────────────────────────────────────────────────────────────────
+
+async function renderProxyList(address, isOwnWallet) {
+    const el = document.getElementById('wallet-proxy-list');
+    if (!el) return;
+    try {
+        const data = await fetchApiJson('/api/proxies/' + encodeURIComponent(address));
+        const list = Array.isArray(data.proxies) ? data.proxies : [];
+        if (!list.length) {
+            el.innerHTML = `<div style="color:var(--text-muted);font-size:0.85rem;padding:8px 0;">No proxies set. ${isOwnWallet ? 'Use the form below to add one.' : ''}</div>`;
+            return;
+        }
+        const rows = list.map(p => `<tr>
+            <td style="padding:8px 4px;"><a href="/account/${encodeURIComponent(p.delegate)}" class="item-link address-cell" style="color:var(--brand-secondary);font-size:0.82rem;">${stakingEscapeHtml(stakingShortAddress(p.delegate))}</a></td>
+            <td style="padding:8px 4px;"><code style="font-size:0.78rem;color:var(--text-secondary);">${stakingEscapeHtml(p.proxyType)}</code></td>
+            <td style="padding:8px 4px;text-align:right;font-size:0.78rem;color:var(--text-secondary);">${stakingFormatNumber(p.delay)} blocks</td>
+            <td style="padding:8px 4px;text-align:right;">
+                ${isOwnWallet ? `<button type="button" class="staking-download-btn proxy-remove-btn" data-delegate="${stakingEscapeHtml(p.delegate)}" data-proxy-type="${stakingEscapeHtml(p.proxyType)}" data-delay="${p.delay}" style="padding:4px 10px;font-size:0.72rem;color:var(--error);border-color:rgba(231,76,60,0.4);">Remove</button>` : ''}
+            </td>
+        </tr>`).join('');
+        el.innerHTML = `
+            <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;">Deposit reserved: ${stakingFormatPDEX(data.deposit)} PDEX</div>
+            <div class="table-responsive"><table class="data-table" style="margin:0;">
+                <thead><tr><th>Delegate</th><th>Type</th><th style="text-align:right;">Delay</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>`;
+        // Remove handlers — each row's button fires proxy.removeProxy(delegate, type, delay).
+        if (isOwnWallet) {
+            el.querySelectorAll('.proxy-remove-btn').forEach(btn => btn.addEventListener('click', () => {
+                const delegate = btn.getAttribute('data-delegate');
+                const proxyType = btn.getAttribute('data-proxy-type');
+                const delay = parseInt(btn.getAttribute('data-delay'), 10) || 0;
+                if (!confirm(`Remove proxy ${stakingShortAddress(delegate)} (${proxyType})?`)) return;
+                submitSignedTx({
+                    buildTx: api => api.tx.proxy.removeProxy(delegate, proxyType, delay),
+                    label: `Remove ${proxyType} proxy`,
+                    button: btn,
+                    busyText: 'Signing…',
+                    idleText: 'Remove',
+                    onSuccess: () => setTimeout(() => renderProxyList(address, isOwnWallet), 2500)
+                });
+            }));
+        }
+    } catch (e) {
+        // 501 from the backend when the runtime has no proxy pallet → hide
+        // gracefully rather than rendering a scary error.
+        if (e && e.status === 501) {
+            el.innerHTML = `<div style="color:var(--text-muted);font-size:0.85rem;">Proxy pallet is not available on this runtime.</div>`;
+        } else {
+            renderApiError(el, e, () => renderProxyList(address, isOwnWallet));
+        }
+    }
+}
+
+let cachedProxyTypes = null;
+
+async function renderAddProxyForm(address) {
+    const el = document.getElementById('wallet-proxy-add');
+    if (!el) return;
+    try {
+        if (!cachedProxyTypes) {
+            const data = await fetchApiJson('/api/proxy-types');
+            cachedProxyTypes = Array.isArray(data.types) && data.types.length ? data.types : ['Any', 'NonTransfer', 'Governance', 'Staking', 'IdentityJudgement', 'CancelProxy'];
+        }
+    } catch (_) {
+        cachedProxyTypes = ['Any', 'NonTransfer', 'Governance', 'Staking', 'IdentityJudgement', 'CancelProxy'];
+    }
+    el.innerHTML = `
+        <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px 0;">Add a proxy</h4>
+        <div style="display:grid;grid-template-columns:1fr 180px 100px auto;gap:8px;align-items:center;">
+            <input type="text" id="proxy-add-delegate" placeholder="Delegate address (es…)" autocomplete="off" spellcheck="false" style="padding:8px 12px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:inherit;font-size:0.85rem;">
+            <select id="proxy-add-type" style="padding:8px 12px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:inherit;font-size:0.85rem;">
+                ${cachedProxyTypes.map(t => `<option value="${stakingEscapeHtml(t)}">${stakingEscapeHtml(t)}</option>`).join('')}
+            </select>
+            <input type="number" id="proxy-add-delay" placeholder="Delay" min="0" value="0" title="Delay in blocks before this proxy can sign" style="padding:8px 12px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:inherit;font-size:0.85rem;">
+            <button type="button" id="proxy-add-submit" class="staking-download-btn" style="padding:8px 16px;font-size:0.82rem;background:var(--brand-primary);color:white;border-color:var(--brand-primary);">Add proxy</button>
+        </div>
+        <div id="proxy-add-error" class="staking-error" style="display:none;margin-top:8px;font-size:0.78rem;"></div>`;
+
+    const submitBtn = document.getElementById('proxy-add-submit');
+    if (submitBtn) submitBtn.addEventListener('click', () => {
+        const errEl = document.getElementById('proxy-add-error');
+        const showErr = m => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+        const delegateInput = document.getElementById('proxy-add-delegate');
+        const typeInput = document.getElementById('proxy-add-type');
+        const delayInput = document.getElementById('proxy-add-delay');
+        const delegate = (delegateInput && delegateInput.value || '').trim();
+        const proxyType = (typeInput && typeInput.value || 'Any').trim();
+        const delay = parseInt(delayInput && delayInput.value || '0', 10) || 0;
+        if (!isValidPolkadexAddress(delegate)) return showErr('Delegate address is not a valid Polkadex address.');
+        if (delay < 0 || delay > 10_000_000) return showErr('Delay looks unreasonable.');
+        if (errEl) errEl.style.display = 'none';
+        submitSignedTx({
+            buildTx: api => api.tx.proxy.addProxy(delegate, proxyType, delay),
+            label: `Add ${proxyType} proxy`,
+            button: submitBtn,
+            busyText: 'Signing…',
+            idleText: 'Add proxy',
+            onError: showErr,
+            onSuccess: () => {
+                if (delegateInput) delegateInput.value = '';
+                setTimeout(() => renderProxyList(address, true), 2500);
+            }
+        });
+    });
+}
+
+// ── Multisig calculator (client-side, pure derivation) ──────────────────────
+
+function renderMultisigCalculator() {
+    const el = document.getElementById('wallet-multisig-calc');
+    if (!el) return;
+    el.innerHTML = `
+        <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px 0;">Multisig address calculator</h4>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px;">Paste one address per line and pick a threshold. The address below is the deterministic <span class="glossary-term" data-term="multisig">multisig</span> account for those signers.</div>
+        <textarea id="multisig-signers" rows="4" placeholder="es… (one per line)" spellcheck="false" style="width:100%;padding:10px 12px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:monospace;font-size:0.82rem;resize:vertical;"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">
+            <label style="font-size:0.82rem;color:var(--text-secondary);">Threshold</label>
+            <input type="number" id="multisig-threshold" min="1" value="2" style="width:80px;padding:6px 10px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:inherit;font-size:0.85rem;">
+            <button type="button" id="multisig-calc-go" class="staking-download-btn" style="padding:6px 14px;font-size:0.78rem;">Derive address</button>
+        </div>
+        <div id="multisig-result" style="margin-top:10px;font-size:0.85rem;"></div>`;
+    const goBtn = document.getElementById('multisig-calc-go');
+    if (goBtn) goBtn.addEventListener('click', () => {
+        const result = document.getElementById('multisig-result');
+        if (!result) return;
+        const textarea = document.getElementById('multisig-signers');
+        const thrInput = document.getElementById('multisig-threshold');
+        const lines = ((textarea && textarea.value) || '')
+            .split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+        const threshold = parseInt(thrInput && thrInput.value || '0', 10);
+        if (lines.length < 2) { result.innerHTML = `<span style="color:var(--error);">Add at least two signer addresses.</span>`; return; }
+        if (!Number.isFinite(threshold) || threshold < 1 || threshold > lines.length) {
+            result.innerHTML = `<span style="color:var(--error);">Threshold must be between 1 and ${lines.length}.</span>`;
+            return;
+        }
+        // Validate every line is a real address before passing into the
+        // crypto routine — otherwise decodeAddress throws and the user
+        // sees an opaque error.
+        for (const addr of lines) {
+            if (!isValidPolkadexAddress(addr)) { result.innerHTML = `<span style="color:var(--error);">Not a valid Polkadex address: ${stakingEscapeHtml(stakingShortAddress(addr))}</span>`; return; }
+        }
+        try {
+            // createKeyMulti expects sorted public keys; sortAddresses returns
+            // the address strings sorted by their underlying public-key bytes.
+            const sorted = sortAddresses(lines, POLKADEX_SS58);
+            const multisigPubKey = createKeyMulti(sorted, threshold);
+            const multisigAddr = encodeAddress(multisigPubKey, POLKADEX_SS58);
+            result.innerHTML = `
+                <div style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:var(--radius-sm);">
+                    <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:4px;">Multisig address (${threshold}-of-${lines.length})</div>
+                    <div class="address-cell" style="word-break:break-all;color:var(--brand-secondary);font-weight:600;">${stakingEscapeHtml(multisigAddr)} <span onclick="copyToClipboard(this, '${multisigAddr}')" style="cursor:pointer;color:var(--text-muted);font-size:0.78rem;margin-left:8px;">copy</span></div>
+                    <div style="margin-top:6px;"><a href="/account/${encodeURIComponent(multisigAddr)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View on-chain</a></div>
+                </div>`;
+        } catch (e) {
+            result.innerHTML = `<span style="color:var(--error);">Derivation failed: ${stakingEscapeHtml(e.message || String(e))}</span>`;
+        }
+    });
+}
+
+// ── Multisig pending approvals (read-only viewer) ───────────────────────────
+
+async function renderMultisigPending(address) {
+    const el = document.getElementById('wallet-multisig-pending');
+    if (!el) return;
+    try {
+        const data = await fetchApiJson('/api/multisigs/' + encodeURIComponent(address));
+        const list = Array.isArray(data.pending) ? data.pending : [];
+        el.innerHTML = `
+            <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px 0;">Pending multisig calls <span style="color:var(--text-muted);font-weight:400;font-size:0.72rem;text-transform:none;letter-spacing:0;">(if this address is a multisig)</span></h4>
+            ${list.length === 0
+                ? `<div style="color:var(--text-muted);font-size:0.82rem;padding:6px 0;">No pending multisig approvals against this address.</div>`
+                : `<div class="table-responsive"><table class="data-table" style="margin:0;">
+                    <thead><tr><th>Call hash</th><th>Approvals</th><th style="text-align:right;">Depositor</th><th style="text-align:right;">When</th></tr></thead>
+                    <tbody>${list.map(p => `<tr>
+                        <td style="padding:8px 4px;"><code style="font-size:0.78rem;color:var(--brand-secondary);word-break:break-all;">${stakingEscapeHtml(stakingShortAddress(p.callHash || '') || '—')}</code></td>
+                        <td style="padding:8px 4px;font-size:0.82rem;">${(p.approvals || []).length}</td>
+                        <td style="padding:8px 4px;text-align:right;"><a href="/account/${encodeURIComponent(p.depositor || '')}" class="item-link address-cell" style="color:var(--brand-secondary);font-size:0.78rem;">${stakingEscapeHtml(stakingShortAddress(p.depositor || '') || '—')}</a></td>
+                        <td style="padding:8px 4px;text-align:right;font-size:0.78rem;color:var(--text-secondary);">${p.when ? `block ${stakingFormatNumber(p.when.height)}` : '—'}</td>
+                    </tr>`).join('')}</tbody>
+                </table></div>
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-top:8px;">Approve / cancel signing is coming in a future update — for now, sign via Polkadot.js Apps with the call hash above.</div>`
+            }`;
+    } catch (e) {
+        if (e && e.status === 501) {
+            el.innerHTML = `<div style="color:var(--text-muted);font-size:0.82rem;">Multisig pallet is not available on this runtime.</div>`;
+        } else {
+            renderApiError(el, e, () => renderMultisigPending(address));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Address labels (v2: community-sourced + voting)
+//
+// Anyone signed in (via the existing wallet-signature flow) can suggest a
+// label for any address. The address's owner gets a sticky "self-label"
+// that always outranks community suggestions. Other suggestions are ranked
+// by net vote score and filtered by the chain's standard threshold for
+// reports/vetoes.
+//
+// Two caches:
+//   addressTopLabelCache  — address → { label, signer, isSelf } | null | Promise
+//                           Drives the inline .addr-label pill across the explorer.
+//   addressLabelsCache    — address → array of full label rows.
+//                           Drives the account-details panel (votes + reports).
+//
+// Both caches invalidate on any local write (suggest/vote/report/veto) so
+// the next render sees fresh data without a hard reload.
+// ─────────────────────────────────────────────────────────────────────────────
+const addressTopLabelCache = new Map();
+const addressLabelsCache   = new Map();
+
+function invalidateAddressLabelCache(address) {
+    addressTopLabelCache.delete(address);
+    addressLabelsCache.delete(address);
+}
+
+// Returns just the top label (used by the inline pill). Cached as a string
+// or {label, signer, isSelf} object — callers that need the source pass
+// `{ withSource: true }`.
+async function fetchAddressLabel(address, opts = {}) {
+    if (!address) return null;
+    const withSource = !!opts.withSource;
+    if (addressTopLabelCache.has(address)) {
+        const v = addressTopLabelCache.get(address);
+        const resolved = v && typeof v.then === 'function' ? await v : v;
+        if (!resolved) return null;
+        return withSource ? resolved : resolved.label;
+    }
+    const p = (async () => {
+        try {
+            const data = await fetchLabelsJson(address);
+            const top = data && data.topLabel ? {
+                label: data.topLabel.label,
+                signer: data.topLabel.signer,
+                isSelf: !!data.topLabel.isSelf
+            } : null;
+            addressTopLabelCache.set(address, top);
+            // Opportunistically populate the full-list cache too so the
+            // account-details panel can render without another round trip.
+            if (data && Array.isArray(data.labels)) addressLabelsCache.set(address, data.labels);
+            return top;
+        } catch (_) {
+            addressTopLabelCache.set(address, null);
+            return null;
+        }
+    })();
+    addressTopLabelCache.set(address, p);
+    const resolved = await p;
+    if (!resolved) return null;
+    return withSource ? resolved : resolved.label;
+}
+
+// Authed GET — when a session token is available, attaches it so the
+// returned rows include `viewerVote`. Falls back to anonymous read.
+async function fetchLabelsJson(address) {
+    const session = getDiscussSession();
+    const headers = {};
+    if (session && session.token) headers['Authorization'] = 'Bearer ' + session.token;
+    const res = await fetch('/api/labels/' + encodeURIComponent(address), { headers });
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error((txt && txt.slice(0, 120)) || ('HTTP ' + res.status));
+    }
+    return await res.json();
+}
+
+// Apply the top label to every container element on the page that opted in
+// via `class="address-with-label" data-address="<addr>"`. Idempotent — won't
+// double-stamp the pill. A community label gets the `community` modifier
+// class so its CSS can render differently from a self-label.
+function applyAddressLabelToDom(address, top) {
+    if (!address || !top || !top.label) return;
+    const nodes = document.querySelectorAll(`.address-with-label[data-address="${CSS.escape(address)}"]`);
+    nodes.forEach(node => {
+        const existing = node.querySelector('.addr-label');
+        if (existing) existing.remove();
+        const tag = document.createElement('span');
+        tag.className = 'addr-label' + (top.isSelf ? '' : ' community');
+        tag.textContent = top.label;
+        tag.title = top.isSelf
+            ? 'Self-set label (signed by the address owner)'
+            : 'Community-suggested label · click the address to see other suggestions';
+        node.insertBefore(tag, node.firstChild);
+    });
+}
+
+// Helper used by every list page to lazily decorate addresses with their
+// top label. Safe to spam — the cache deduplicates.
+async function ensureAddressLabel(address) {
+    if (!address) return;
+    const top = await fetchAddressLabel(address, { withSource: true });
+    if (top && top.label) applyAddressLabelToDom(address, top);
+}
+
+// ─── Account-details labels panel (v2) ──────────────────────────────────────
+// One self-label row at the top (if any), then a vote-sorted list of
+// community suggestions, plus a "Suggest a label" form when signed in.
+async function renderAccountLabelEditor(address) {
+    const slot = document.getElementById('account-label-editor');
+    if (!slot || !address) return;
+    const session = getDiscussSession();
+    const isOwner = !!(session && session.address === address);
+
+    // Fetch fresh — labels can be voted/reported by anyone else at any time.
+    let data;
+    try { data = await fetchLabelsJson(address); }
+    catch (e) {
+        slot.innerHTML = `<div style="margin-top:10px;color:var(--text-muted);font-size:0.78rem;">Couldn't load labels: ${stakingEscapeHtml(e.message)}</div>`;
+        return;
+    }
+    const labels = Array.isArray(data.labels) ? data.labels : [];
+    addressLabelsCache.set(address, labels);
+    const selfRow = labels.find(l => l.isSelf) || null;
+    const community = labels.filter(l => !l.isSelf);
+
+    // ─ Row renderer ───────────────────────────────────────────────────────
+    const renderLabelRow = (l) => {
+        const myVote = Number(l.viewerVote) || 0;
+        const hiddenByReports = l.reportCount >= 3;
+        const isMine = session && session.address === l.signer;
+        return `<div class="label-row ${l.vetoed || hiddenByReports ? 'hidden-label' : ''}" data-signer="${stakingEscapeHtml(l.signer)}" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid rgba(255,255,255,0.04);">
+            ${ l.isSelf
+                ? '' // self-labels don't get vote arrows (the score doesn't drive their ranking)
+                : `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:32px;">
+                    <button type="button" class="label-vote-btn" data-vote="1"  title="Upvote"   ${session ? '' : 'disabled'} style="background:none;border:none;cursor:${session?'pointer':'not-allowed'};color:${myVote===1?'var(--success)':'var(--text-muted)'};padding:0;font-size:1.1rem;line-height:1;"><i class='bx bx-chevron-up'></i></button>
+                    <span style="font-size:0.82rem;font-weight:600;color:var(--text-primary);min-width:24px;text-align:center;">${l.score > 0 ? '+' : ''}${l.score}</span>
+                    <button type="button" class="label-vote-btn" data-vote="-1" title="Downvote" ${session ? '' : 'disabled'} style="background:none;border:none;cursor:${session?'pointer':'not-allowed'};color:${myVote===-1?'var(--error)':'var(--text-muted)'};padding:0;font-size:1.1rem;line-height:1;"><i class='bx bx-chevron-down'></i></button>
+                </div>`
+            }
+            <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <strong style="color:var(--text-primary);">${stakingEscapeHtml(l.label)}</strong>
+                    ${l.isSelf ? `<span class="reward-badge claimed" style="font-size:0.7rem;padding:1px 8px;">verified owner</span>` : ''}
+                    ${l.vetoed ? `<span class="reward-badge unclaimed" style="font-size:0.7rem;padding:1px 8px;">vetoed</span>` : ''}
+                    ${hiddenByReports ? `<span class="reward-badge unclaimed" style="font-size:0.7rem;padding:1px 8px;">hidden (reports)</span>` : ''}
+                </div>
+                <div style="color:var(--text-muted);font-size:0.72rem;margin-top:2px;">
+                    by <a href="/account/${encodeURIComponent(l.signer)}" class="item-link" style="color:var(--brand-secondary);">${stakingEscapeHtml(stakingShortAddress(l.signer))}</a>
+                    · ${stakingEscapeHtml(formatLocalDateTime(l.createdAt || 0))}
+                    ${l.reportCount > 0 ? ` · <span style="color:var(--error);">${l.reportCount} report${l.reportCount === 1 ? '' : 's'}</span>` : ''}
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+                ${isMine ? `<button type="button" class="label-delete-btn staking-download-btn" style="padding:4px 10px;font-size:0.72rem;color:var(--error);border-color:rgba(231,76,60,0.4);">Remove mine</button>` : ''}
+                ${!isMine && !l.isSelf && session ? `<button type="button" class="label-report-btn staking-download-btn" style="padding:4px 10px;font-size:0.72rem;color:var(--text-muted);">Report</button>` : ''}
+                ${isOwner && !l.isSelf ? `<button type="button" class="label-veto-btn staking-download-btn" style="padding:4px 10px;font-size:0.72rem;color:${l.vetoed ? 'var(--success)' : 'var(--error)'};border-color:rgba(231,76,60,0.4);">${l.vetoed ? 'Un-veto' : 'Veto'}</button>` : ''}
+            </div>
+        </div>`;
+    };
+
+    // ─ Suggest form ───────────────────────────────────────────────────────
+    const mineLabel = session ? (community.find(c => c.signer === session.address) || (selfRow && selfRow.signer === session.address ? selfRow : null)) : null;
+    const suggestForm = session
+        ? `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);">
+                <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 8px 0;">${isOwner ? 'Set your label' : 'Suggest a label'}</h4>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <input type="text" id="account-label-input" maxlength="64" placeholder="${isOwner ? 'Foundation Wallet, Cold Storage #1, …' : 'Binance hot wallet, Polkadex Sudo, …'}" value="${stakingEscapeHtml(mineLabel ? mineLabel.label : '')}" style="flex:1;min-width:220px;padding:8px 12px;background:rgba(0,0,0,0.3);border:1px solid var(--border-color);color:var(--text-primary);border-radius:var(--radius-sm);font-family:inherit;font-size:0.85rem;">
+                    <button type="button" id="account-label-save" class="staking-download-btn" style="padding:8px 16px;font-size:0.82rem;background:var(--brand-primary);color:white;border-color:var(--brand-primary);">${mineLabel ? 'Update' : (isOwner ? 'Set label' : 'Suggest')}</button>
+                </div>
+                <div id="account-label-status" style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);">${isOwner
+                    ? 'Owner labels (verified by signature) always outrank community suggestions.'
+                    : 'Your suggestion will appear in this list. The community votes on it; the address owner can veto.'}</div>
+            </div>`
+        : `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);color:var(--text-muted);font-size:0.82rem;">
+                <a href="/wallet" class="item-link" style="color:var(--brand-secondary);">Connect your wallet</a> to suggest or vote on labels.
+           </div>`;
+
+    // ─ Layout ─────────────────────────────────────────────────────────────
+    slot.innerHTML = `
+        <div style="margin-top:14px;">
+            <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 4px 0;">Labels <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--text-muted);">(${labels.length})</span></h4>
+            ${selfRow ? renderLabelRow(selfRow) : ''}
+            ${community.length
+                ? community.map(renderLabelRow).join('')
+                : (selfRow ? '' : `<div style="color:var(--text-muted);font-size:0.82rem;padding:10px 0;">No labels yet. ${session ? 'Be the first to suggest one!' : ''}</div>`)}
+            ${suggestForm}
+        </div>`;
+
+    // ─ Wire row buttons ───────────────────────────────────────────────────
+    slot.querySelectorAll('.label-row').forEach(row => {
+        const signer = row.getAttribute('data-signer');
+        if (!signer) return;
+        row.querySelectorAll('.label-vote-btn').forEach(btn => btn.addEventListener('click', () => labelVote(address, signer, parseInt(btn.getAttribute('data-vote'), 10), btn)));
+        const delBtn = row.querySelector('.label-delete-btn');
+        if (delBtn) delBtn.addEventListener('click', () => labelDeleteMine(address, signer, delBtn));
+        const reportBtn = row.querySelector('.label-report-btn');
+        if (reportBtn) reportBtn.addEventListener('click', () => labelReport(address, signer, reportBtn));
+        const vetoBtn = row.querySelector('.label-veto-btn');
+        if (vetoBtn) vetoBtn.addEventListener('click', () => labelVeto(address, signer, vetoBtn));
+    });
+
+    // ─ Wire suggest form ──────────────────────────────────────────────────
+    const saveBtn = document.getElementById('account-label-save');
+    const statusEl = document.getElementById('account-label-status');
+    if (saveBtn) saveBtn.addEventListener('click', async () => {
+        const input = document.getElementById('account-label-input');
+        const label = (input && input.value || '').trim();
+        if (!label) { if (statusEl) { statusEl.textContent = 'Enter a label first.'; statusEl.style.color = 'var(--error)'; } return; }
+        saveBtn.disabled = true;
+        try {
+            const res = await fetch('/api/labels/' + encodeURIComponent(address), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.token },
+                body: JSON.stringify({ label })
+            });
+            const data = await res.json();
+            if (res.status === 401) { localStorage.removeItem(DISCUSS_TOKEN_KEY); throw new Error('Session expired — please sign in again.'); }
+            if (res.status === 429) throw new Error(data.error || 'Slow down — try again in a minute.');
+            if (!res.ok || data.error) throw new Error(data.error || 'Failed to save label.');
+            invalidateAddressLabelCache(address);
+            if (statusEl) { statusEl.textContent = 'Saved.'; statusEl.style.color = 'var(--success)'; }
+            renderAccountLabelEditor(address);
+            ensureAddressLabel(address);
+        } catch (e) {
+            if (statusEl) { statusEl.textContent = e.message; statusEl.style.color = 'var(--error)'; }
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
+}
+
+// ─── Row actions (vote / delete / report / veto) ────────────────────────────
+async function labelVote(address, signer, vote, btn) {
+    const session = getDiscussSession();
+    if (!session) return;
+    btn.disabled = true;
+    try {
+        // Toggle: clicking the same arrow again clears the vote.
+        const labels = addressLabelsCache.get(address) || [];
+        const row = labels.find(l => l.signer === signer);
+        const desired = (row && Number(row.viewerVote) === vote) ? 0 : vote;
+        const res = await fetch(`/api/labels/${encodeURIComponent(address)}/${encodeURIComponent(signer)}/vote`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.token },
+            body: JSON.stringify({ vote: desired })
+        });
+        const data = await res.json();
+        if (res.status === 401) { localStorage.removeItem(DISCUSS_TOKEN_KEY); throw new Error('Session expired — please sign in again.'); }
+        if (!res.ok || data.error) throw new Error(data.error || 'Vote failed.');
+        invalidateAddressLabelCache(address);
+        renderAccountLabelEditor(address);
+        ensureAddressLabel(address);
+    } catch (e) {
+        alert(e.message);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function labelDeleteMine(address, signer, btn) {
+    const session = getDiscussSession();
+    if (!session || session.address !== signer) return;
+    if (!confirm('Remove your label for this address?')) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/labels/' + encodeURIComponent(address), {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + session.token }
+        });
+        if (res.status === 401) { localStorage.removeItem(DISCUSS_TOKEN_KEY); throw new Error('Session expired — please sign in again.'); }
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Delete failed.');
+        invalidateAddressLabelCache(address);
+        renderAccountLabelEditor(address);
+        document.querySelectorAll(`.address-with-label[data-address="${CSS.escape(address)}"] .addr-label`).forEach(n => n.remove());
+        ensureAddressLabel(address);
+    } catch (e) {
+        alert(e.message);
+        btn.disabled = false;
+    }
+}
+
+async function labelReport(address, signer, btn) {
+    const session = getDiscussSession();
+    if (!session) return;
+    const reason = prompt('Briefly, why is this label inappropriate? (optional)') || '';
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/labels/${encodeURIComponent(address)}/${encodeURIComponent(signer)}/report`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.token },
+            body: JSON.stringify({ reason })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Report failed.');
+        invalidateAddressLabelCache(address);
+        renderAccountLabelEditor(address);
+    } catch (e) {
+        alert(e.message);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function labelVeto(address, signer, btn) {
+    const session = getDiscussSession();
+    if (!session || session.address !== address) return;
+    const labels = addressLabelsCache.get(address) || [];
+    const row = labels.find(l => l.signer === signer);
+    const desired = row ? !row.vetoed : true;
+    if (!confirm(desired
+        ? 'Hide this community label on your address?'
+        : 'Restore this previously-vetoed label?')) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/labels/${encodeURIComponent(address)}/${encodeURIComponent(signer)}/veto`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.token },
+            body: JSON.stringify({ vetoed: desired })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Veto failed.');
+        invalidateAddressLabelCache(address);
+        renderAccountLabelEditor(address);
+        ensureAddressLabel(address);
+    } catch (e) {
+        alert(e.message);
+        btn.disabled = false;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Analytics dashboard — KPI cards + 4 daily time-series charts driven by the
 // /api/analytics/{snapshot,timeseries} endpoints.
 //
@@ -7293,6 +7888,266 @@ function renderWatchlistPage() {
             if (document.querySelector('.watchlist-page')?.style.display !== 'none') renderWatchlistPage();
         }
     });
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding tour + glossary tooltips
+//
+// First-visit tour: 5 slides intro'ing the explorer's distinctive features
+// (in-line wallet actions, governance with voting, scorecard, watchlist,
+// tax export). Auto-shown once per browser, dismissable, re-triggerable
+// from the footer link or `?tour=1` in the URL.
+//
+// Glossary: any element with class `glossary-term` and a `data-term` attr
+// gets an underlined dotted style + a popover on hover/focus/click. Terms
+// are defined inline in GLOSSARY below; touching new terms is one entry.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TOUR_STORAGE_KEY = 'pdex_tour_seen_v1';
+
+const TOUR_SLIDES = [
+    {
+        icon: 'bx-grid-alt',
+        title: 'Welcome to the Polkadex Explorer',
+        body: `<p>This is a full-featured explorer for the Polkadex Mainnet — blocks, transactions, validators, holders, governance, and staking all in one place.</p>
+            <p style="margin-top: 10px;">Unlike most chain explorers, you can <strong>act</strong> on what you see here: send PDEX, stake, claim rewards, and vote on governance proposals — all by connecting a wallet extension.</p>`
+    },
+    {
+        icon: 'bx-wallet',
+        title: 'Connect your wallet',
+        body: `<p>Click <strong>My Account</strong> in the sidebar to connect Polkadot.js, Talisman, SubWallet, or Nova Wallet. The explorer then unlocks signing actions across every page.</p>
+            <p style="margin-top: 10px;">Mobile users: open the explorer inside the Nova Wallet or SubWallet in-app browser and the connect flow just works.</p>`
+    },
+    {
+        icon: 'bx-coin-stack',
+        title: 'Staking, simplified',
+        body: `<p>Visit <strong>Staking Rewards</strong> to view payout history, claim unclaimed rewards, stake more PDEX, or unbond — all from one page.</p>
+            <p style="margin-top: 10px;">The new <strong>Validator scorecard</strong> shows APY, commission band, active-era rate, and slash history at a glance so you can pick nominees confidently.</p>`
+    },
+    {
+        icon: 'bx-book-content',
+        title: 'Governance you can act on',
+        body: `<p><strong>Democracy</strong>, <strong>Council</strong>, and <strong>Treasury</strong> tabs show every proposal, motion, and referendum. Click any proposal number to see its lifecycle, on-chain hash, and resolving blocks.</p>
+            <p style="margin-top: 10px;">For ongoing referenda, hit <strong>Aye</strong> or <strong>Nay</strong> right in the table to cast a Standard vote with conviction.</p>`
+    },
+    {
+        icon: 'bx-star',
+        title: 'Stay on top of what matters',
+        body: `<p>Star any address, validator, or proposal — the <strong>Watchlist</strong> page collects everything you're tracking.</p>
+            <p style="margin-top: 10px;">Need year-end staking numbers? The <strong>Tax (year…)</strong> button on your staking-rewards page exports a CSV with USD prices joined at each era close.</p>
+            <p style="margin-top: 10px;">Anything underlined like <span class="glossary-term" data-term="era">this</span> opens a quick definition.</p>`
+    }
+];
+
+let tourCurrentSlide = 0;
+
+function openOnboardingTour() {
+    tourCurrentSlide = 0;
+    renderTourSlide();
+    const modal = document.getElementById('onboarding-tour-modal');
+    if (modal) modal.style.display = 'flex';
+}
+function closeOnboardingTour(markSeen = true) {
+    const modal = document.getElementById('onboarding-tour-modal');
+    if (modal) modal.style.display = 'none';
+    if (markSeen) {
+        try { localStorage.setItem(TOUR_STORAGE_KEY, '1'); } catch (_) { /* private mode etc. */ }
+    }
+}
+function renderTourSlide() {
+    const slide = TOUR_SLIDES[tourCurrentSlide];
+    if (!slide) return;
+    const content = document.getElementById('onboarding-tour-content');
+    if (content) {
+        content.innerHTML = `
+            <div style="text-align:center;margin-bottom:16px;">
+                <i class='bx ${slide.icon}' style="font-size:42px;color:var(--brand-primary);"></i>
+            </div>
+            <h2 style="margin:0 0 12px 0;font-size:1.4rem;text-align:center;">${stakingEscapeHtml(slide.title)}</h2>
+            <div style="color:var(--text-secondary);font-size:0.92rem;line-height:1.6;">${slide.body}</div>
+        `;
+    }
+    // Dot indicator row.
+    const dots = document.getElementById('onboarding-tour-dots');
+    if (dots) {
+        dots.innerHTML = TOUR_SLIDES.map((_, i) =>
+            `<span style="width:8px;height:8px;border-radius:50%;background:${i === tourCurrentSlide ? 'var(--brand-primary)' : 'rgba(255,255,255,0.15)'};transition:background var(--transition-fast);"></span>`
+        ).join('');
+    }
+    const backBtn = document.getElementById('onboarding-tour-back');
+    const nextBtn = document.getElementById('onboarding-tour-next');
+    if (backBtn) backBtn.style.visibility = tourCurrentSlide === 0 ? 'hidden' : 'visible';
+    if (nextBtn) nextBtn.textContent = (tourCurrentSlide === TOUR_SLIDES.length - 1) ? 'Get started' : 'Next →';
+}
+
+(function wireOnboardingTour() {
+    const closeBtn = document.getElementById('close-onboarding-tour-modal');
+    const backBtn = document.getElementById('onboarding-tour-back');
+    const nextBtn = document.getElementById('onboarding-tour-next');
+    const modal = document.getElementById('onboarding-tour-modal');
+    if (closeBtn) closeBtn.addEventListener('click', () => closeOnboardingTour(true));
+    if (backBtn) backBtn.addEventListener('click', () => {
+        if (tourCurrentSlide > 0) { tourCurrentSlide--; renderTourSlide(); }
+    });
+    if (nextBtn) nextBtn.addEventListener('click', () => {
+        if (tourCurrentSlide < TOUR_SLIDES.length - 1) { tourCurrentSlide++; renderTourSlide(); }
+        else closeOnboardingTour(true);
+    });
+    // Click outside the panel to dismiss. Escape too.
+    if (modal) modal.addEventListener('click', e => { if (e.target === modal) closeOnboardingTour(true); });
+    document.addEventListener('keydown', e => {
+        if (modal && modal.style.display === 'flex' && e.key === 'Escape') closeOnboardingTour(true);
+    });
+
+    // Auto-show on first visit, OR when ?tour=1 is in the URL (anyone can
+    // re-trigger the tour by sharing such a link). Defer to after init() so
+    // the SPA router has already painted the home page underneath.
+    setTimeout(() => {
+        const params = new URLSearchParams(window.location.search);
+        const forceShow = params.has('tour');
+        let seen = false;
+        try { seen = localStorage.getItem(TOUR_STORAGE_KEY) === '1'; } catch (_) { seen = false; }
+        if (forceShow || !seen) openOnboardingTour();
+    }, 800);
+
+    // Expose `?` as a keyboard shortcut to re-open the tour. Skipped when
+    // focus is inside an input/textarea so search bars keep working.
+    document.addEventListener('keydown', e => {
+        if (e.key !== '?' || e.shiftKey === false) return;
+        const ae = document.activeElement;
+        if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+        openOnboardingTour();
+    });
+    // Footer "Take the tour" link.
+    const replayLink = document.getElementById('footer-replay-tour');
+    if (replayLink) replayLink.addEventListener('click', e => {
+        e.preventDefault();
+        openOnboardingTour();
+    });
+})();
+
+// ─── Glossary ─────────────────────────────────────────────────────────────
+// Curated definitions for terms a casual user might encounter on the
+// explorer. Keep entries punchy — they're tooltip popovers, not articles.
+// Add a new term: insert here, then mark any occurrence in the UI with
+//   <span class="glossary-term" data-term="bonded">bonded</span>
+const GLOSSARY = {
+    era:           'A scheduling unit on Polkadex (~24 hours). Validator rewards are computed and payable per era.',
+    validator:     'A node operator that produces blocks and validates the chain. Validators earn rewards in proportion to their stake (own + nominated) and commission.',
+    nominator:     'A PDEX holder who delegates their stake to one or more validators to earn rewards without running a node.',
+    controller:    'A separate account some stakers used to authorise day-to-day staking calls without exposing the stash. Many Substrate runtimes have removed the controller/stash split.',
+    stash:         'The account that holds the bonded balance. With newer Substrate runtimes, the stash is the controller — there is no separate signing key.',
+    bonded:        'Funds set aside for staking. Bonded funds back nominations but are unlocked only after an unbonding period.',
+    nomination:    'A stake-weighted vote for a validator. Each era the chain picks the highest-stake validators from across all nominations.',
+    slash:         'A penalty deducted from a validator (and their nominators) for misbehaviour such as equivocation or extended downtime.',
+    referendum:    'A public vote on a runtime change or treasury action. Outcomes are binding once enacted.',
+    conviction:    'A multiplier you attach to a referendum vote. Higher conviction = more voting weight, in exchange for a longer post-enactment lock.',
+    motion:        'A proposal voted on by the Council collective. If approved, the underlying call is dispatched.',
+    council:       'A small body of elected accounts that can fast-track proposals, manage the treasury, and veto runtime changes.',
+    treasury:      'An on-chain pot of PDEX funded by transaction fees and slashed stake. Spent on community proposals approved by Council and (sometimes) public referenda.',
+    commission:    'The percentage of staking rewards a validator keeps before distributing the remainder to nominators.',
+    payout:        'The on-chain claim that distributes accrued era rewards to a validator and its nominators. Anyone can trigger it via `staking.payoutStakers`.',
+    extrinsic:     'A signed (or unsigned) transaction that mutates chain state. Calls like transfer, stake, vote, propose are all extrinsics.',
+    ss58:          'The encoding scheme Substrate uses for human-readable addresses. Polkadex addresses use SS58 prefix 88 and start with "e".',
+    pallet:        'A self-contained module of runtime logic (e.g. `staking`, `democracy`, `treasury`). The chain\'s metadata enumerates them all.',
+    proxy:         'A delegated signer that can act on behalf of another account, optionally restricted to a subset of calls (e.g. Staking-only).',
+    multisig:      'A deterministic address derived from a set of signers + threshold. Calls execute only after threshold-of-N have approved.'
+};
+
+// Wrap a free-floating piece of text in a glossary-term span. Useful when
+// building cell content from server data — pass the surrounding sentence and
+// the term key, and the function returns the same string with the matching
+// word marked up. (Not used in this batch but exposed for future markup.)
+function glossarize(text, termKey) {
+    return `<span class="glossary-term" data-term="${stakingEscapeHtml(termKey)}">${stakingEscapeHtml(text)}</span>`;
+}
+
+function positionGlossaryPopover(targetEl) {
+    const pop = document.getElementById('glossary-popover');
+    if (!pop || !targetEl) return;
+    const rect = targetEl.getBoundingClientRect();
+    const popWidth = Math.min(320, window.innerWidth - 24);
+    // Prefer above; flip below when the trigger is near the top edge.
+    let top = rect.top + window.scrollY - pop.offsetHeight - 8;
+    if (top < window.scrollY + 8) top = rect.bottom + window.scrollY + 8;
+    // Center horizontally around the trigger; clamp to viewport.
+    let left = rect.left + window.scrollX + rect.width / 2 - popWidth / 2;
+    left = Math.max(12, Math.min(left, window.innerWidth - popWidth - 12 + window.scrollX));
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+    pop.style.maxWidth = popWidth + 'px';
+}
+
+let glossaryPinnedTrigger = null;  // sticky-open when the user clicked the term
+
+(function wireGlossary() {
+    const pop = document.getElementById('glossary-popover');
+    if (!pop) return;
+    const termEl = document.getElementById('glossary-popover-term');
+    const bodyEl = document.getElementById('glossary-popover-body');
+
+    function show(target) {
+        const term = target.getAttribute('data-term');
+        if (!term) return;
+        const def = GLOSSARY[term.toLowerCase()];
+        if (!def) return;
+        if (termEl) termEl.textContent = term;
+        if (bodyEl) bodyEl.textContent = def;
+        pop.style.display = 'block';
+        // Position AFTER display:block so offsetHeight is correct.
+        positionGlossaryPopover(target);
+    }
+    function hide(force = false) {
+        if (!force && glossaryPinnedTrigger) return;
+        pop.style.display = 'none';
+        glossaryPinnedTrigger = null;
+    }
+
+    // Hover / focus → show. mouseout/blur → hide unless click-pinned.
+    document.addEventListener('mouseover', e => {
+        const t = e.target && e.target.closest ? e.target.closest('.glossary-term') : null;
+        if (!t || glossaryPinnedTrigger) return;
+        show(t);
+    });
+    document.addEventListener('mouseout', e => {
+        const t = e.target && e.target.closest ? e.target.closest('.glossary-term') : null;
+        if (!t || glossaryPinnedTrigger) return;
+        hide();
+    });
+    document.addEventListener('focusin', e => {
+        const t = e.target && e.target.closest ? e.target.closest('.glossary-term') : null;
+        if (t) show(t);
+    });
+    document.addEventListener('focusout', e => {
+        const t = e.target && e.target.closest ? e.target.closest('.glossary-term') : null;
+        if (t && !glossaryPinnedTrigger) hide();
+    });
+
+    // Click toggles a pinned (sticky) state — useful on mobile / for screen
+    // readers, since hover isn't accessible there.
+    document.addEventListener('click', e => {
+        const t = e.target && e.target.closest ? e.target.closest('.glossary-term') : null;
+        if (t) {
+            e.preventDefault();
+            if (glossaryPinnedTrigger === t) { hide(true); return; }
+            glossaryPinnedTrigger = t;
+            show(t);
+            return;
+        }
+        // Click outside any pinned term hides the popover.
+        if (glossaryPinnedTrigger && !pop.contains(e.target)) hide(true);
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && pop.style.display === 'block') hide(true);
+    });
+    // Re-position on scroll / resize while open.
+    const reposition = () => {
+        if (pop.style.display !== 'block') return;
+        const t = glossaryPinnedTrigger || document.querySelector('.glossary-term:hover, .glossary-term:focus');
+        if (t) positionGlossaryPopover(t);
+    };
+    window.addEventListener('scroll', reposition, { passive: true });
+    window.addEventListener('resize', reposition);
 })();
 
 init();

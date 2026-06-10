@@ -2040,6 +2040,61 @@ h1, h2, h3 { font-weight: 600; }
    under the hood so the screen-reader experience reads as an actionable
    control, not a navigation. The click is captured by a global delegate in
    wireGovernanceDetailModal which opens the detail overlay. */
+/* Address label chips — rendered just before the raw address text on any
+   container marked `.address-with-label`. Fetched async by
+   `ensureAddressLabel(address)` and inserted by `applyAddressLabelToDom()`.
+   Two visual flavours: the default brand-pink pill is a self-label (signed
+   by the address owner, highest trust); `.community` is a muted-cyan pill
+   for the top-voted community suggestion. The hover title-text spells out
+   which is which. */
+.addr-label {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 2px 8px;
+    background: rgba(230, 0, 122, 0.12);
+    color: var(--brand-primary);
+    border: 1px solid rgba(230, 0, 122, 0.3);
+    border-radius: 10px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    vertical-align: middle;
+    letter-spacing: 0.01em;
+}
+.addr-label.community {
+    background: rgba(0, 212, 255, 0.10);
+    color: var(--brand-secondary);
+    border-color: rgba(0, 212, 255, 0.28);
+    font-weight: 500; /* slightly lighter — less authority than a self-label */
+}
+
+/* Hidden labels in the account-details panel (vetoed by owner or
+   auto-hidden by report threshold). They're still listed so the community
+   knows they exist, but rendered de-emphasised. */
+.label-row.hidden-label {
+    opacity: 0.55;
+}
+.label-row.hidden-label strong {
+    text-decoration: line-through;
+}
+
+/* Glossary terms — any element with class .glossary-term gets a subtle
+   dotted underline + help cursor so users discover that hovering/clicking
+   reveals a definition. The popover itself is fully positioned and styled
+   inline in #glossary-popover (see index.html). */
+.glossary-term {
+    border-bottom: 1px dotted var(--brand-secondary);
+    cursor: help;
+    color: inherit;
+    -webkit-text-decoration-skip: none;
+    text-decoration-skip-ink: none;
+}
+.glossary-term:hover,
+.glossary-term:focus {
+    color: var(--brand-primary);
+    border-bottom-color: var(--brand-primary);
+    outline: none;
+}
+
 .gov-proposal-link {
     background: none;
     border: none;

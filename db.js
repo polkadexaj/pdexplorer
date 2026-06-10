@@ -195,7 +195,63 @@ CREATE TABLE IF NOT EXISTS council_motions (
   updated_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_motions_index ON council_motions(motion_index DESC);
+
+-- Address labels. v1 = self-labels: the row's address and signer columns
+-- are the same (proof of ownership via signature). Schema leaves room for
+-- v2 community labels (signer != address; needs separate moderation +
+-- voting). Composite PK lets v2 have multiple labels per address while v1
+-- enforces one self-label per address because (address,address) collapses.
+CREATE TABLE IF NOT EXISTS address_labels (
+  address     TEXT NOT NULL,
+  signer      TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  vetoed_at   INTEGER DEFAULT NULL,
+  PRIMARY KEY (address, signer)
+);
+CREATE INDEX IF NOT EXISTS idx_labels_address ON address_labels(address);
+
+-- Per-label up/down vote. PK guarantees one vote per (label, voter).
+-- vote is +1 or -1; clearing a vote = DELETE the row.
+CREATE TABLE IF NOT EXISTS address_label_votes (
+  label_address TEXT NOT NULL,
+  label_signer  TEXT NOT NULL,
+  voter         TEXT NOT NULL,
+  vote          INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (label_address, label_signer, voter)
+);
+CREATE INDEX IF NOT EXISTS idx_label_votes_label ON address_label_votes(label_address, label_signer);
+
+-- Per-label abuse report. PK guarantees one report per (label, reporter).
+-- Aggregated count drives an auto-hide threshold (see REPORT_HIDE_THRESHOLD
+-- in server.js / getVisibleLabels in db.js).
+CREATE TABLE IF NOT EXISTS address_label_reports (
+  label_address TEXT NOT NULL,
+  label_signer  TEXT NOT NULL,
+  reporter      TEXT NOT NULL,
+  reason        TEXT,
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (label_address, label_signer, reporter)
+);
+CREATE INDEX IF NOT EXISTS idx_label_reports_label ON address_label_reports(label_address, label_signer);
 `;
+
+// Idempotent ALTER TABLE ADD COLUMN — checks PRAGMA table_info first so it
+// only runs once per deployment. Used for additive schema changes where the
+// table is already populated in existing deployments. SQLite supports
+// IF NOT EXISTS on CREATE but not on ALTER, so we have to introspect.
+function ensureColumn(table, column, definition) {
+    try {
+        const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+        if (!cols.some(c => c.name === column)) {
+            db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+    } catch (e) {
+        console.warn(`ensureColumn(${table}.${column}) failed: ${e.message}`);
+    }
+}
 
 export function initDb(dataDir) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -232,6 +288,15 @@ export function initDb(dataDir) {
     db.exec('PRAGMA wal_autocheckpoint = 1000');
 
     db.exec(SCHEMA);
+
+    // ---- Additive schema migrations ----
+    // `CREATE TABLE IF NOT EXISTS` doesn't touch existing tables, so when we
+    // add a column to a table that's already in the wild we have to apply
+    // the change ourselves. Each call is a no-op when the column is already
+    // present. Keep this list append-only; never DROP a column here (data
+    // loss). For a destructive change use a one-time migration function.
+    ensureColumn('address_labels', 'vetoed_at', 'INTEGER DEFAULT NULL');
+
     try { migrateFromJson(dataDir); }
     catch (e) { console.warn('JSON -> SQLite migration skipped:', e.message); }
 
@@ -720,6 +785,217 @@ export function getCouncilMotions() {
 }
 export function countCouncilMotions() {
     return db.prepare('SELECT COUNT(*) AS c FROM council_motions').get().c;
+}
+
+// ─── Address labels (v2: community-sourced + voting) ──────────────────────
+// Storage model:
+//   address_labels         — one row per (address, signer); signer == address
+//                            is a "self" label, signer != address is community.
+//                            vetoed_at non-null = hidden by the address owner.
+//   address_label_votes    — one ±1 row per (label, voter). Cleared by DELETE.
+//   address_label_reports  — one row per (label, reporter). N reports auto-hide.
+//
+// Caller (server.js) is responsible for verifying the signer's signature
+// BEFORE calling any of the write functions below.
+
+// Insert or update a label. Works for both self and community labels — the
+// signer-must-match-address check is the API layer's job, not the db's.
+export function upsertAddressLabel({ address, signer, label }) {
+    const now = Date.now();
+    db.prepare(`
+        INSERT INTO address_labels (address, signer, label, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(address, signer) DO UPDATE SET
+            label = excluded.label,
+            updated_at = excluded.updated_at,
+            vetoed_at = NULL   -- re-edit by the same signer un-vetoes their own row
+    `).run(address, signer, label, now, now);
+}
+
+export function deleteAddressLabel(address, signer) {
+    // Cascade the votes + reports too so we don't accumulate orphans.
+    db.exec('BEGIN');
+    try {
+        db.prepare('DELETE FROM address_label_votes WHERE label_address = ? AND label_signer = ?').run(address, signer);
+        db.prepare('DELETE FROM address_label_reports WHERE label_address = ? AND label_signer = ?').run(address, signer);
+        db.prepare('DELETE FROM address_labels WHERE address = ? AND signer = ?').run(address, signer);
+        db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
+// Owner veto / un-veto. Only meaningful for community labels (signer != address);
+// for a self-label the signer can just delete or update their own row.
+export function setLabelVeto(address, signer, vetoed) {
+    db.prepare(`
+        UPDATE address_labels SET vetoed_at = ?
+        WHERE address = ? AND signer = ?
+    `).run(vetoed ? Date.now() : null, address, signer);
+}
+
+// Vote on a label. Pass `vote = 0` to clear an existing vote.
+export function upsertLabelVote({ labelAddress, labelSigner, voter, vote }) {
+    if (!vote || vote === 0) {
+        db.prepare(`
+            DELETE FROM address_label_votes
+            WHERE label_address = ? AND label_signer = ? AND voter = ?
+        `).run(labelAddress, labelSigner, voter);
+        return;
+    }
+    const v = vote > 0 ? 1 : -1;
+    db.prepare(`
+        INSERT INTO address_label_votes (label_address, label_signer, voter, vote, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(label_address, label_signer, voter) DO UPDATE SET
+            vote = excluded.vote,
+            created_at = excluded.created_at
+    `).run(labelAddress, labelSigner, voter, v, Date.now());
+}
+
+// Insert a report. No-op if this reporter already reported this label.
+export function reportLabel({ labelAddress, labelSigner, reporter, reason }) {
+    db.prepare(`
+        INSERT OR IGNORE INTO address_label_reports
+            (label_address, label_signer, reporter, reason, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    `).run(labelAddress, labelSigner, reporter, (reason || '').slice(0, 200), Date.now());
+}
+
+// All labels for an address, with aggregated vote totals + report count.
+// `viewer` (optional) — when set, each row carries the viewer's own vote
+// (-1, 0, +1) so the frontend can render voting buttons in their current
+// state without a second query. The caller decides whether to filter out
+// hidden labels (over-reported / vetoed); this function returns them all.
+//
+// Sort order is the canonical display order:
+//   1. self-labels first (signer == address)
+//   2. then community labels by net score, descending
+//   3. tie-break by createdAt ascending (older suggestion wins)
+export function getLabelsForAddress(address, viewer = null) {
+    const rows = db.prepare(`
+        SELECT
+            l.address,
+            l.signer,
+            l.label,
+            l.created_at  AS createdAt,
+            l.updated_at  AS updatedAt,
+            l.vetoed_at   AS vetoedAt,
+            (l.signer = l.address) AS isSelf,
+            COALESCE((SELECT SUM(CASE WHEN v.vote > 0 THEN 1 ELSE 0 END)
+                      FROM address_label_votes v
+                      WHERE v.label_address = l.address AND v.label_signer = l.signer), 0) AS upvotes,
+            COALESCE((SELECT SUM(CASE WHEN v.vote < 0 THEN 1 ELSE 0 END)
+                      FROM address_label_votes v
+                      WHERE v.label_address = l.address AND v.label_signer = l.signer), 0) AS downvotes,
+            COALESCE((SELECT COUNT(*) FROM address_label_reports r
+                      WHERE r.label_address = l.address AND r.label_signer = l.signer), 0) AS reportCount,
+            (SELECT v.vote FROM address_label_votes v
+             WHERE v.label_address = l.address AND v.label_signer = l.signer AND v.voter = ?) AS viewerVote
+        FROM address_labels l
+        WHERE l.address = ?
+    `).all(viewer || '', address);
+    // Bring booleans into JS-land and compute net score / pickable flag.
+    return rows.map(r => {
+        const score = (Number(r.upvotes) || 0) - (Number(r.downvotes) || 0);
+        return {
+            address: r.address,
+            signer: r.signer,
+            label: r.label,
+            isSelf: !!r.isSelf,
+            score,
+            upvotes: Number(r.upvotes) || 0,
+            downvotes: Number(r.downvotes) || 0,
+            reportCount: Number(r.reportCount) || 0,
+            vetoed: r.vetoedAt != null,
+            viewerVote: r.viewerVote == null ? 0 : Number(r.viewerVote),
+            createdAt: r.createdAt,
+            updatedAt: r.updatedAt
+        };
+    }).sort((a, b) => {
+        if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1;
+        if (a.score !== b.score) return b.score - a.score;
+        return (a.createdAt || 0) - (b.createdAt || 0);
+    });
+}
+
+// Returns the SINGLE highest-priority visible label for an address, or null.
+// "Visible" = not vetoed by owner AND (is_self OR (score >= 0 AND reports
+// below threshold)).
+//
+// Used for backwards-compat with the v1 caller `getSelfLabel` (which we
+// keep as an alias below) and for the bulk-decorate path.
+export function getTopLabel(address, reportHideThreshold = 3) {
+    const rows = getLabelsForAddress(address, null);
+    for (const r of rows) {
+        if (r.vetoed) continue;
+        if (r.isSelf) return r;
+        if (r.score >= 0 && r.reportCount < reportHideThreshold) return r;
+    }
+    return null;
+}
+
+// Backwards-compat shim — v1 callers asked for the self-label specifically;
+// in v2 the top label may be a community one. Keep the old function name
+// returning the SAME shape v1 used so existing call sites don't break.
+export function getSelfLabel(address) {
+    const row = db.prepare(`
+        SELECT label, created_at AS createdAt, updated_at AS updatedAt, vetoed_at AS vetoedAt
+        FROM address_labels WHERE address = ? AND signer = ?
+        LIMIT 1
+    `).get(address, address);
+    if (!row || row.vetoedAt != null) return null;
+    return { label: row.label, createdAt: row.createdAt, updatedAt: row.updatedAt };
+}
+
+// Bulk decorate — used to fetch top labels for many addresses in one round
+// trip (top-holders list, transactions table, etc.). Returns a
+// Map<address, { label, signer, isSelf, score }>.
+export function getTopLabelsBulk(addresses, reportHideThreshold = 3) {
+    const result = new Map();
+    if (!Array.isArray(addresses) || !addresses.length) return result;
+    const unique = Array.from(new Set(addresses));
+    const CHUNK = 500;
+    for (let i = 0; i < unique.length; i += CHUNK) {
+        const slice = unique.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '?').join(',');
+        // Pull every visible row for the chunk in one query, then resolve
+        // top-per-address in JS — much cheaper than N round-trips.
+        const rows = db.prepare(`
+            SELECT
+                l.address, l.signer, l.label, l.created_at AS createdAt,
+                (l.signer = l.address) AS isSelf,
+                COALESCE((SELECT SUM(v.vote) FROM address_label_votes v
+                          WHERE v.label_address = l.address AND v.label_signer = l.signer), 0) AS score,
+                COALESCE((SELECT COUNT(*) FROM address_label_reports r
+                          WHERE r.label_address = l.address AND r.label_signer = l.signer), 0) AS reportCount
+            FROM address_labels l
+            WHERE l.address IN (${placeholders})
+              AND l.vetoed_at IS NULL
+        `).all(...slice);
+        // Group by address and pick the same priority rule as getTopLabel.
+        const byAddress = new Map();
+        for (const r of rows) {
+            const arr = byAddress.get(r.address) || [];
+            arr.push(r);
+            byAddress.set(r.address, arr);
+        }
+        for (const [addr, arr] of byAddress) {
+            arr.sort((a, b) => {
+                if (a.isSelf !== b.isSelf) return b.isSelf - a.isSelf;
+                if (a.score !== b.score) return b.score - a.score;
+                return (a.createdAt || 0) - (b.createdAt || 0);
+            });
+            const top = arr.find(r => r.isSelf || (Number(r.score) >= 0 && Number(r.reportCount) < reportHideThreshold));
+            if (top) result.set(addr, { label: top.label, signer: top.signer, isSelf: !!top.isSelf, score: Number(top.score) || 0 });
+        }
+    }
+    return result;
+}
+
+export function countAddressLabels() {
+    return db.prepare('SELECT COUNT(*) AS c FROM address_labels').get().c;
+}
+export function countLabelVotes() {
+    return db.prepare('SELECT COUNT(*) AS c FROM address_label_votes').get().c;
 }
 
 // --- one-time migration of legacy JSON caches ---

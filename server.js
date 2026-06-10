@@ -1528,6 +1528,295 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // --- DISCUSSION BOARD: threads + posts ---
+// --- PROXY + MULTISIG LOOKUPS ---
+// Read-only views of on-chain state. The actual wallet flows (add/remove
+// proxy, approve multisig) are signed client-side from the wallet
+// dashboard — these endpoints just deliver the current state so the UI
+// has something to render.
+
+// List proxies delegated TO the given account. Returns:
+//   { account, proxies: [{ delegate, proxyType, delay }], deposit }
+app.get('/api/proxies/:address', async (req, res) => {
+    if (!requireRpc(res)) return;
+    try {
+        const raw = (req.params.address || '').trim();
+        if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex address.' });
+        let address;
+        try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid Polkadex address.' }); }
+        if (!globalApi.query.proxy || !globalApi.query.proxy.proxies) {
+            return res.status(501).json({ error: 'Proxy pallet not present on this runtime.' });
+        }
+        // The proxy pallet stores (Vec<ProxyDefinition>, Balance) in
+        // `proxy.proxies(account)`. Each ProxyDefinition has { delegate,
+        // proxyType, delay }.
+        const result = await globalApi.query.proxy.proxies(address);
+        const [defsRaw, depositRaw] = result;
+        const proxies = (defsRaw || []).toArray ? defsRaw.toArray() : Array.from(defsRaw || []);
+        const mapped = proxies.map(p => ({
+            delegate: p.delegate ? p.delegate.toString() : null,
+            proxyType: p.proxyType ? p.proxyType.toString() : 'Any',
+            delay: p.delay ? p.delay.toNumber() : 0
+        }));
+        res.json({
+            account: address,
+            proxies: mapped,
+            deposit: depositRaw ? balanceToPDEX(depositRaw) : 0
+        });
+    } catch (err) {
+        console.error('API Error /api/proxies/:address:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// List the available ProxyType variants on this runtime. The frontend uses
+// this to populate the "Proxy type" dropdown when adding a new proxy.
+// Returns an array of strings: ['Any', 'NonTransfer', 'Governance', ...].
+app.get('/api/proxy-types', async (req, res) => {
+    if (!requireRpc(res)) return;
+    try {
+        let types = [];
+        try {
+            // The ProxyType enum's variants live in the chain metadata.
+            // Look up the type used by the proxy.addProxy extrinsic's
+            // second argument — that's authoritative for this runtime.
+            const meta = globalApi.tx.proxy && globalApi.tx.proxy.addProxy;
+            if (meta && meta.meta && meta.meta.args && meta.meta.args[1]) {
+                const argTypeId = meta.meta.args[1].type.toString();
+                const def = globalApi.registry.lookup.getTypeDef(argTypeId);
+                if (def && def.sub && Array.isArray(def.sub)) {
+                    types = def.sub.map(s => s.name).filter(Boolean);
+                }
+            }
+        } catch (_) { /* fall through to defaults */ }
+        if (!types.length) types = ['Any', 'NonTransfer', 'Governance', 'Staking', 'IdentityJudgement', 'CancelProxy'];
+        cacheLong(res); // changes only on runtime upgrade
+        res.json({ types });
+    } catch (err) {
+        console.error('API Error /api/proxy-types:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Pending multisig approvals for the given multisig address. Each entry is
+// an in-flight `asMulti`/`approveAsMulti` call awaiting more signatures.
+// Returns:
+//   { account, pending: [{ callHash, when:{height,index}, approvals[], deposit, depositor }] }
+app.get('/api/multisigs/:address', async (req, res) => {
+    if (!requireRpc(res)) return;
+    try {
+        const raw = (req.params.address || '').trim();
+        if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex address.' });
+        let address;
+        try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid Polkadex address.' }); }
+        if (!globalApi.query.multisig || !globalApi.query.multisig.multisigs) {
+            return res.status(501).json({ error: 'Multisig pallet not present on this runtime.' });
+        }
+        // multisig.multisigs is a double-map: (multisigAccount, callHash) ->
+        // Multisig. We iterate the prefix to enumerate every in-flight call
+        // for this multisig address.
+        const entries = await globalApi.query.multisig.multisigs.entries(address);
+        const pending = entries.map(([key, optMulti]) => {
+            const callHash = key.args && key.args[1] ? key.args[1].toHex() : null;
+            if (!optMulti || optMulti.isNone) return null;
+            const m = optMulti.unwrap();
+            const when = m.when ? { height: m.when.height.toNumber(), index: m.when.index.toNumber() } : null;
+            const approvals = m.approvals ? m.approvals.map(a => a.toString()) : [];
+            return {
+                callHash,
+                when,
+                approvals,
+                depositor: m.depositor ? m.depositor.toString() : null,
+                deposit: m.deposit ? balanceToPDEX(m.deposit) : 0
+            };
+        }).filter(Boolean);
+        res.json({ account: address, pending });
+    } catch (err) {
+        console.error('API Error /api/multisigs/:address:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- ADDRESS LABELS (v2: community-sourced + voting) ---
+// Anyone signed in via the wallet-signature auth flow can SUGGEST a label
+// for any address. Each label can be up/down voted by other signed-in users.
+// The address's owner can VETO a community label (hide it from display).
+// Reaching REPORT_HIDE_THRESHOLD reports also auto-hides the label until
+// an operator intervenes (out of band — no admin UI in this v2).
+const MAX_LABEL_LENGTH = 64;
+const MIN_LABEL_LENGTH = 1;
+const LABEL_POST_COOLDOWN_MS = 60 * 1000;   // 60 s between any two label writes per signer
+const REPORT_HIDE_THRESHOLD = 3;             // labels with this many reports auto-hide
+const lastLabelWriteAt = new Map();          // signer -> timestamp; spam guard
+
+// Public read — returns ALL visible labels for an address with vote
+// aggregates. When the caller is signed in, each row carries the caller's
+// own vote so the UI can render arrow states without an extra query.
+// Response shape:
+//   { address, labels: [{ label, signer, isSelf, score, upvotes, downvotes,
+//                          viewerVote, reportCount, vetoed, createdAt }],
+//     topLabel: <best visible label> | null }
+app.get('/api/labels/:address', (req, res) => {
+    try {
+        const raw = (req.params.address || '').trim();
+        if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex address.' });
+        let address;
+        try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid Polkadex address.' }); }
+        const viewer = getAuthAddress(req);                       // null if not signed in
+        const labels = db.getLabelsForAddress(address, viewer);
+        const top = db.getTopLabel(address, REPORT_HIDE_THRESHOLD);
+        // Endpoint must NOT be cached at the CDN when there's a viewer-
+        // specific viewerVote in the payload — Cloudflare would otherwise
+        // pin one user's vote state for everyone else.
+        if (!viewer) cacheMedium(res);
+        res.json({
+            address,
+            labels,
+            topLabel: top,
+            // v1-compat: surface the self-label's text + updatedAt directly
+            // so any clients still reading the v1 shape keep working.
+            label: top && top.isSelf ? top.label : null,
+            updatedAt: top && top.isSelf ? top.updatedAt : null
+        });
+    } catch (err) {
+        console.error('API Error /api/labels/:address:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Authenticated write. Any signed-in user can suggest a label for any
+// address (v1's self-only restriction is lifted). Self-labels (signer ==
+// address) are still treated specially in the read path: they outrank
+// every community label. A 60-second cooldown per signer dampens spam.
+app.post('/api/labels/:address', express.json({ limit: '4kb' }), (req, res) => {
+    try {
+        const signer = getAuthAddress(req);
+        if (!signer) return res.status(401).json({ error: 'Sign in with your wallet first.' });
+
+        const raw = (req.params.address || '').trim();
+        if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex address.' });
+        let address;
+        try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid Polkadex address.' }); }
+
+        // Spam guard — applies to suggestions on ANY address by the same
+        // signer. Cleared by the next legitimate post; not persisted to
+        // disk (memory-only per worker is fine — see also POST_COOLDOWN_MS
+        // for the discussion board).
+        const lastPost = lastLabelWriteAt.get(signer);
+        if (lastPost && Date.now() - lastPost < LABEL_POST_COOLDOWN_MS) {
+            const wait = Math.ceil((LABEL_POST_COOLDOWN_MS - (Date.now() - lastPost)) / 1000);
+            return res.status(429).json({ error: `Please wait ${wait}s before submitting another label.` });
+        }
+
+        const label = String(req.body && req.body.label || '').trim();
+        if (label.length < MIN_LABEL_LENGTH || label.length > MAX_LABEL_LENGTH) {
+            return res.status(400).json({ error: `Label must be ${MIN_LABEL_LENGTH}–${MAX_LABEL_LENGTH} characters.` });
+        }
+        // Reject ASCII control chars and angle brackets — both for log-injection
+        // hygiene and so the UI never has to escape user input it received as
+        // "trusted".
+        if (/[ -<>]/.test(label)) {
+            return res.status(400).json({ error: 'Label contains disallowed characters.' });
+        }
+
+        db.upsertAddressLabel({ address, signer, label });
+        lastLabelWriteAt.set(signer, Date.now());
+        // Mirror the post-condition the GET endpoint returns so the client
+        // can do an optimistic update without a re-fetch.
+        res.json({ address, label, signer, isSelf: signer === address, ok: true });
+    } catch (err) {
+        console.error('API Error POST /api/labels/:address:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Authenticated delete — removes the SIGNER's own row (whether it's a
+// self-label or a community suggestion they made). Cascades votes/reports.
+app.delete('/api/labels/:address', (req, res) => {
+    try {
+        const signer = getAuthAddress(req);
+        if (!signer) return res.status(401).json({ error: 'Sign in with your wallet first.' });
+        const raw = (req.params.address || '').trim();
+        if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex address.' });
+        let address;
+        try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid Polkadex address.' }); }
+        db.deleteAddressLabel(address, signer);
+        res.json({ ok: true });
+    } catch (err) {
+        console.error('API Error DELETE /api/labels/:address:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Vote on a label. Body: { vote: 1 | -1 | 0 }. 0 clears an existing vote.
+// Voting on one's own row is harmless but a no-op for display ranking
+// (self-labels skip the score check), so we don't reject it.
+app.post('/api/labels/:address/:signer/vote', express.json({ limit: '1kb' }), (req, res) => {
+    try {
+        const voter = getAuthAddress(req);
+        if (!voter) return res.status(401).json({ error: 'Sign in with your wallet first.' });
+        const labelAddress = normalizeAddress((req.params.address || '').trim());
+        const labelSigner  = normalizeAddress((req.params.signer  || '').trim());
+        const raw = req.body && req.body.vote;
+        const vote = (raw === 0 || raw === '0') ? 0 : (Number(raw) > 0 ? 1 : Number(raw) < 0 ? -1 : NaN);
+        if (Number.isNaN(vote)) return res.status(400).json({ error: 'vote must be -1, 0, or 1.' });
+        db.upsertLabelVote({ labelAddress, labelSigner, voter, vote });
+        // Return the refreshed label so the client can update the row in place.
+        const labels = db.getLabelsForAddress(labelAddress, voter);
+        const row = labels.find(l => l.signer === labelSigner) || null;
+        res.json({ ok: true, label: row });
+    } catch (err) {
+        console.error('API Error POST /api/labels/:address/:signer/vote:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Report a label. Body: { reason?: string }. Idempotent per (label, reporter)
+// — a second report by the same user is silently ignored. Once the row's
+// report count hits REPORT_HIDE_THRESHOLD, the label disappears from the
+// visible-labels query the rest of the explorer reads.
+app.post('/api/labels/:address/:signer/report', express.json({ limit: '1kb' }), (req, res) => {
+    try {
+        const reporter = getAuthAddress(req);
+        if (!reporter) return res.status(401).json({ error: 'Sign in with your wallet first.' });
+        const labelAddress = normalizeAddress((req.params.address || '').trim());
+        const labelSigner  = normalizeAddress((req.params.signer  || '').trim());
+        if (reporter === labelSigner) {
+            return res.status(400).json({ error: 'You can\'t report your own label.' });
+        }
+        const reason = String(req.body && req.body.reason || '').trim();
+        db.reportLabel({ labelAddress, labelSigner, reporter, reason });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error('API Error POST /api/labels/:address/:signer/report:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Veto / un-veto a community label. Only the address owner (signer ==
+// labelAddress) can hide labels on their own address. Vetoing a self-label
+// would be pointless (the signer can just delete it), so we 400.
+//   Body: { vetoed: boolean }
+app.post('/api/labels/:address/:signer/veto', express.json({ limit: '1kb' }), (req, res) => {
+    try {
+        const acting = getAuthAddress(req);
+        if (!acting) return res.status(401).json({ error: 'Sign in with your wallet first.' });
+        const labelAddress = normalizeAddress((req.params.address || '').trim());
+        const labelSigner  = normalizeAddress((req.params.signer  || '').trim());
+        if (acting !== labelAddress) {
+            return res.status(403).json({ error: 'Only the address owner can veto labels on their own address.' });
+        }
+        if (labelSigner === labelAddress) {
+            return res.status(400).json({ error: 'To remove your own self-label, use DELETE /api/labels/<address>.' });
+        }
+        const vetoed = !!(req.body && req.body.vetoed);
+        db.setLabelVeto(labelAddress, labelSigner, vetoed);
+        res.json({ ok: true, vetoed });
+    } catch (err) {
+        console.error('API Error POST /api/labels/:address/:signer/veto:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/discussions', (req, res) => {
     try {
         const kind = (req.query.kind === 'proposal' || req.query.kind === 'motion') ? req.query.kind : null;
