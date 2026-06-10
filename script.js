@@ -3259,7 +3259,17 @@ function renderStakingRewards(data) {
     resultsEl.innerHTML = `
         <div class="list-header">
             <h2>Reward history${identity ? ' — ' + stakingEscapeHtml(identity) : ''}</h2>
-            <a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color: var(--text-secondary); font-size: 0.78rem;">${stakingEscapeHtml(data.address)}</a>
+            <div style="display:flex;align-items:center;gap:14px;">
+                <a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color: var(--text-secondary); font-size: 0.78rem;">${stakingEscapeHtml(data.address)}</a>
+                <!-- Close button — returns the user to wherever they
+                     navigated in from. Same X-icon pattern as the block /
+                     tx / validator detail pages so the affordance is
+                     familiar. The click handler below prefers history.back
+                     (so users from /wallet/:addr and from /account/:addr
+                     both go back to the right place) and falls back to
+                     /account/:addr for the fresh-tab case. -->
+                <a href="#" id="staking-rewards-close" title="Close" aria-label="Close" style="color: var(--text-secondary); text-decoration: none; cursor: pointer; line-height: 1; display: inline-flex; align-items: center;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+            </div>
         </div>
         <div class="staking-summary-grid">
             <div class="staking-summary-card"><div class="label">Claimed Rewards</div><div class="value accent">${stakingFormatPDEX(summary.claimedTotal)} PDEX</div></div>
@@ -3347,6 +3357,28 @@ function renderStakingRewards(data) {
     if (jsonBtn) jsonBtn.addEventListener('click', downloadStakingRewardsJSON);
     const taxBtn = document.getElementById('staking-dl-tax');
     if (taxBtn) taxBtn.addEventListener('click', downloadStakingRewardsTaxCSV);
+    // Close button — returns the user to wherever they navigated in from.
+    // We prefer history.back() so a user coming from /wallet/:addr (My Account)
+    // lands on My Account, and one coming from /account/:addr lands on the
+    // generic account view. If there's no in-SPA back stack (e.g. a fresh
+    // tab opened directly on this URL), we fall back to /account/:addr so
+    // the X button is never a dead-end click.
+    const closeBtn = document.getElementById('staking-rewards-close');
+    if (closeBtn) closeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        // history.length is 1 on a fresh tab, ≥2 once any in-app navigation
+        // has happened. We also check the referrer for a same-origin source
+        // — some browsers under-count length when the user clicked through
+        // multiple SPA routes that didn't push new history entries.
+        const sameOriginReferrer = document.referrer && document.referrer.startsWith(location.origin);
+        if (history.length > 1 || sameOriginReferrer) {
+            history.back();
+        } else if (data && data.address) {
+            navigateTo('account/' + data.address);
+        } else {
+            navigateTo('wallet');
+        }
+    });
     // The old client-side pagination "Show more" button is no longer needed —
     // makeTable shows all rows by default and the user can drill in via the
     // filter bar instead.
@@ -3779,19 +3811,44 @@ function selectWallet(address) {
     refreshConnectWalletButton();
     navigateTo('wallet/' + pdex);
 }
+// One-shot session flag that suppresses the auto-pick in tryAutoSelectFirstWallet
+// for the next /wallet visit. Set by disconnectWallet so an explicit "Switch
+// wallet" / "Disconnect" click can't be immediately undone by the auto-pick
+// re-selecting the same last-used address. Lives in sessionStorage so it
+// doesn't outlive the browser tab.
+const SKIP_AUTO_PICK_KEY = 'pdex_skip_wallet_auto_pick';
+
 function disconnectWallet() {
     setStoredWallet('');
     refreshConnectWalletButton();
+    // Tell the next initWalletPage() to skip auto-pick — without this, the
+    // "Switch wallet" button silently routes back to the same address
+    // because tryAutoSelectFirstWallet finds the still-remembered last-used
+    // address in the extension's account list and re-selects it.
+    try { sessionStorage.setItem(SKIP_AUTO_PICK_KEY, '1'); } catch (e) {}
     // If the user is currently on a wallet page, return them to the connect panel.
     const current = readRouteFromLocation();
     if (current.startsWith('wallet')) {
         if (current === 'wallet') {
             const root = document.getElementById('wallet-dashboard');
+            // Reset SEO + meta in case we were on a personal wallet page.
+            updateSeoMeta('wallet', { canonicalPath: '/wallet', noindex: false });
             if (root) renderWalletConnectPanel(root);
         } else {
             navigateTo('wallet');
         }
     }
+}
+
+// Read-and-clear helper for the one-shot flag. Called by both initWalletPage
+// branches (immediate render and async auto-pick) so the flag is always
+// consumed exactly once even if the page is re-entered quickly.
+function consumeSkipAutoPickFlag() {
+    try {
+        const v = sessionStorage.getItem(SKIP_AUTO_PICK_KEY);
+        if (v) sessionStorage.removeItem(SKIP_AUTO_PICK_KEY);
+        return !!v;
+    } catch (e) { return false; }
 }
 
 function initWalletPage(address) {
@@ -3873,6 +3930,11 @@ function initWalletPage(address) {
 // whatever the user picked manually or navigated to while we were waiting.
 async function tryAutoSelectFirstWallet() {
     try {
+        // Honour an explicit disconnect/switch — the user just told us they
+        // want to pick a different account, so re-selecting the previously-
+        // used one would be hostile. The flag is one-shot: consuming it
+        // clears it, so the next /wallet visit is back to normal.
+        if (consumeSkipAutoPickFlag()) return;
         // Bail early if the user clicked an account between us starting and
         // getting here — for example, while the extension's permission
         // prompt was open.
