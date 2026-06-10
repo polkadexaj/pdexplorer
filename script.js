@@ -3211,6 +3211,195 @@ function getFilteredRewards(data, filter) {
     return list;
 }
 
+// ─── Wallet-dashboard APR card with period selector ─────────────────────────
+// Mirrors the server's computeRealizedApr formula so we can recompute APR
+// client-side for any user-chosen window without a new round trip. The
+// server provides apr30d/apr90d/aprAll precomputed; we use those directly
+// when the window matches and compute fresh for the other periods (7/180/365).
+const WALLET_APR_PERIODS = [
+    { days: 7,   label: '7d'  },
+    { days: 30,  label: '30d' },
+    { days: 90,  label: '90d' },
+    { days: 180, label: '6m'  },
+    { days: 365, label: '1y'  },
+    { days: 0,   label: 'All-time' } // 0 = unbounded
+];
+
+function computeWalletApr(claimed, bondedAmount, nowTs, windowDays) {
+    if (!bondedAmount || bondedAmount <= 0) return null;
+    if (!Array.isArray(claimed) || !claimed.length) return null;
+    const cutoff = windowDays ? (nowTs - windowDays * 86400000) : 0;
+    const inWindow = claimed.filter(r => r && r.timestamp && r.timestamp >= cutoff);
+    if (!inWindow.length) return null;
+    const totalRewards = inWindow.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const oldest = Math.min(...inWindow.map(r => Number(r.timestamp) || nowTs));
+    const spanMs = Math.max(86400000, nowTs - oldest); // floor at 1 day
+    const spanDays = spanMs / 86400000;
+    return {
+        apr: ((totalRewards / spanDays) * 365 / bondedAmount) * 100,
+        rewards: totalRewards,
+        spanDays,
+        rewardCount: inWindow.length
+    };
+}
+
+function renderWalletAprCard() {
+    const periodsHost = document.getElementById('wallet-apr-periods');
+    const body = document.getElementById('wallet-apr-body');
+    if (!periodsHost || !body) return;
+
+    // Always paint the pill row first so the user sees the affordance even
+    // when data is still loading or the rewards endpoint failed.
+    periodsHost.innerHTML = WALLET_APR_PERIODS.map(p =>
+        `<button type="button" class="reward-filter-btn${walletAprDays === p.days ? ' active' : ''}" data-apr-days="${p.days}">${p.label}</button>`
+    ).join('');
+    periodsHost.querySelectorAll('[data-apr-days]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const d = parseInt(btn.getAttribute('data-apr-days'), 10);
+            if (Number.isFinite(d) && d >= 0) {
+                walletAprDays = d;
+                renderWalletAprCard();
+            }
+        });
+    });
+
+    // No payload yet (fetch failed / RPC down).
+    if (!walletAprData) {
+        body.innerHTML = `
+            <div style="text-align:center;color:var(--text-muted);font-size:0.88rem;padding:24px 0;">
+                <i class='bx bx-loader-alt bx-spin' style="font-size:24px;color:var(--brand-primary);"></i>
+                <div style="margin-top:8px;">Couldn't load reward history. Refresh the page to retry.</div>
+            </div>`;
+        return;
+    }
+
+    const apr = walletAprData.apr || {};
+    const bondedAmount = Number(apr.bondedAmount) || 0;
+    const claimed = Array.isArray(walletAprData.claimed) ? walletAprData.claimed : [];
+
+    // No bonded stake — APR is undefined regardless of the period chosen.
+    if (!bondedAmount) {
+        body.innerHTML = `
+            <div style="text-align:center;color:var(--text-muted);font-size:0.9rem;padding:24px 0;">
+                <i class='bx bx-info-circle' style="font-size:28px;color:var(--text-muted);"></i>
+                <div style="margin-top:10px;">No bonded stake on this account.</div>
+                <div style="margin-top:4px;font-size:0.78rem;">Stake some PDEX to start earning rewards and measure APR.</div>
+            </div>`;
+        return;
+    }
+
+    // For windows the server already precomputed (30/90/all), prefer the
+    // server's value so users see a single canonical number across the
+    // /wallet and /staking-rewards pages. For 7/180/365 we compute client-
+    // side using the same formula.
+    let aprPct, rewards = null, spanDays = null, rewardCount = 0;
+    const nowTs = Date.now();
+    if (walletAprDays === 30 && apr.apr30d != null) {
+        aprPct = apr.apr30d;
+        const computed = computeWalletApr(claimed, bondedAmount, nowTs, 30);
+        if (computed) { rewards = computed.rewards; spanDays = computed.spanDays; rewardCount = computed.rewardCount; }
+    } else if (walletAprDays === 90 && apr.apr90d != null) {
+        aprPct = apr.apr90d;
+        const computed = computeWalletApr(claimed, bondedAmount, nowTs, 90);
+        if (computed) { rewards = computed.rewards; spanDays = computed.spanDays; rewardCount = computed.rewardCount; }
+    } else if (walletAprDays === 0 && apr.aprAll != null) {
+        aprPct = apr.aprAll;
+        const computed = computeWalletApr(claimed, bondedAmount, nowTs, 0);
+        if (computed) { rewards = computed.rewards; spanDays = computed.spanDays; rewardCount = computed.rewardCount; }
+    } else {
+        const computed = computeWalletApr(claimed, bondedAmount, nowTs, walletAprDays);
+        if (computed) {
+            aprPct = computed.apr;
+            rewards = computed.rewards;
+            spanDays = computed.spanDays;
+            rewardCount = computed.rewardCount;
+        }
+    }
+
+    const periodLabel = (WALLET_APR_PERIODS.find(p => p.days === walletAprDays) || {}).label || `${walletAprDays}d`;
+
+    // No rewards in window → tell the user explicitly which window we
+    // looked at, so they know to pick a longer one.
+    if (aprPct == null || !Number.isFinite(aprPct)) {
+        body.innerHTML = `
+            <div style="text-align:center;color:var(--text-muted);font-size:0.9rem;padding:24px 0;">
+                <i class='bx bx-info-circle' style="font-size:28px;color:var(--text-muted);"></i>
+                <div style="margin-top:10px;">No claimed rewards in the last ${stakingEscapeHtml(periodLabel)} window.</div>
+                <div style="margin-top:4px;font-size:0.78rem;">Pick a longer period above, or pay out unclaimed rewards from the action bar.</div>
+            </div>`;
+        return;
+    }
+
+    const spanSentence = spanDays != null
+        ? `over ${Math.round(spanDays)} day${Math.round(spanDays) === 1 ? '' : 's'} of activity`
+        : '';
+    const rewardSentence = rewards != null
+        ? `${stakingFormatPDEX(rewards)} PDEX rewarded (${stakingFormatNumber(rewardCount)} payout${rewardCount === 1 ? '' : 's'})`
+        : '';
+    const bondedSentence = `${stakingFormatPDEX(bondedAmount)} PDEX bonded`;
+
+    body.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+            <div style="font-size:0.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;">${stakingEscapeHtml(periodLabel)} average</div>
+            <div style="font-size:2.8rem;font-weight:700;color:var(--brand-primary);line-height:1;">${aprPct.toFixed(2)}<span style="font-size:1.4rem;color:var(--text-secondary);">%</span></div>
+            <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:6px;text-align:center;">
+                ${spanSentence ? stakingEscapeHtml(spanSentence) + ' · ' : ''}${stakingEscapeHtml(rewardSentence)}<br>
+                <span style="color:var(--text-muted);font-size:0.78rem;">${stakingEscapeHtml(bondedSentence)}</span>
+            </div>
+        </div>`;
+}
+
+// Render the APR summary card for the staking-rewards page. Headline is the
+// 30-day realized APR (most-common reference window); the subtitle adds the
+// 90-day and all-time numbers alongside the current bonded amount so users
+// can sanity-check that the % is being computed against the stake they
+// expect. Distinct empty states for each failure mode (no RPC, no stake,
+// no recent rewards) so a dash never appears without an explanation.
+function renderStakingAprCard(apr) {
+    // RPC-unreachable case — apr.bondedAmount is null because we couldn't
+    // query staking.bonded. Showing the card with "—" plus a hint that the
+    // bonded read failed is better than hiding it (the user might wonder
+    // why APR is missing).
+    if (!apr || apr.bondedAmount == null) {
+        return `<div class="staking-summary-card">
+            <div class="label">APR (30-day)</div>
+            <div class="value" style="color:var(--text-muted);">—</div>
+            <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">bonded stake unavailable</div>
+        </div>`;
+    }
+    // User has no bonded stake — the denominator is zero, so APR is
+    // mathematically undefined. Tell them that explicitly.
+    if (!apr.bondedAmount || Number(apr.bondedAmount) <= 0) {
+        return `<div class="staking-summary-card">
+            <div class="label">APR (30-day)</div>
+            <div class="value" style="color:var(--text-muted);">—</div>
+            <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">no bonded stake to measure</div>
+        </div>`;
+    }
+    const fmtPct = v => (v == null || !Number.isFinite(v)) ? '—' : v.toFixed(2) + '%';
+    const headline = fmtPct(apr.apr30d);
+    // Subtitle layout: "90d 4.45% · all 4.32% · 5,000 PDEX bonded"
+    // Each component omitted when null/zero so the line stays clean for
+    // accounts with sparse history.
+    const subParts = [];
+    if (apr.apr90d != null && Number.isFinite(apr.apr90d)) subParts.push('90d ' + fmtPct(apr.apr90d));
+    if (apr.aprAll != null && Number.isFinite(apr.aprAll)) subParts.push('all ' + fmtPct(apr.aprAll));
+    subParts.push(stakingFormatPDEX(apr.bondedAmount) + ' PDEX bonded');
+    // If 30d is unavailable but longer windows exist, surface the longest
+    // available number in the headline so the card isn't a useless dash.
+    let headlineNote = '';
+    let displayedHeadline = headline;
+    if (apr.apr30d == null) {
+        if (apr.apr90d != null) { displayedHeadline = fmtPct(apr.apr90d); headlineNote = ' (90d)'; }
+        else if (apr.aprAll != null) { displayedHeadline = fmtPct(apr.aprAll); headlineNote = ' (all)'; }
+    }
+    return `<div class="staking-summary-card">
+        <div class="label">APR${headlineNote || ' (30-day)'}</div>
+        <div class="value accent">${displayedHeadline}</div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px;">${stakingEscapeHtml(subParts.join(' · '))}</div>
+    </div>`;
+}
+
 function renderStakingRewards(data) {
     const resultsEl = document.getElementById('staking-rewards-results');
     if (!resultsEl) return;
@@ -3277,6 +3466,7 @@ function renderStakingRewards(data) {
             <div class="staking-summary-card"><div class="label">Total Rewards</div><div class="value">${stakingFormatPDEX(summary.totalAmount)} PDEX</div></div>
             <div class="staking-summary-card"><div class="label">Claimed Payouts</div><div class="value">${stakingFormatNumber(summary.claimedCount)}</div></div>
             <div class="staking-summary-card"><div class="label">Eras</div><div class="value">${stakingFormatNumber(summary.eraCount)}</div></div>
+            ${renderStakingAprCard(data.apr)}
         </div>
         <div class="staking-chart-wrap"><canvas id="staking-rewards-chart"></canvas></div>
         ${computingNote}
@@ -4180,26 +4370,46 @@ async function fetchWalletDashboard(address) {
     if (!root) return;
     const stopLoading = renderWalletLoading(root, address);
     try {
-        const [walletRes, priceRes] = await Promise.all([
+        // Fan out three reads in parallel. The wallet endpoint covers
+        // balance + nominations + recent rows; the price feed paints the
+        // chart; staking-rewards carries the full claimed array AND the
+        // freshly-computed bonded amount that drive the APR period
+        // selector card. The third fetch is wrapped in catch() so a stale
+        // / unreachable rewards endpoint doesn't break the dashboard —
+        // the APR card just shows an unavailable state in that case.
+        const [walletRes, priceRes, rewardsRes] = await Promise.all([
             fetch('/api/wallet/' + encodeURIComponent(address)),
-            fetch('/api/price-history?days=30').catch(() => null)
+            fetch('/api/price-history?days=30').catch(() => null),
+            fetch('/api/staking-rewards/' + encodeURIComponent(address)).catch(() => null)
         ]);
         const data = await walletRes.json();
         if (!walletRes.ok || data.error) throw new Error(data.error || ('Request failed (' + walletRes.status + ')'));
         let price = { history: [], configured: false };
         if (priceRes) { try { price = await priceRes.json(); } catch (e) { } }
+        let rewards = null;
+        if (rewardsRes) { try { rewards = await rewardsRes.json(); } catch (e) { } }
         stopLoading();
-        renderWalletDashboard(data, price);
+        renderWalletDashboard(data, price, rewards);
     } catch (e) {
         stopLoading();
         root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
     }
 }
 
-function renderWalletDashboard(data, price) {
+// State for the wallet-dashboard APR period selector.
+//   walletAprData     — full staking-rewards payload (claimed array + apr.*)
+//   walletAprDays     — currently selected period in days (0 = all-time)
+let walletAprData = null;
+let walletAprDays = 30;
+
+function renderWalletDashboard(data, price, rewardsPayload) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
     currentWalletData = data;
+    // Stash the staking-rewards payload so the APR card's period pills
+    // can recompute against the cached claimed array without re-fetching
+    // every time the user clicks a different period.
+    walletAprData = rewardsPayload || null;
     const isOwnWallet = isSameAddress(getStoredWallet(), data.address);
     const identity = data.identity && data.identity !== 'Unknown' ? data.identity : null;
     const staking = data.staking || {};
@@ -4304,6 +4514,18 @@ function renderWalletDashboard(data, price) {
             </div>
         </div>
 
+        <!-- Average APR over a user-selected window. Card sits on its own
+             row so the period pills + result get the visual weight they
+             deserve as a primary metric on the My Account page. Populated
+             by renderWalletAprCard() after the dashboard innerHTML lands. -->
+        <div class="list-container glass" id="wallet-apr-card">
+            <div class="list-header">
+                <h2><i class='bx bx-line-chart' style="vertical-align:middle;color:var(--brand-secondary);"></i> Average APR</h2>
+                <div class="reward-filter" id="wallet-apr-periods"></div>
+            </div>
+            <div id="wallet-apr-body" style="padding:24px;"></div>
+        </div>
+
         <div class="list-container glass">
             <div class="list-header"><h2>Recent Transactions</h2><a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">View account</a></div>
             <div id="wallet-recent-tx-table"></div>
@@ -4389,6 +4611,12 @@ function renderWalletDashboard(data, price) {
     // state, and the multisig calculator works without an active session.
     // Add/Remove proxy buttons are gated on isOwnWallet inside the renderer.
     renderWalletAdvancedSection(data.address || data.account, isOwnWallet);
+    // Average APR card — runs after the rest of the dashboard so the
+    // ranked widget order on slow connections is: balance/staking →
+    // validators/recent → APR. The renderer reads `walletAprData`
+    // populated by fetchWalletDashboard and tolerates a null payload
+    // (renders an unavailable state).
+    renderWalletAprCard();
 }
 
 // Wire up the four wallet action buttons. Idempotent — re-binding after a

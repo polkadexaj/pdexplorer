@@ -850,6 +850,35 @@ function getCommissionTriggers(history) {
     return triggers;
 }
 
+// Realized APR over a sliding time window.
+//
+// Formula:
+//   APR_window = (annualised_rewards / bondedAmount) × 100%
+//   annualised_rewards = (window_rewards / window_span_days) × 365
+//
+// Notes:
+//   • `windowDays` = null → use the user's entire claimed history.
+//   • We use the ACTUAL time span of rewards inside the window, not the
+//     window cap itself, so an account with only 5 days of claim history
+//     doesn't get a misleadingly small 30-day APR. The min-span floor of
+//     1 day keeps a single same-day reward from blowing up the annualised
+//     number to infinity.
+//   • Returns null when there's no data to compute against (no rewards in
+//     window, or zero bonded amount).
+function computeRealizedApr(claimed, bondedAmount, nowTs, windowDays) {
+    if (!bondedAmount || bondedAmount <= 0) return null;
+    if (!Array.isArray(claimed) || !claimed.length) return null;
+    const cutoff = windowDays ? (nowTs - windowDays * 86400000) : 0;
+    const inWindow = claimed.filter(r => r.timestamp && r.timestamp >= cutoff);
+    if (!inWindow.length) return null;
+    const totalRewards = inWindow.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const oldest = Math.min(...inWindow.map(r => Number(r.timestamp) || nowTs));
+    const spanMs = Math.max(86400000, nowTs - oldest); // floor at 1 day
+    const spanDays = spanMs / 86400000;
+    const annualised = (totalRewards / spanDays) * 365;
+    return (annualised / bondedAmount) * 100;
+}
+
 async function loadValidatorHistory(address) {
     if (!globalApi || !globalApi.query.staking.erasValidatorPrefs) return { history: [], triggers: [] };
 
@@ -1343,6 +1372,27 @@ app.get('/api/staking-rewards/:address', async (req, res) => {
         let identity = 'Unknown';
         try { identity = await getIdentity(globalApi, address); } catch (e) { }
 
+        // Current bonded (active) stake — the denominator for the realized
+        // APR calculation. Resolved by the standard two-hop pattern: the
+        // address's stash holds the controller via staking.bonded, and the
+        // controller holds the ledger via staking.ledger. Wrapped in
+        // try/catch so RPC unavailability doesn't break the endpoint —
+        // we still return the reward history, just with apr.bondedAmount
+        // null and the realized rates null.
+        let bondedAmount = null;
+        try {
+            if (globalApi && globalApi.query && globalApi.query.staking && globalApi.query.staking.bonded) {
+                const bondedOpt = await globalApi.query.staking.bonded(address);
+                if (bondedOpt && bondedOpt.isSome) {
+                    const controller = bondedOpt.unwrap().toString();
+                    const ledgerOpt = await globalApi.query.staking.ledger(controller);
+                    if (ledgerOpt && ledgerOpt.isSome) {
+                        bondedAmount = balanceToPDEX(ledgerOpt.unwrap().active);
+                    }
+                }
+            }
+        } catch (_e) { /* keep bondedAmount null */ }
+
         const claimedTotal = claimed.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
         const unclaimedTotal = unclaimed.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
         const eraSet = new Set([...claimed, ...unclaimed].filter(r => r.era != null).map(r => r.era));
@@ -1350,11 +1400,27 @@ app.get('/api/staking-rewards/:address', async (req, res) => {
         const oldest = claimed.length ? claimed[claimed.length - 1] : null;
         const syncState = db.getSyncState('staking_rewards');
 
+        // Realized APR — three sliding windows. Uses CLAIMED rewards only
+        // (unclaimed entitlements aren't realised income yet) and the
+        // current bonded amount as the stake denominator. The stake-at-
+        // each-era approach would be more accurate but requires per-era
+        // bond snapshots we don't index; current bonded is a reasonable
+        // proxy for accounts whose stake hasn't changed dramatically.
+        // See computeRealizedApr for the formula and edge-case handling.
+        const nowTs = Date.now();
+        const apr = bondedAmount && bondedAmount > 0 ? {
+            bondedAmount,
+            apr30d: computeRealizedApr(claimed, bondedAmount, nowTs, 30),
+            apr90d: computeRealizedApr(claimed, bondedAmount, nowTs, 90),
+            aprAll: computeRealizedApr(claimed, bondedAmount, nowTs, null)
+        } : { bondedAmount, apr30d: null, apr90d: null, aprAll: null };
+
         res.json({
             address,
             identity,
             claimed,
             unclaimed,
+            apr,
             summary: {
                 claimedTotal,
                 claimedCount: claimed.length,
