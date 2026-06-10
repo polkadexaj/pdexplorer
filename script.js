@@ -1852,6 +1852,45 @@ async function parseJsonResponse(response) {
     throw new Error(`${response.status} ${response.statusText || hint} (${hint})${bodyPreview ? ' — ' + bodyPreview : ''}`);
 }
 
+// Shared "close detail view" helper used by every X-icon close button on the
+// account / block / transaction / validator / staking-rewards detail pages.
+// Behaviour:
+//   1. If there's an in-SPA back stack (history.length > 1, OR a same-origin
+//      referrer to handle browsers that under-count length across SPA pushes),
+//      run history.back() — sends the user to whichever route they navigated
+//      in from, regardless of whether that was the index, a list page, or a
+//      sibling detail page. This is what most users actually want.
+//   2. Otherwise (fresh tab opened directly on the detail URL, or shared
+//      link with no back stack), navigate to the page-specific parent route
+//      the caller passes as `fallbackPath`. That's '/validators' for the
+//      validator page, '/blocks' for block detail, etc. — never a dead-end
+//      click.
+// Pass `fallbackPath` without a leading slash (e.g. 'validators', not
+// '/validators') because the SPA's navigateTo strips the leading slash itself.
+function closeDetailView(fallbackPath) {
+    const sameOriginReferrer = document.referrer && document.referrer.startsWith(location.origin);
+    if (history.length > 1 || sameOriginReferrer) {
+        history.back();
+    } else {
+        navigateTo(fallbackPath || 'home');
+    }
+}
+
+// Global click delegate that picks up every X-icon close button on the
+// detail pages. The detail-page templates emit
+//   <a href="#" data-close-detail="<fallback-route>">…X icon…</a>
+// — we catch the click here once at the document level, prevent the
+// default # navigation, and hand off to closeDetailView(). Centralising
+// this means new detail pages only need to add the data attribute on
+// their close button; no per-page wiring required.
+document.addEventListener('click', (e) => {
+    const trigger = e.target && e.target.closest ? e.target.closest('[data-close-detail]') : null;
+    if (!trigger) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeDetailView(trigger.getAttribute('data-close-detail'));
+});
+
 // Centralised /api error rendering — recognises the RPC_NOT_READY transient
 // state (HTTP 503 emitted by server.js `requireRpc()`) and shows a friendly
 // "still connecting" panel with a Retry button instead of dumping the raw
@@ -2458,7 +2497,7 @@ async function fetchAccountDetails(address) {
         let html = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                 <h2 style="font-size: 18px;">Account Details</h2>
-                <a href="javascript:history.back()" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+                <a href="#" data-close-detail="holders" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;" title="Close" aria-label="Close"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             <div style="background: rgba(255,255,255,0.02); margin-bottom: 20px; border-radius: 4px; border: 1px solid var(--border-color);">
                 <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;">
@@ -2629,7 +2668,7 @@ async function fetchBlockDetails(id) {
         let html = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <h2>Block ${data.block.header.number}</h2>
-                <a href="javascript:history.back()" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+                <a href="#" data-close-detail="blocks" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;" title="Close" aria-label="Close"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             <div style="padding: 20px;">
                 <div style="margin-bottom: 10px;"><strong>hash</strong> <span class="address-cell">${data.hash}</span></div>
@@ -2664,7 +2703,7 @@ async function fetchTxDetails(block, hash) {
         let html = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <h2>Tx: ${data.hash}</h2>
-                <a href="javascript:history.back()" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+                <a href="#" data-close-detail="transactions" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;" title="Close" aria-label="Close"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             <div style="padding: 20px;">
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px; text-align: left;">
@@ -2873,7 +2912,7 @@ async function fetchValidatorDetails(address) {
         container.innerHTML = `
             <div class="list-header" style="border-bottom: 1px solid var(--border-color); padding: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <h2 style="font-size: 18px;">Validator history - ${identityStr} ${watchlistStarButton('validator', data.address, (data.identity && data.identity !== 'Unknown') ? data.identity : data.address)}</h2>
-                <a href="/validators" style="color: var(--text-secondary); text-decoration: none;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+                <a href="#" data-close-detail="validators" style="color: var(--text-secondary); text-decoration: none; cursor: pointer;" title="Close" aria-label="Close"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
             
             <div style="padding: 20px;">
@@ -3457,7 +3496,7 @@ function renderStakingRewards(data) {
                      (so users from /wallet/:addr and from /account/:addr
                      both go back to the right place) and falls back to
                      /account/:addr for the fresh-tab case. -->
-                <a href="#" id="staking-rewards-close" title="Close" aria-label="Close" style="color: var(--text-secondary); text-decoration: none; cursor: pointer; line-height: 1; display: inline-flex; align-items: center;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
+                <a href="#" data-close-detail="account/${encodeURIComponent(data.address)}" title="Close" aria-label="Close" style="color: var(--text-secondary); text-decoration: none; cursor: pointer; line-height: 1; display: inline-flex; align-items: center;"><i class='bx bx-x' style="font-size: 24px;"></i></a>
             </div>
         </div>
         <div class="staking-summary-grid">
@@ -3547,28 +3586,9 @@ function renderStakingRewards(data) {
     if (jsonBtn) jsonBtn.addEventListener('click', downloadStakingRewardsJSON);
     const taxBtn = document.getElementById('staking-dl-tax');
     if (taxBtn) taxBtn.addEventListener('click', downloadStakingRewardsTaxCSV);
-    // Close button — returns the user to wherever they navigated in from.
-    // We prefer history.back() so a user coming from /wallet/:addr (My Account)
-    // lands on My Account, and one coming from /account/:addr lands on the
-    // generic account view. If there's no in-SPA back stack (e.g. a fresh
-    // tab opened directly on this URL), we fall back to /account/:addr so
-    // the X button is never a dead-end click.
-    const closeBtn = document.getElementById('staking-rewards-close');
-    if (closeBtn) closeBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        // history.length is 1 on a fresh tab, ≥2 once any in-app navigation
-        // has happened. We also check the referrer for a same-origin source
-        // — some browsers under-count length when the user clicked through
-        // multiple SPA routes that didn't push new history entries.
-        const sameOriginReferrer = document.referrer && document.referrer.startsWith(location.origin);
-        if (history.length > 1 || sameOriginReferrer) {
-            history.back();
-        } else if (data && data.address) {
-            navigateTo('account/' + data.address);
-        } else {
-            navigateTo('wallet');
-        }
-    });
+    // (The X-icon close button uses data-close-detail — wired by the
+    // global delegate in wireCloseDetailButtons, so no per-page handler
+    // is needed here.)
     // The old client-side pagination "Show more" button is no longer needed —
     // makeTable shows all rows by default and the user can drill in via the
     // filter bar instead.
