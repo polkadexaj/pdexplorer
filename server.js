@@ -1989,7 +1989,7 @@ app.post('/api/labels/:address', express.json({ limit: '4kb' }), (req, res) => {
         // Reject ASCII control chars and angle brackets — both for log-injection
         // hygiene and so the UI never has to escape user input it received as
         // "trusted".
-        if (/[ -<>]/.test(label)) {
+        if (/[\x00-\x1f<>]/.test(label)) {
             return res.status(400).json({ error: 'Label contains disallowed characters.' });
         }
 

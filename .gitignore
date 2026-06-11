@@ -8,3 +8,5 @@ data/
 *.db-wal
 .env
 .DS_Store
+CLAUDE.md
+polkadex-explorer-user-guide.pdf
