@@ -969,7 +969,42 @@ const SITEMAP_STATIC_ROUTES = [
     // Static legal pages — low changefreq but want them indexed so users
     // searching for "Polkadex explorer privacy" land on the right page.
     { path: '/privacy',           changefreq: 'yearly',  priority: '0.4' },
-    { path: '/cookies',           changefreq: 'yearly',  priority: '0.4' }
+    { path: '/cookies',           changefreq: 'yearly',  priority: '0.4' },
+    // Help center — landing page + every article. Each article is an
+    // indexable TechArticle so users searching for specific concepts
+    // ("how to stake on Polkadex", "PDEX referendum voting", "Polkadex tax CSV")
+    // land directly on the relevant help topic instead of the generic landing.
+    { path: '/help',                          changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/quick-start',              changefreq: 'monthly', priority: '0.7' },
+    { path: '/help/installing-a-wallet',      changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/connecting-wallet',        changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/home-dashboard',           changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/blocks',                   changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/transactions',             changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/events',                   changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/validators',               changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/holders',                  changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/accounts',                 changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/search',                   changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/sending-pdex',             changefreq: 'monthly', priority: '0.7' },
+    { path: '/help/switching-wallets',        changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/proxies-and-multisig',     changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/how-staking-works',        changefreq: 'monthly', priority: '0.7' },
+    { path: '/help/nominating',               changefreq: 'monthly', priority: '0.7' },
+    { path: '/help/claiming-rewards',         changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/unstaking',                changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/staking-rewards-page',     changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/governance-overview',      changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/democracy-and-voting',     changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/council-and-motions',      changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/treasury',                 changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/discussions',              changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/analytics',                changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/watchlist',                changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/community-labels',         changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/privacy',                  changefreq: 'monthly', priority: '0.4' },
+    { path: '/help/troubleshooting',          changefreq: 'monthly', priority: '0.6' },
+    { path: '/help/glossary',                 changefreq: 'monthly', priority: '0.5' }
     // Note: /watchlist intentionally omitted (noindex — personal page).
 ];
 const SITEMAP_TOP_VALIDATORS = readPositiveInteger(process.env.SITEMAP_TOP_VALIDATORS, 100);

@@ -2073,7 +2073,12 @@ const ROUTE_SEO = {
     'privacy':            { title: 'Privacy Policy — Polkadex Explorer',
                             description: 'How the Polkadex Explorer handles your data: no tracking cookies, no third-party analytics, GDPR-compliant data subject rights.' },
     'cookies':            { title: 'Cookie & Storage Notice — Polkadex Explorer',
-                            description: 'The Polkadex Explorer does not set tracking cookies. Plain-English list of every localStorage key we use, what it stores, and why.' }
+                            description: 'The Polkadex Explorer does not set tracking cookies. Plain-English list of every localStorage key we use, what it stores, and why.' },
+    // Online help center. Per-article titles override this default via
+    // updateSeoMeta() inside renderHelpArticle(). The landing description
+    // doubles as fallback for /help itself.
+    'help':               { title: 'Help center — Polkadex Mainnet Explorer',
+                            description: 'A practical guide to the Polkadex Mainnet Explorer: browsing the chain, sending PDEX, staking, governance, watchlist, community labels, and privacy.' }
 };
 
 // Update <title>, meta[description], canonical, and Open Graph / Twitter tags
@@ -2204,6 +2209,701 @@ function wireCookiesResetButton() {
         location.reload();
     });
 }
+
+// ─── Online help center ────────────────────────────────────────────────────
+// Content adapted from the PDF user guide, chunked into self-contained
+// articles. Each article is its own indexable URL at /help/<slug>. The
+// landing at /help shows the category grid. The data lives entirely here in
+// the bundle so it works offline once the SPA is loaded — no backend round-trip.
+const HELP_CATEGORIES = [
+    { id: 'start',     label: 'Getting started' },
+    { id: 'browse',    label: 'Browsing the chain' },
+    { id: 'wallet',    label: 'Wallet & sending' },
+    { id: 'staking',   label: 'Staking' },
+    { id: 'gov',       label: 'Governance' },
+    { id: 'tools',     label: 'Tools & extras' },
+    { id: 'reference', label: 'Reference' },
+];
+
+// Each topic: { slug, title, category, keywords, body }. Body is HTML.
+// Keywords are matched in the search (plus title + body fall-back). Keep
+// articles short — under ~250 words — so they read on a single screen.
+const HELP_TOPICS = [
+    {
+        slug: 'quick-start',
+        title: 'Quick start',
+        category: 'start',
+        keywords: 'getting started first time onboarding walkthrough new user',
+        body: `
+            <p class="lead">Fifteen minutes from zero to a connected wallet, a first transfer, and (optionally) your first nomination.</p>
+            <ol class="help-steps">
+                <li><b>Open the explorer</b> at <code>explorer.polkadex.ee</code>. Browse without logging in — no wallet needed for read-only use.</li>
+                <li><b>Install a wallet extension</b> — Polkadot.js, Talisman, SubWallet, or PolkaGate on desktop. On mobile, use Nova Wallet or SubWallet's in-app browser.</li>
+                <li><b>Create or import an account</b> inside the wallet. Write down the seed phrase on paper. Never paste it into the explorer.</li>
+                <li><b>Connect</b> by clicking <i>My Account</i>; the explorer detects your extension and lists each account.</li>
+                <li><b>Send a small test transfer</b> from the Wallet Dashboard's <i>Send PDEX</i> button. Verify the recipient first.</li>
+                <li><b>Optional: stake</b> — click <i>Stake more</i>, pick validators, and sign. Rewards start next era (~24 hours).</li>
+                <li><b>Optional: star what matters</b> — click the star icon next to any address, validator, or proposal to bookmark it locally.</li>
+            </ol>
+            <p>Once you're moving, treat the rest of the help center as a reference — skim what you need.</p>
+        `
+    },
+    {
+        slug: 'installing-a-wallet',
+        title: 'Installing a wallet',
+        category: 'start',
+        keywords: 'wallet extension polkadot.js talisman subwallet polkagate nova mobile install setup',
+        body: `
+            <p>To do anything that signs a transaction (send PDEX, stake, vote), you need a Substrate wallet. The explorer never sees your private key — it asks your wallet to sign on your behalf.</p>
+            <h3>Desktop</h3>
+            <ul>
+                <li><b>Polkadot.js</b> — the official reference extension. Simple and reliable.</li>
+                <li><b>Talisman</b> — feature-rich UI, supports multiple chains.</li>
+                <li><b>SubWallet</b> — broad chain support, mobile companion app.</li>
+                <li><b>PolkaGate</b> — focus on staking and governance UX.</li>
+            </ul>
+            <h3>Mobile</h3>
+            <p>Install <b>Nova Wallet</b> or the <b>SubWallet</b> mobile app, then open the explorer inside the wallet's built-in browser. The explorer detects mobile-wallet WebViews and behaves accordingly.</p>
+            <div class="help-callout">
+                <b>About seed phrases.</b> Anyone with your seed phrase has your funds. Write it on paper. Don't take a screenshot, don't paste it anywhere online, don't store it in a cloud note.
+            </div>
+        `
+    },
+    {
+        slug: 'connecting-wallet',
+        title: 'Connecting your wallet',
+        category: 'start',
+        keywords: 'connect wallet sign in extension permission account selection my account',
+        body: `
+            <p>Click <b>My Account</b> in the sidebar. The explorer detects every Substrate wallet extension and shows you a status banner ("Detected Polkadot.js" etc.). Click <b>Connect</b> and your extension pops up asking for permission to share its account list.</p>
+            <p>Once approved, each exposed account renders as a clickable button. Click the one you want to use — the explorer remembers your choice and routes to your <b>Wallet Dashboard</b>.</p>
+            <h3>Multiple accounts</h3>
+            <p>If your wallet exposes more than one account, the explorer prefers the last account you used. Use <b>Switch wallet</b> on the dashboard to return to the picker.</p>
+            <h3>View-only mode</h3>
+            <p>From the connect page, scroll to <i>"…or look up any address without connecting"</i>, paste a Polkadex address, and click View. The dashboard renders with all actionable buttons hidden — useful for inspecting other wallets.</p>
+        `
+    },
+    {
+        slug: 'home-dashboard',
+        title: 'Home dashboard',
+        category: 'browse',
+        keywords: 'home dashboard landing network info stats issuance market cap',
+        body: `
+            <p>The home page is the whole explorer in one screen. From top to bottom:</p>
+            <ul>
+                <li><b>Stats strip</b> — Market Cap, Total Issuance, In Stake, AVG APY.</li>
+                <li><b>Network Information</b> — current era, validators ratio, nominators ratio, max active stake.</li>
+                <li><b>Recent Blocks</b> — live feed of the latest blocks finalized on chain.</li>
+                <li><b>Recent Transactions</b> — live feed of recent signed financial transactions.</li>
+                <li><b>Lower Network Information grid</b> — average validator commission, min stake, total bonding/unbonding, last era rewards total.</li>
+            </ul>
+            <p>Click any block or transaction to drill into its detail page. Use the "View all" links to jump to the dedicated <i>Blocks</i> or <i>Transactions</i> pages.</p>
+        `
+    },
+    {
+        slug: 'blocks',
+        title: 'Blocks page',
+        category: 'browse',
+        keywords: 'blocks history list extrinsic author parent hash',
+        body: `
+            <p>The Blocks page lists every block our indexer has crawled, newest first. Each row shows block number, age, extrinsic count, hash, and parent hash.</p>
+            <p>Use the global search box at the top to filter across all columns, or click a column header to sort. Click any row to open the block detail page, which lists every extrinsic and event in that block.</p>
+            <p>Pagination shows 50 rows per page by default; "Show more" extends to 200 rows; numbered pagination handles anything beyond.</p>
+        `
+    },
+    {
+        slug: 'transactions',
+        title: 'Transactions page',
+        category: 'browse',
+        keywords: 'transactions transfers signed extrinsic fee status',
+        body: `
+            <p>The Transactions page is a feed of signed financial transactions (transfers and other balance-affecting calls). Columns: hash, signer, recipient, amount, fee, age, status.</p>
+            <p>The <b>Load Older 100 Financial Tx</b> button at the bottom of the list pulls older transactions from the indexer in batches once you scroll past the in-memory cache.</p>
+            <h3>Transaction detail recovery</h3>
+            <p>If you open a <code>/tx/&lt;block&gt;/&lt;hash&gt;</code> URL and the transaction isn't there — chain reorg, hand-edited URL, or an event ID misrouted as a tx hash — the explorer shows a recovery card with a context-aware action button: <i>View block</i> for event IDs, <i>Search recent blocks</i> for stale hashes, <i>Deep search</i> for everything else.</p>
+        `
+    },
+    {
+        slug: 'events',
+        title: 'Events page',
+        category: 'browse',
+        keywords: 'events log section method pallet runtime emit',
+        body: `
+            <p>The Events page shows the raw event log of the chain, excluding transactions (which have their own page). Events are emitted by runtime modules when something happens: <i>balances.Transfer</i> when PDEX moves, <i>staking.Reward</i> when an era pays out, <i>democracy.Proposed</i> when a referendum is filed.</p>
+            <p>Use the Section and Method dropdowns to narrow to a specific runtime module or event type. Pagination matches the blocks/transactions pattern.</p>
+        `
+    },
+    {
+        slug: 'validators',
+        title: 'Validators page',
+        category: 'browse',
+        keywords: 'validators list active stake commission risk apy scorecard slashes',
+        body: `
+            <p>The Validators page lists every validator currently authoring blocks. Columns: address, identity, total stake (own + nominated), commission, real APY (30-day), and Now vs Real.</p>
+            <h3>What to look for</h3>
+            <ul>
+                <li><b>HIGH RISK badge</b> — commission &gt; 50%. The validator keeps a majority of rewards. Avoid.</li>
+                <li><b>Real APY (30d)</b> — actual realized yield over the last 30 days, after commission. This is what nominators got, not the theoretical target.</li>
+                <li><b>Total stake</b> — too low risks dropping out of the active set; very high may dilute your share.</li>
+            </ul>
+            <p>Click a row to open the <b>Validator Detail</b> page, which adds a scorecard with estimated APY, commission band, active-era rate, slash count, and current stake. Star the validator (top-right) to add to your <b>Watchlist</b>.</p>
+        `
+    },
+    {
+        slug: 'holders',
+        title: 'Top PDEX holders',
+        category: 'browse',
+        keywords: 'holders top rich list balance share supply',
+        body: `
+            <p>The Holders page ranks addresses by total balance, with each holder's percentage of the total supply. Useful for tracking treasury, exchange, and large institutional accounts.</p>
+            <p>Identity is shown when set on chain; otherwise you see the short SS58 address. Click any row to open the address's full account details page.</p>
+        `
+    },
+    {
+        slug: 'accounts',
+        title: 'Account details',
+        category: 'browse',
+        keywords: 'account address balance identity transactions events label watchlist',
+        body: `
+            <p>Click any address anywhere in the explorer to land on its account-details page at <code>/account/&lt;address&gt;</code>. You see:</p>
+            <ul>
+                <li><b>Identity table</b> — balance breakdown (total, free, frozen), display name, roles, and a community-labels panel.</li>
+                <li><b>Transactions tab</b> — every signed financial transaction the address signed or received.</li>
+                <li><b>Events tab</b> — every event the address appeared in (staking rewards, governance votes, etc.).</li>
+                <li><b>Watchlist star</b> — toggles the address into your local watchlist.</li>
+            </ul>
+            <p>For your <i>own</i> wallet (richer dashboard with action buttons), use <i>My Account</i> from the sidebar — that lands you on <code>/wallet/&lt;address&gt;</code> instead.</p>
+        `
+    },
+    {
+        slug: 'search',
+        title: 'Search',
+        category: 'browse',
+        keywords: 'search find lookup block hash address validator identity deep network',
+        body: `
+            <p>The search box in the top bar accepts a block number, block hash, transaction hash, address, validator identity, or extrinsic hash.</p>
+            <p>The first pass runs locally against whatever the explorer has cached client-side — fast but limited. If that misses, click <b>Deep Search Network</b> at the bottom of the results to query the full server-side index and the chain RPC. On a hit, the explorer redirects to the right detail page.</p>
+        `
+    },
+    {
+        slug: 'sending-pdex',
+        title: 'Sending PDEX',
+        category: 'wallet',
+        keywords: 'send transfer pdex recipient amount fee keep alive existential deposit',
+        body: `
+            <p>From the Wallet Dashboard's action bar, click <b>Send PDEX</b>. The modal opens:</p>
+            <ol class="help-steps">
+                <li><b>Recipient</b> — paste a Polkadex address (starts with "e"). Verify carefully.</li>
+                <li><b>Amount</b> — in PDEX. The modal shows your transferable balance for reference.</li>
+                <li><b>Keep account alive</b> — leave this checked unless you're intentionally draining your own account. With it on, the explorer refuses to drop your balance below the existential deposit (a fraction of a PDEX).</li>
+                <li>Click <b>Send</b>. Your wallet extension pops up — review the call data and approve.</li>
+            </ol>
+            <p>On success, the modal closes and the dashboard refreshes within a couple of blocks.</p>
+            <div class="help-callout warn">
+                <b>Always test new addresses with a small amount.</b> Errors and typos in addresses are not reversible.
+            </div>
+            <h3>Common errors</h3>
+            <ul>
+                <li><b>"No wallet extension detected"</b> — install one, or open the explorer inside a mobile wallet's WebView.</li>
+                <li><b>"Recipient below existential deposit"</b> — to fund a brand-new account, send at least the existential deposit.</li>
+                <li><b>"Amount exceeds transferable balance"</b> — your free balance is below the requested amount after fees and locks.</li>
+            </ul>
+        `
+    },
+    {
+        slug: 'switching-wallets',
+        title: 'Switching wallets',
+        category: 'wallet',
+        keywords: 'switch wallet disconnect view only multiple accounts',
+        body: `
+            <p>The dashboard header has two key controls:</p>
+            <ul>
+                <li><b>Switch wallet</b> — returns to the connect picker so you can choose a different account from your extension.</li>
+                <li><b>Disconnect</b> (topbar icon) — forgets the active wallet entirely.</li>
+            </ul>
+            <p>Both are local operations; the chain doesn't know or care which wallet your browser has open.</p>
+            <p>If you want to peek at someone else's wallet without connecting, use the <i>"…look up any address"</i> input on the connect page. The dashboard renders in <b>view-only mode</b> — all action buttons hidden, but you see balances, validators, and recent activity.</p>
+        `
+    },
+    {
+        slug: 'proxies-and-multisig',
+        title: 'Proxies & multisig',
+        category: 'wallet',
+        keywords: 'proxy multisig delegate signer threshold staking governance advanced',
+        body: `
+            <p>The Wallet Dashboard's <b>Advanced</b> section exposes two power-user features. Skip unless you specifically need them.</p>
+            <h3>Proxies</h3>
+            <p>A proxy is a delegated signer for your account, optionally restricted to a subset of calls. Examples:</p>
+            <ul>
+                <li><b>Staking proxy</b> — lets a hot wallet claim rewards without ever holding your stash key.</li>
+                <li><b>Governance proxy</b> — delegate voting to someone you trust.</li>
+            </ul>
+            <p>The Proxies card lists each delegate with type and delay. <b>Remove</b> revokes a proxy; <b>Add proxy</b> authorises a new one. The proxy type dropdown is sourced from the live runtime metadata.</p>
+            <h3>Multisig</h3>
+            <p>A multisig is an address derived from a list of signers and a threshold (e.g. 2-of-3). Transactions need <b>at least threshold-of-N</b> approvals to execute. The address is deterministic — anyone with the same signer list and threshold can recompute it.</p>
+            <p>The calculator turns a textarea of signer addresses + threshold into the corresponding multisig address. The <b>Pending approvals</b> table shows multisig transactions still waiting for further signatures.</p>
+            <div class="help-callout">
+                <b>When to consider multisig.</b> Treasury accounts, DAOs, and high-value vaults benefit: no single key compromise loses funds. The trade-off is operational — every transaction needs several humans to coordinate signing.
+            </div>
+        `
+    },
+    {
+        slug: 'how-staking-works',
+        title: 'How staking works',
+        category: 'staking',
+        keywords: 'staking concept nominator validator era bond unbond pos nominated proof stake',
+        body: `
+            <p>Polkadex is a Nominated Proof-of-Stake chain. <b>Validators</b> author and verify blocks; <b>nominators</b> like you support validators with PDEX stake and earn a share of the rewards.</p>
+            <p>Your PDEX moves through five states:</p>
+            <ol class="help-steps">
+                <li><b>Free</b> — normal balance, spendable.</li>
+                <li><b>Bonded</b> — committed to staking. Not yet earning.</li>
+                <li><b>Nominating</b> — backing validators. Each era (~24h) you receive a share of their rewards, minus commission.</li>
+                <li><b>Unbonding</b> — you've requested some stake back. A 28-day cool-down begins.</li>
+                <li><b>Withdrawable</b> — cool-down complete; one more call returns it to free.</li>
+            </ol>
+            <div class="help-callout">
+                <b>You only earn while nominating.</b> Bonding by itself doesn't pay. You must also nominate at least one active validator. Validators outside the active set in a given era pay no rewards even if you nominate them.
+            </div>
+        `
+    },
+    {
+        slug: 'nominating',
+        title: 'Nominating a validator',
+        category: 'staking',
+        keywords: 'nominate stake bond validator pick commission slash apy',
+        body: `
+            <p>From the dashboard, click <b>Stake more</b>. The first time, the call is a combined <code>bond + nominate</code>; on later top-ups it's <code>bondExtra</code>. The explorer figures out which call shape your runtime accepts and handles it.</p>
+            <h3>Before you nominate</h3>
+            <p>Browse the Validators page. Look at:</p>
+            <ul>
+                <li><b>Commission</b> — the cut the validator keeps. Avoid &gt; 50% (HIGH RISK badge).</li>
+                <li><b>Total stake</b> — too low risks dropping out; very high dilutes your share. Aim near the active-set median.</li>
+                <li><b>Slash count</b> — non-zero means past penalties. One is usually accidental; many is a pattern.</li>
+                <li><b>Real APY</b> — our rolling 30-day actual yield, after commission.</li>
+            </ul>
+            <h3>The stake modal</h3>
+            <p>The modal pre-fills your current nominations. Use the search box to filter validators. You can nominate up to 16 at once — spread across several gives exposure even if one drops out. Type the amount and click <b>Stake</b>.</p>
+            <div class="help-callout">
+                <b>Rewards start next era.</b> A nomination made <i>during</i> era N takes effect from era N+1.
+            </div>
+        `
+    },
+    {
+        slug: 'claiming-rewards',
+        title: 'Claiming rewards',
+        category: 'staking',
+        keywords: 'claim payout rewards staking payoutstakers utility batch',
+        body: `
+            <p>Rewards are computed per era per validator and sit on chain as unclaimed entries until someone calls <code>staking.payoutStakers</code>. Any account can trigger a payout — not just you.</p>
+            <p>On the dashboard, the <b>Pay out rewards</b> button shows the unclaimed entry count in parentheses. Click it. The modal lists each unpaid <i>(era, validator, amount)</i> tuple. Click <b>Claim all</b> and the explorer packages up to 30 payout calls into a single <code>utility.batch</code> transaction — sign once, get every reward in one go.</p>
+            <div class="help-callout warn">
+                <b>Era retention window.</b> The chain prunes payable era history after ~84 eras. If you wait too long, the unclaimed reward becomes uncollectable. The explorer flags expiring eras with an orange badge.
+            </div>
+        `
+    },
+    {
+        slug: 'unstaking',
+        title: 'Unstaking & unbonding',
+        category: 'staking',
+        keywords: 'unstake unbond withdraw cool down 28 days unlock',
+        body: `
+            <p>Click <b>Unstake</b> on the dashboard. Enter the PDEX amount you want to unbond. The modal shows the current unbonding period — typically 28 days — and your existing unlocking balance (if any).</p>
+            <p>After signing, the PDEX moves into the <b>unbonding</b> state. When the 28 days elapse, one more call (<code>withdrawUnbonded</code>) returns it to your free balance. The explorer prompts you when withdrawal becomes available.</p>
+            <p>You can have multiple in-flight unbonding chunks at once, each with its own clock.</p>
+        `
+    },
+    {
+        slug: 'staking-rewards-page',
+        title: 'Staking Rewards page',
+        category: 'staking',
+        keywords: 'staking rewards history apr realized csv tax export chart era',
+        body: `
+            <p>The page at <code>/staking-rewards/&lt;address&gt;</code> is the deep view of any address's reward history. You don't need to be signed in to inspect your own rewards.</p>
+            <h3>On the page</h3>
+            <ul>
+                <li><b>Summary cards</b> — Claimed Rewards, Unpaid, Total, Claimed Payouts, Eras, and the <b>realized APR card</b>.</li>
+                <li><b>Realized APR</b> — headline 30-day APR, with 90-day and all-time in the subtitle plus the bonded PDEX used in the calculation.</li>
+                <li><b>Per-validator stacked-bar chart</b> of daily rewards.</li>
+                <li><b>Filter pills</b> — All / Claimed / Unpaid.</li>
+                <li><b>Reward table</b> — Era, Date, Amount, Status, Validator, Block. Sortable, paginated.</li>
+                <li><b>Download buttons</b> — CSV, JSON, Tax (year…).</li>
+            </ul>
+            <h3 id="tax">Tax CSV</h3>
+            <p>The <b>Tax (year)</b> button opens a year picker and produces a year-scoped CSV with a PDEX→USD spot price at era close on every row. Only claimed rewards are included; unclaimed eras are excluded as not-yet-realised income. A totals row sits at the bottom.</p>
+            <div class="help-callout warn">
+                <b>Not tax advice.</b> Your jurisdiction's treatment of staking rewards (income at receipt? at claim? at sale?) is yours to confirm with a qualified accountant.
+            </div>
+        `
+    },
+    {
+        slug: 'governance-overview',
+        title: 'How Polkadex is governed',
+        category: 'gov',
+        keywords: 'governance overview democracy council treasury referendum motion proposal',
+        body: `
+            <p>Polkadex is community-governed. PDEX holders propose changes, vote on referenda, and spend treasury funds. The explorer surfaces the entire lifecycle in three pages:</p>
+            <ul>
+                <li><b>Democracy</b> — public proposals and binding on-chain referenda.</li>
+                <li><b>Council</b> — elected body that can fast-track proposals and manage treasury approvals.</li>
+                <li><b>Treasury</b> — on-chain PDEX pot funded from fees + slashes; spent on community proposals.</li>
+            </ul>
+            <p>Off-chain debate lives at <i>Discussions</i>. Any proposal, motion, or referendum number is clickable in any table — it opens the <b>governance detail modal</b> with status, proposer, beneficiary, blocks, and call hash. Voting itself is not in the modal; use the per-row Aye/Nay buttons on the Democracy → Referenda table.</p>
+        `
+    },
+    {
+        slug: 'democracy-and-voting',
+        title: 'Democracy & voting',
+        category: 'gov',
+        keywords: 'democracy referendum vote aye nay conviction lock public proposal',
+        body: `
+            <p>A <b>referendum</b> is a binding on-chain vote. Once it passes (and a short enactment delay elapses), the proposed call is dispatched automatically.</p>
+            <h3>Voting</h3>
+            <p>On the Democracy → Referenda tab, ongoing referenda have <b>Aye</b> / <b>Nay</b> buttons inline. Click your direction; the vote modal opens.</p>
+            <ul>
+                <li><b>Side toggle</b> — switch Aye/Nay before submitting.</li>
+                <li><b>Lock amount</b> — how much PDEX you're locking behind the vote.</li>
+                <li><b>Conviction</b> — multiplier. <code>None</code> (0.1×, no lock) up to <code>Locked6x</code> (6×, locked 32 eras after the referendum closes). Default <code>Locked1x</code>.</li>
+            </ul>
+            <div class="help-callout">
+                <b>Conviction is a trade-off.</b> Higher conviction = more vote weight, but a longer lock on your PDEX. If you feel strongly and don't need the PDEX soon, scale conviction up.
+            </div>
+        `
+    },
+    {
+        slug: 'council-and-motions',
+        title: 'Council & motions',
+        category: 'gov',
+        keywords: 'council motion member candidacy vote elections fast-track',
+        body: `
+            <p>The <b>Council</b> is an elected body that can fast-track proposals, manage treasury approvals, and veto bad runtime upgrades. A <b>motion</b> is a council vote on a specific call.</p>
+            <p>Two tabs:</p>
+            <ul>
+                <li><b>Members</b> — seat and runner-up counts, candidate count, Term Progress dial.</li>
+                <li><b>Motions</b> — every council motion (active and historical) with threshold and tally. Click a motion # to see status, the call it dispatches, blocks, and on-chain proposal hash.</li>
+            </ul>
+            <p>The header has <b>Submit Candidacy</b> (run for a seat) and <b>Vote</b> (rank candidates in an ongoing election round) buttons.</p>
+        `
+    },
+    {
+        slug: 'treasury',
+        title: 'Treasury',
+        category: 'gov',
+        keywords: 'treasury proposal beneficiary bond approval awards',
+        body: `
+            <p>The Treasury is an on-chain pot of PDEX, funded from transaction fees and slashed stake. Anyone can submit a proposal asking for funds; the council and/or a referendum approve or reject.</p>
+            <p>Four tabs: <b>Overview, Open, Approved, History</b>. Each lists proposals by ID, proposer, beneficiary, requested PDEX, and status.</p>
+            <p>The header <b>Submit proposal</b> button opens a modal where you can post a new request. A deposit is required, and rejected proposals burn the deposit — so write carefully and discuss in <i>Discussions</i> first.</p>
+        `
+    },
+    {
+        slug: 'discussions',
+        title: 'Discussions',
+        category: 'gov',
+        keywords: 'discussions forum thread post sign in wallet signature',
+        body: `
+            <p>Off-chain commentary on governance items lives at <code>/discussions</code>. Each thread is associated with a governance proposal so people can debate the merits before voting.</p>
+            <h3>Reading</h3>
+            <p>No sign-in needed. Browse the thread list; click any thread for the per-thread view.</p>
+            <h3>Posting</h3>
+            <p>Click <b>Sign in with wallet</b>. The explorer asks your wallet to sign a short challenge — no transaction, just a signature. The resulting bearer token is stored locally for ~24 hours, then you'll be asked to sign again. Each post shows your address and a local-time timestamp.</p>
+        `
+    },
+    {
+        slug: 'analytics',
+        title: 'Network analytics',
+        category: 'tools',
+        keywords: 'analytics dashboard kpi charts treasury price daily transactions active addresses',
+        body: `
+            <p>The Analytics page at <code>/analytics</code> is the bird's-eye view of the chain — useful for monitoring health or spotting anomalies. Click the date-range pills (Last 7d / 30d / 90d / Year) to change the window.</p>
+            <h3>KPI strip</h3>
+            <ul>
+                <li><b>Indexed blocks</b> — how many blocks we have indexed vs. chain head.</li>
+                <li><b>Indexed transactions</b> — all signed financial transactions.</li>
+                <li><b>Validators</b> — active / total registered (with current era).</li>
+                <li><b>Nominators</b> — active / total.</li>
+                <li><b>Total staked</b> — total bonded PDEX (with % of issuance).</li>
+                <li><b>Total issuance</b> — current supply.</li>
+            </ul>
+            <h3>Charts</h3>
+            <p>Six time-series charts: daily transactions, daily PDEX volume, daily active addresses, daily blocks produced, PDEX/USD, and cumulative treasury awards.</p>
+        `
+    },
+    {
+        slug: 'watchlist',
+        title: 'Watchlist',
+        category: 'tools',
+        keywords: 'watchlist star bookmark favourite address validator proposal referendum',
+        body: `
+            <p>The Watchlist is your private bookmark folder. Star anything that matters — an address, a validator, a referendum, a treasury proposal — and it shows up at <code>/watchlist</code>.</p>
+            <p>The data lives entirely in your browser (<code>pdex_watchlist_v1</code>); no server-side personal storage. There's no cross-device sync — by design.</p>
+            <h3>What you can star</h3>
+            <p>Addresses, validators, referenda, council motions, treasury proposals, public proposals, blocks. Anywhere a star icon appears, click to toggle.</p>
+            <p>On the Watchlist page, items are grouped by kind. Each shows its label, the date you starred it, and a star icon to unstar. A <b>Clear all</b> button at the top wipes the list.</p>
+        `
+    },
+    {
+        slug: 'community-labels',
+        title: 'Community labels',
+        category: 'tools',
+        keywords: 'labels community vote report veto signed identity address suggest',
+        body: `
+            <p>Community labels turn anonymous addresses into named entities through community consensus. Anyone with a wallet can suggest a label; everyone votes; the address owner has veto power. The highest-scored label is shown everywhere that address appears.</p>
+            <h3>Posting a label</h3>
+            <ol class="help-steps">
+                <li>Connect a wallet.</li>
+                <li>Go to the Account Details page of the address.</li>
+                <li>In the Labels panel, click <b>Sign in with wallet</b>. Your wallet signs a short challenge — no transaction, just a signature. The token persists ~24 hours.</li>
+                <li>Type your label (max 64 chars) and click <b>Suggest</b> (or <b>Set label</b> if you own the address).</li>
+            </ol>
+            <h3>Voting, reporting, veto</h3>
+            <ul>
+                <li><b>Up/down chevrons</b> — vote any non-self label. The viewer's own vote is highlighted.</li>
+                <li><b>Report</b> — flag inappropriate labels. At ≥3 distinct reporters the label is auto-hidden.</li>
+                <li><b>Veto</b> — only the address owner. Hides a label they don't want associated with their account.</li>
+            </ul>
+            <div class="help-callout">
+                <b>Rate limit.</b> Each wallet can post at most one label-related write per 60 seconds, to prevent spam.
+            </div>
+        `
+    },
+    {
+        slug: 'privacy',
+        title: 'Privacy & data handling',
+        category: 'tools',
+        keywords: 'privacy gdpr data storage cookies localstorage rights tracking analytics',
+        body: `
+            <p>Short version: we don't track you, we don't set cookies, we don't run third-party analytics. The full <b>Privacy Policy</b> lives at <code>/privacy</code>; the localStorage inventory at <code>/cookies</code>.</p>
+            <h3>What we store about you</h3>
+            <ul>
+                <li><b>On-chain data</b> — already public. We index it, we don't own it.</li>
+                <li><b>Local storage</b> — a handful of <code>pdex_*</code> keys on your device only (wallet address, watchlist, label session, tour-seen flag, banner dismissal, APR period). Never sent to us.</li>
+                <li><b>Server logs</b> — standard web-server logs (IP, user-agent, URL, response, timestamp). 30-day retention.</li>
+            </ul>
+            <h3>What we do NOT do</h3>
+            <p>No Google Analytics, no Mixpanel, no Segment, no advertising scripts, no third-party JavaScript. Every script the explorer loads runs from <code>explorer.polkadex.ee</code>.</p>
+            <h3>Your rights</h3>
+            <p>Under GDPR, UK GDPR, and CCPA you can request access, correction, and deletion. Clear local storage any time via your browser settings or the <b>Reset all preferences</b> button on <code>/cookies</code>. To delete community labels, discussions, or vote rows you authored, message us with the wallet that signed them.</p>
+        `
+    },
+    {
+        slug: 'troubleshooting',
+        title: 'Troubleshooting & FAQ',
+        category: 'reference',
+        keywords: 'troubleshoot faq help error problem issue fix',
+        body: `
+            <h3>"Why is my balance different here from in my wallet extension?"</h3>
+            <p>They should match within a block. If they don't, the explorer is likely a few blocks behind chain head while the indexer backfills. Refresh after a minute or two.</p>
+            <h3>"I sent a transaction but I cannot find it."</h3>
+            <p>Wait two blocks (about 12 seconds). Or use the transaction hash in the global search bar — don't try to construct the URL by hand.</p>
+            <h3>"The Pay out button is disabled."</h3>
+            <p>You have no unclaimed reward entries — either you're not nominating, or someone else has already triggered the payout on your behalf.</p>
+            <h3>"Why is realized APR different from the chain's theoretical APR?"</h3>
+            <p>Theoretical APR is a target; realized is what you actually got after commission and active-era variability. Realized is usually a few percentage points lower.</p>
+            <h3>"I see a 503 'Connecting to Polkadex node…' message."</h3>
+            <p>Our backend lost its WebSocket connection to the chain RPC. It auto-reconnects within seconds. Click the Retry button. If it persists, try again later.</p>
+            <h3>"How do I delete a label I posted by mistake?"</h3>
+            <p>Open the address's account-details page. In the Labels panel, your own label has a <b>Remove mine</b> button. Sign in with the same wallet first if you posted from another device.</p>
+        `
+    },
+    {
+        slug: 'glossary',
+        title: 'Glossary',
+        category: 'reference',
+        keywords: 'glossary terminology terms definitions',
+        body: `
+            <dl class="help-glossary">
+                <dt>era</dt><dd>A scheduling unit on Polkadex (~24 hours). Validator rewards are computed and paid per era.</dd>
+                <dt>validator</dt><dd>A node that authors and verifies blocks. Earns rewards proportional to (own + nominated) stake, minus commission.</dd>
+                <dt>nominator</dt><dd>A PDEX holder who delegates stake to validators.</dd>
+                <dt>bonded</dt><dd>PDEX set aside for staking; unspendable until withdrawn after the unbonding period.</dd>
+                <dt>slash</dt><dd>Penalty deducted from a misbehaving validator and its nominators.</dd>
+                <dt>referendum</dt><dd>A public on-chain vote that, when approved, dispatches a runtime call automatically.</dd>
+                <dt>conviction</dt><dd>Multiplier on your referendum vote. Higher conviction = more weight + longer lock.</dd>
+                <dt>motion</dt><dd>A council-collective proposal. Approved motions dispatch their underlying call on chain.</dd>
+                <dt>council</dt><dd>Elected body of PDEX holders that can fast-track proposals and manage treasury approvals.</dd>
+                <dt>treasury</dt><dd>On-chain PDEX pot funded from fees + slashes; spendable by community proposals.</dd>
+                <dt>commission</dt><dd>The fraction of rewards a validator keeps before distributing the rest to its nominators.</dd>
+                <dt>payout</dt><dd>On-chain claim that distributes era rewards. Anyone can trigger it.</dd>
+                <dt>extrinsic</dt><dd>A signed or unsigned transaction that mutates chain state.</dd>
+                <dt>event</dt><dd>A side-effect emitted by a pallet during block execution.</dd>
+                <dt>pallet</dt><dd>A self-contained runtime module — staking, democracy, treasury, etc.</dd>
+                <dt>SS58</dt><dd>Substrate's address encoding. Polkadex uses prefix 88; addresses start with "e".</dd>
+                <dt>proxy</dt><dd>Delegated signer for another account, optionally restricted to a subset of calls.</dd>
+                <dt>multisig</dt><dd>Deterministic address derived from signers + threshold. Calls need threshold-of-N approvals.</dd>
+                <dt>existential deposit</dt><dd>The minimum balance the chain insists an account hold to exist.</dd>
+                <dt>utility.batch</dt><dd>A call that bundles N other calls into one signed transaction.</dd>
+                <dt>unbonding period</dt><dd>Cool-down (28 days) between requesting unbonded PDEX and being able to withdraw it.</dd>
+                <dt>chain reorg</dt><dd>When the chain replaces a recent block with a different one. The explorer's recovery card handles small reorgs transparently.</dd>
+            </dl>
+        `
+    },
+];
+
+// O(1) lookup
+const HELP_BY_SLUG = Object.fromEntries(HELP_TOPICS.map(t => [t.slug, t]));
+
+function renderHelpLanding(searchQuery = '') {
+    const article = document.getElementById('help-article');
+    const nav = document.getElementById('help-sidebar-nav');
+    if (!article || !nav) return;
+
+    const q = (searchQuery || '').trim().toLowerCase();
+    const isFiltered = q.length > 0;
+
+    // Build the category-grouped sidebar (filters in place during search).
+    let sidebarHtml = '';
+    for (const cat of HELP_CATEGORIES) {
+        const topics = HELP_TOPICS.filter(t => {
+            if (t.category !== cat.id) return false;
+            if (!isFiltered) return true;
+            const hay = (t.title + ' ' + (t.keywords || '') + ' ' + t.body).toLowerCase();
+            return hay.includes(q);
+        });
+        if (!topics.length) continue;
+        sidebarHtml += `<div class="help-cat"><h4>${stakingEscapeHtml(cat.label)}</h4><ul>`;
+        for (const t of topics) {
+            sidebarHtml += `<li><a href="/help/${stakingEscapeHtml(t.slug)}" class="help-nav-link">${stakingEscapeHtml(t.title)}</a></li>`;
+        }
+        sidebarHtml += '</ul></div>';
+    }
+    if (!sidebarHtml) {
+        sidebarHtml = `<p style="padding: 10px; font-size: 0.85rem; color: var(--text-secondary);">No matches for "${stakingEscapeHtml(q)}".</p>`;
+    }
+    nav.innerHTML = sidebarHtml;
+
+    // Landing card list
+    let landingHtml = `<header class="help-article-header">
+        <h1>Help center</h1>
+        <p class="help-lead">A practical, end-to-end guide to the Polkadex Mainnet Explorer.
+        Pick a topic from the sidebar, or browse by category below. Use the search box
+        to find a specific concept.</p>
+    </header>`;
+    for (const cat of HELP_CATEGORIES) {
+        const topics = HELP_TOPICS.filter(t => t.category === cat.id);
+        if (!topics.length) continue;
+        landingHtml += `<section class="help-cat-section">
+            <h2>${stakingEscapeHtml(cat.label)}</h2>
+            <div class="help-card-grid">`;
+        for (const t of topics) {
+            // Pull the first ~140 chars of body text as the card teaser.
+            const teaser = (t.body || '')
+                .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+            landingHtml += `<a href="/help/${stakingEscapeHtml(t.slug)}" class="help-card">
+                <h3>${stakingEscapeHtml(t.title)}</h3>
+                <p>${stakingEscapeHtml(teaser)}…</p>
+            </a>`;
+        }
+        landingHtml += '</div></section>';
+    }
+    article.innerHTML = landingHtml;
+}
+
+function renderHelpArticle(slug) {
+    const article = document.getElementById('help-article');
+    const nav = document.getElementById('help-sidebar-nav');
+    if (!article || !nav) return;
+    const topic = HELP_BY_SLUG[slug];
+    if (!topic) {
+        // Unknown slug — render a friendly not-found card with link to the landing.
+        article.innerHTML = `<header class="help-article-header">
+            <h1>Topic not found</h1>
+            <p class="help-lead">We couldn't find a help article at <code>/help/${stakingEscapeHtml(slug)}</code>.
+            Try the <a href="/help" class="item-link">help center landing</a> or use the search.</p>
+        </header>`;
+        renderHelpSidebar('');
+        return;
+    }
+
+    // SEO meta — make the title and description reflect the specific article.
+    updateSeoMeta('help', {
+        title: topic.title + ' — Polkadex Explorer help',
+        description: ((topic.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160)),
+        canonicalPath: '/help/' + topic.slug,
+        noindex: false
+    });
+
+    // Per-article JSON-LD so search engines can surface the article directly.
+    setRouteJsonLd({
+        '@context': 'https://schema.org',
+        '@type': 'TechArticle',
+        '@id': SITE_ORIGIN + '/help/' + topic.slug,
+        headline: topic.title,
+        about: topic.title,
+        url: SITE_ORIGIN + '/help/' + topic.slug,
+        inLanguage: 'en',
+        isPartOf: { '@type': 'WebSite', name: 'Polkadex Explorer', url: SITE_ORIGIN }
+    });
+
+    // Prev/next nav within the flat topic list
+    const idx = HELP_TOPICS.findIndex(t => t.slug === slug);
+    const prev = idx > 0 ? HELP_TOPICS[idx - 1] : null;
+    const next = idx < HELP_TOPICS.length - 1 ? HELP_TOPICS[idx + 1] : null;
+    const prevHtml = prev ? `<a href="/help/${stakingEscapeHtml(prev.slug)}" class="help-prevnext prev">
+        <span>← Previous</span><strong>${stakingEscapeHtml(prev.title)}</strong></a>` : '<span></span>';
+    const nextHtml = next ? `<a href="/help/${stakingEscapeHtml(next.slug)}" class="help-prevnext next">
+        <span>Next →</span><strong>${stakingEscapeHtml(next.title)}</strong></a>` : '<span></span>';
+
+    article.innerHTML = `<nav class="help-breadcrumb">
+            <a href="/help" class="item-link">Help</a> / <span>${stakingEscapeHtml(topic.title)}</span>
+        </nav>
+        <header class="help-article-header">
+            <h1>${stakingEscapeHtml(topic.title)}</h1>
+        </header>
+        <div class="help-body">${topic.body}</div>
+        <footer class="help-article-footer">
+            ${prevHtml}
+            ${nextHtml}
+        </footer>`;
+
+    renderHelpSidebar(slug);
+}
+
+function renderHelpSidebar(activeSlug) {
+    const nav = document.getElementById('help-sidebar-nav');
+    if (!nav) return;
+    let html = '';
+    for (const cat of HELP_CATEGORIES) {
+        const topics = HELP_TOPICS.filter(t => t.category === cat.id);
+        if (!topics.length) continue;
+        html += `<div class="help-cat"><h4>${stakingEscapeHtml(cat.label)}</h4><ul>`;
+        for (const t of topics) {
+            const cls = t.slug === activeSlug ? 'help-nav-link active' : 'help-nav-link';
+            html += `<li><a href="/help/${stakingEscapeHtml(t.slug)}" class="${cls}">${stakingEscapeHtml(t.title)}</a></li>`;
+        }
+        html += '</ul></div>';
+    }
+    nav.innerHTML = html;
+}
+
+// Wire the in-page search input. Debounced so we don't re-render every keystroke
+// for users on slower devices.
+let helpSearchTimer = null;
+function wireHelpSearch() {
+    const input = document.getElementById('help-search');
+    if (!input || input.dataset.wired === '1') return;
+    input.dataset.wired = '1';
+    input.addEventListener('input', () => {
+        clearTimeout(helpSearchTimer);
+        helpSearchTimer = setTimeout(() => {
+            // Search filters the sidebar; the article area shows the landing.
+            renderHelpLanding(input.value);
+        }, 120);
+    });
+}
+
+// Convenience: returns an inline-icon string the explorer's various features
+// can paste alongside their UI to point at a specific help article. The
+// resulting <a> is the contextual "?" hook the user picked over a global
+// help link.
+function helpIcon(slug, label) {
+    const safeSlug = (slug || '').replace(/[^a-z0-9-]/gi, '');
+    const tooltip = label || 'Help on this topic';
+    return `<a href="/help/${safeSlug}" class="help-inline-icon" title="${stakingEscapeHtml(tooltip)}" aria-label="${stakingEscapeHtml(tooltip)}"><i class='bx bx-help-circle'></i></a>`;
+}
+// Expose on window so renderers across the codebase can use it without
+// reaching into the module's internals.
+window.helpIcon = helpIcon;
 
 // Storage-notice banner wiring. Shown until dismissed; dismissal preference
 // is itself stored in pdex_banner_dismissed (acknowledged in the banner copy
@@ -2439,6 +3139,11 @@ function routeTo(target) {
     } else if (target.startsWith('discussions/')) {
         mainTarget = 'discussions';
         detailId = target.substring('discussions/'.length);
+    } else if (target.startsWith('help/')) {
+        // /help/<slug> — preserves the slug as the detail id so the dispatcher
+        // can render the right article. /help by itself routes to the landing.
+        mainTarget = 'help';
+        detailId = target.substring('help/'.length);
     }
 
     // Update active nav
@@ -2516,6 +3221,16 @@ function routeTo(target) {
                 // we're on /cookies.
                 injectLegalPageJsonLd(mainTarget);
                 if (mainTarget === 'cookies') wireCookiesResetButton();
+            } else if (mainTarget === 'help') {
+                // /help renders the landing; /help/<slug> renders a single
+                // article with its own SEO + JSON-LD applied inside the renderer.
+                if (detailId) {
+                    renderHelpArticle(detailId);
+                } else {
+                    renderHelpLanding('');
+                    renderHelpSidebar('');
+                }
+                wireHelpSearch();
             }
         } else {
             page.style.display = 'none';
@@ -4485,7 +5200,7 @@ async function renderWalletConnectPanel(root) {
 
     root.innerHTML = `
         <div class="list-container glass">
-            <div class="list-header"><h2>Connect Wallet</h2></div>
+            <div class="list-header"><h2>Connect Wallet ${helpIcon('connecting-wallet', 'How to connect your wallet')}</h2></div>
             <div style="padding: 24px;">
                 ${envBanner}
                 <p style="color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 16px; line-height: 1.6;">
@@ -4731,7 +5446,7 @@ function renderWalletDashboard(data, price, rewardsPayload) {
     root.innerHTML = `
         <div class="list-container glass">
             <div class="list-header">
-                <h2><i class='bx bx-wallet'></i> ${identity ? stakingEscapeHtml(identity) : 'Wallet Dashboard'}</h2>
+                <h2><i class='bx bx-wallet'></i> ${identity ? stakingEscapeHtml(identity) : 'Wallet Dashboard'} ${helpIcon('switching-wallets', 'About the wallet dashboard')}</h2>
                 <div style="display:flex; gap:14px; align-items:center;">
                     <a href="/staking-rewards/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--brand-secondary);font-size:0.78rem;">Full reward history</a>
                     <button id="wallet-switch-btn" class="staking-download-btn">Switch wallet</button>
@@ -8115,7 +8830,7 @@ async function renderAccountLabelEditor(address) {
     // ─ Layout ─────────────────────────────────────────────────────────────
     slot.innerHTML = `
         <div style="margin-top:14px;">
-            <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 4px 0;">Labels <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--text-muted);">(${labels.length})</span></h4>
+            <h4 style="font-size:0.82rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin:0 0 4px 0;">Labels ${helpIcon('community-labels', 'About community labels')} <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--text-muted);">(${labels.length})</span></h4>
             ${selfRow ? renderLabelRow(selfRow) : ''}
             ${community.length
                 ? community.map(renderLabelRow).join('')
@@ -8641,7 +9356,7 @@ function renderWatchlistPage() {
         block:            { label: 'Blocks',               pathFor: id => `/block/${encodeURIComponent(id)}` }
     };
     let html = `<div class="list-container glass">
-        <div class="list-header"><h2>Watchlist <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;">(${items.length} item${items.length === 1 ? '' : 's'})</span></h2>
+        <div class="list-header"><h2>Watchlist ${helpIcon('watchlist', 'About the watchlist')} <span style="color:var(--text-muted);font-weight:400;font-size:0.85rem;">(${items.length} item${items.length === 1 ? '' : 's'})</span></h2>
             <button type="button" id="watchlist-clear-all" class="staking-download-btn" style="padding:6px 14px;font-size:0.78rem;"><i class='bx bx-trash'></i> Clear all</button>
         </div>`;
     for (const [kind, meta] of Object.entries(groups)) {

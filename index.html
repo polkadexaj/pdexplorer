@@ -570,7 +570,7 @@
             <div id="referendum-vote-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
                 <div class="glass" style="width: 100%; max-width: 520px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
                     <button id="close-referendum-vote-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;" aria-label="Close"><i class='bx bx-x'></i></button>
-                    <h3 style="margin-bottom: 8px; font-size: 1.3rem;">Vote on Referendum <span id="referendum-vote-modal-idx"></span></h3>
+                    <h3 style="margin-bottom: 8px; font-size: 1.3rem;">Vote on Referendum <span id="referendum-vote-modal-idx"></span> <a href="/help/democracy-and-voting" class="help-inline-icon" title="Learn about referendum voting" aria-label="Help: referendum voting"><i class='bx bx-help-circle'></i></a></h3>
                     <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.9rem;">Lock PDEX behind your vote — higher conviction multiplies your vote weight but extends the lock period after enactment.</p>
 
                     <div id="referendum-vote-modal-wallet-warning" style="color: var(--error); margin-bottom: 15px; font-size: 0.9rem; display: none;">Please connect your wallet first.</div>
@@ -644,7 +644,7 @@
             <div id="stake-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
                 <div class="glass stake-modal-body">
                     <button id="close-stake-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
-                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Stake &amp; Nominate</h3>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Stake &amp; Nominate <a href="/help/nominating" class="help-inline-icon" title="Learn about staking" aria-label="Help: nominating a validator"><i class='bx bx-help-circle'></i></a></h3>
                     <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Add to your bond and pick the validators you want to back. Your nomination set is replaced with whatever appears in the &ldquo;Selected&rdquo; box on submit.</p>
 
                     <div class="stake-row">
@@ -693,7 +693,7 @@
             <div id="payout-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
                 <div class="glass" style="width: 100%; max-width: 540px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
                     <button id="close-payout-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
-                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Pay Out Rewards</h3>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Pay Out Rewards <a href="/help/claiming-rewards" class="help-inline-icon" title="Learn about claiming rewards" aria-label="Help: claiming rewards"><i class='bx bx-help-circle'></i></a></h3>
                     <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Triggers <code>staking.payoutStakers</code> for every unclaimed (era, validator) pair in one batch. Anyone can trigger a payout; the rewards always go to the nominator's stash regardless of who signs.</p>
 
                     <div class="payout-summary">
@@ -712,7 +712,7 @@
             <div id="send-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
                 <div class="glass" style="width: 100%; max-width: 540px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
                     <button id="close-send-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
-                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Send PDEX</h3>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Send PDEX <a href="/help/sending-pdex" class="help-inline-icon" title="Learn about sending PDEX" aria-label="Help: sending PDEX"><i class='bx bx-help-circle'></i></a></h3>
                     <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Transfer PDEX from the connected wallet to any Polkadex address. The transaction is signed and submitted by your wallet extension.</p>
 
                     <label class="stake-label">Recipient address</label>
@@ -748,7 +748,7 @@
             <div id="unstake-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
                 <div class="glass" style="width: 100%; max-width: 500px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1);">
                     <button id="close-unstake-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
-                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Unstake (Unbond)</h3>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">Unstake (Unbond) <a href="/help/unstaking" class="help-inline-icon" title="Learn about unstaking" aria-label="Help: unstaking"><i class='bx bx-help-circle'></i></a></h3>
                     <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Begin unbonding the amount below. Funds stay locked for the unbonding period, then become withdrawable from your wallet extension.</p>
 
                     <div class="stake-summary" id="unstake-summary" style="margin-bottom: 18px;">
@@ -891,6 +891,26 @@
                 </div>
             </div>
 
+            <!-- Help Center -->
+            <!-- Two-column layout: category sidebar on the left, article on the
+                 right. Populated by script.js (HELP_TOPICS + renderHelp*). The
+                 landing (/help) shows category groups; per-article (/help/<slug>)
+                 shows a single article. Each article is its own indexable URL
+                 with its own meta + JSON-LD. -->
+            <div class="help-page page-section" data-page="help" style="display: none;">
+                <div class="help-shell">
+                    <aside class="help-sidebar glass">
+                        <div class="help-search-wrap">
+                            <i class='bx bx-search' style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-secondary); font-size: 16px;"></i>
+                            <input type="search" id="help-search" placeholder="Search help…" aria-label="Search help" autocomplete="off"
+                                   style="width: 100%; padding: 10px 12px 10px 36px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.04); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; font-size: 0.9rem;">
+                        </div>
+                        <nav id="help-sidebar-nav" aria-label="Help topics"></nav>
+                    </aside>
+                    <article id="help-article" class="help-article glass"></article>
+                </div>
+            </div>
+
             <!-- Privacy Policy Page -->
             <!-- Static, indexable policy describing the explorer's data
                  practices. Lives at /privacy. Targets users searching for
@@ -975,7 +995,7 @@
                                 <tbody>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_wallet</code></td><td style="padding: 10px 12px;">Connected wallet address and source extension name.</td><td style="padding: 10px 12px;">So the My Account page works without re-connecting on every reload.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_last_used_address</code></td><td style="padding: 10px 12px;">The most recently active address when your wallet has multiple accounts.</td><td style="padding: 10px 12px;">So we can default to the right account instead of always picking the first one.</td></tr>
-                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_watchlist</code></td><td style="padding: 10px 12px;">Addresses, validators, and governance items you've starred.</td><td style="padding: 10px 12px;">So your watchlist follows you across sessions.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_watchlist_v1</code></td><td style="padding: 10px 12px;">Addresses, validators, and governance items you've starred.</td><td style="padding: 10px 12px;">So your watchlist follows you across sessions.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_labels_session</code></td><td style="padding: 10px 12px;">Short-lived signed bearer token (about 24 hours) for posting/voting on community labels.</td><td style="padding: 10px 12px;">So you don't have to re-sign every time you vote on a label.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_tour_seen_v1</code></td><td style="padding: 10px 12px;">A boolean flag once you've completed the onboarding tour.</td><td style="padding: 10px 12px;">So we don't pop the tour up again every visit.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_banner_dismissed</code></td><td style="padding: 10px 12px;">A flag set when you dismiss the storage notice banner.</td><td style="padding: 10px 12px;">So we don't show it again.</td></tr>
@@ -988,7 +1008,7 @@
                         <p>We do not set any tracking cookies. We do not load Google Analytics, Mixpanel, Segment, advertising pixels, or any other third-party analytics or tracking script. There are no third-party scripts in the explorer's HTML — every script you see runs from explorer.polkadex.ee.</p>
 
                         <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">Sessions</h2>
-                        <p>We use <code style="background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 3px; color: var(--brand-secondary);">sessionStorage</code> (cleared when you close the tab) for one transient flag: <code style="color: var(--brand-secondary);">pdex_skip_auto_pick</code> — set when you click "Switch wallet" so we don't immediately re-pick the same account.</p>
+                        <p>We use <code style="background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 3px; color: var(--brand-secondary);">sessionStorage</code> (cleared when you close the tab) for one transient flag: <code style="color: var(--brand-secondary);">pdex_skip_wallet_auto_pick</code> — set when you click "Switch wallet" so we don't immediately re-pick the same account.</p>
 
                         <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">Reset everything</h2>
                         <p>You can clear every <code style="color: var(--brand-secondary);">pdex_*</code> key in your browser at any time. The button below removes them all and reloads the page.</p>
