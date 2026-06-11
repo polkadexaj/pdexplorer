@@ -144,8 +144,20 @@ const DEMOCRACY_REFRESH_MS  = readPositiveInteger(process.env.DEMOCRACY_REFRESH_
 // these to make backfill complete sooner — the forward pass is a no-op when
 // the head hasn't moved, so the extra ticks are essentially free. Total
 // per-second RPC load = chunk_size * fetch_concurrency / interval_seconds.
-const STAKING_REWARDS_INTERVAL_MS   = readPositiveInteger(process.env.STAKING_REWARDS_INTERVAL_MS,   30 * 1000);
-const GOVERNANCE_INDEXER_INTERVAL_MS = readPositiveInteger(process.env.GOVERNANCE_INDEXER_INTERVAL_MS, 30 * 1000);
+// Defaults tuned for STEADY-STATE operation (backfill complete). The per-tick
+// work in steady state is "RPC for chain head + maybe a handful of new blocks"
+// — there is no benefit to ticking aggressively for events that change at
+// era / weekly cadences. Lower these only if you're explicitly trying to
+// finish a fresh-install backfill faster (the trade-off is RPC load).
+//   * STAKING_REWARDS_INTERVAL_MS — new rewards land at era boundaries (~24h)
+//     and at payoutStakers claims. 60s gives ~5 blocks/tick of granularity.
+//   * GOVERNANCE_INDEXER_INTERVAL_MS — council motions + treasury proposals
+//     are rare events (a few per week). 90s is plenty.
+//   * CHAIN_INDEX_INTERVAL_MS — the live blocks/transactions indexer that
+//     drives the home page Recent Blocks feed. Pinned at the chain's block
+//     time so the feed always shows the latest block.
+const STAKING_REWARDS_INTERVAL_MS   = readPositiveInteger(process.env.STAKING_REWARDS_INTERVAL_MS,   60 * 1000);
+const GOVERNANCE_INDEXER_INTERVAL_MS = readPositiveInteger(process.env.GOVERNANCE_INDEXER_INTERVAL_MS, 90 * 1000);
 const CHAIN_INDEX_INTERVAL_MS       = readPositiveInteger(process.env.CHAIN_INDEX_INTERVAL_MS,       12 * 1000);
 
 // Gap-fill (scan_failures retry queue) tuning. SCAN_GAP_FILL_BATCH is how
@@ -190,14 +202,26 @@ const FINANCIAL_TX_SCANNER_VERSION = 2;
 const VALIDATOR_HISTORY_ERAS = readPositiveInteger(process.env.VALIDATOR_HISTORY_ERAS, 30);
 // Staking rewards indexer tuning. The crawler scans blocks for staking.Rewarded
 // events (claimed payouts) and appends them to a local per-address index.
-const STAKING_REWARDS_SCAN_BATCH = readPositiveInteger(process.env.STAKING_REWARDS_SCAN_BATCH, 25);
-const STAKING_REWARDS_BACKFILL_CHUNK = readPositiveInteger(process.env.STAKING_REWARDS_BACKFILL_CHUNK, 500);
-const STAKING_REWARDS_FORWARD_MAX = readPositiveInteger(process.env.STAKING_REWARDS_FORWARD_MAX, 20000);
+// Steady-state defaults (post-backfill). These knobs only matter during
+// backfill or after a long outage; in steady state the forward pass walks
+// only the handful of new blocks since the previous tick. If you're starting
+// a fresh install and want backfill to finish faster, override:
+//   STAKING_REWARDS_SCAN_BATCH=50 STAKING_REWARDS_BACKFILL_CHUNK=500
+const STAKING_REWARDS_SCAN_BATCH = readPositiveInteger(process.env.STAKING_REWARDS_SCAN_BATCH, 8);
+const STAKING_REWARDS_BACKFILL_CHUNK = readPositiveInteger(process.env.STAKING_REWARDS_BACKFILL_CHUNK, 100);
+// Forward-pass cap: ~5000 blocks ≈ 17 hours of chain history at 12s blocks.
+// If the indexer is offline longer than that, it walks recent-N once, then
+// the gap-fill retry queue picks up the rest across subsequent ticks.
+const STAKING_REWARDS_FORWARD_MAX = readPositiveInteger(process.env.STAKING_REWARDS_FORWARD_MAX, 5000);
 const STAKING_REWARDS_MIN_BLOCK = readPositiveInteger(process.env.STAKING_REWARDS_MIN_BLOCK, 1);
 // Governance history crawler (treasury proposals + council motions).
 const GOV_SCAN_BATCH = readPositiveInteger(process.env.GOV_SCAN_BATCH, 50);
-const GOV_BACKFILL_CHUNK = readPositiveInteger(process.env.GOV_BACKFILL_CHUNK, 1000);
-const GOV_FORWARD_MAX = readPositiveInteger(process.env.GOV_FORWARD_MAX, 50000);
+// Governance history-walker tuning. Same steady-state philosophy: backfill is
+// a one-time operation, the forward pass is bounded by new-blocks-per-tick.
+// Override these (e.g. GOV_BACKFILL_CHUNK=1000, GOV_FORWARD_MAX=50000) only
+// when explicitly running a fresh-install catch-up.
+const GOV_BACKFILL_CHUNK = readPositiveInteger(process.env.GOV_BACKFILL_CHUNK, 200);
+const GOV_FORWARD_MAX = readPositiveInteger(process.env.GOV_FORWARD_MAX, 5000);
 const GOV_MIN_BLOCK = readPositiveInteger(process.env.GOV_MIN_BLOCK, 1);
 // Wallet dashboard / price chart / unpaid-reward tuning.
 // CMC API key for the PDEX/USD price feed. Never hardcode — supply via .env
@@ -1004,7 +1028,11 @@ const SITEMAP_STATIC_ROUTES = [
     { path: '/help/community-labels',         changefreq: 'monthly', priority: '0.5' },
     { path: '/help/privacy',                  changefreq: 'monthly', priority: '0.4' },
     { path: '/help/troubleshooting',          changefreq: 'monthly', priority: '0.6' },
-    { path: '/help/glossary',                 changefreq: 'monthly', priority: '0.5' }
+    { path: '/help/glossary',                 changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/brand-kit',                changefreq: 'monthly', priority: '0.4' },
+    // Brand kit cheatsheet — designer-/dev-facing reference, indexable so
+    // searches for "Polkadex brand colours" / "Polkadex logo download" land here.
+    { path: '/brand',                         changefreq: 'monthly', priority: '0.5' }
     // Note: /watchlist intentionally omitted (noindex — personal page).
 ];
 const SITEMAP_TOP_VALIDATORS = readPositiveInteger(process.env.SITEMAP_TOP_VALIDATORS, 100);

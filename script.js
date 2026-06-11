@@ -2078,7 +2078,11 @@ const ROUTE_SEO = {
     // updateSeoMeta() inside renderHelpArticle(). The landing description
     // doubles as fallback for /help itself.
     'help':               { title: 'Help center — Polkadex Mainnet Explorer',
-                            description: 'A practical guide to the Polkadex Mainnet Explorer: browsing the chain, sending PDEX, staking, governance, watchlist, community labels, and privacy.' }
+                            description: 'A practical guide to the Polkadex Mainnet Explorer: browsing the chain, sending PDEX, staking, governance, watchlist, community labels, and privacy.' },
+    // Brand kit cheatsheet. Public, indexable. Targets designers and devs
+    // searching for "Polkadex brand colours" or "Polkadex logo download".
+    'brand':              { title: 'Brand kit — Polkadex Mainnet Explorer',
+                            description: 'Polkadex Mainnet Explorer brand kit: colour palette, typography, logo usage, iconography, spacing tokens, voice. Click any swatch to copy its hex value.' }
 };
 
 // Update <title>, meta[description], canonical, and Open Graph / Twitter tags
@@ -2707,6 +2711,27 @@ const HELP_TOPICS = [
         `
     },
     {
+        slug: 'brand-kit',
+        title: 'Brand kit',
+        category: 'reference',
+        keywords: 'brand kit colours colors palette typography logo design tokens identity',
+        body: `
+            <p class="lead">A quick-reference cheatsheet for the explorer's visual identity — colours, typography, logo usage, iconography, spacing tokens, and voice rules.</p>
+            <p>The interactive version lives at <a href="/brand" class="item-link"><b>/brand</b></a>. Click any colour swatch on that page to copy its hex value. Tokens are read live from the CSS, so the page always reflects what the site is rendering.</p>
+            <p>A markdown reference for engineering and design pairing lives at <code>BRAND.md</code> in the repo root.</p>
+            <h3>Quick facts</h3>
+            <ul>
+                <li><b>Primary colour</b> is Polkadex pink <code>#E6007A</code> — reserved for the most important call to action on each screen.</li>
+                <li><b>Secondary colour</b> is accent green <code>#00E676</code> — for successful actions and positive metrics.</li>
+                <li><b>Typeface</b> is Inter (300/400/500/600/700) loaded from Google Fonts. Monospace stack is <code>Courier New, monospace</code> for addresses, hashes, and URLs.</li>
+                <li><b>Icons</b> come from Boxicons 2.1.4, used via the <code>bx-*</code> class system.</li>
+            </ul>
+            <div class="help-callout">
+                <b>Source of truth.</b> When the brand evolves, edit the <code>:root</code> block in <code>styles.css</code> and the <code>BRAND.md</code> file together — the <a href="/brand" class="item-link">/brand</a> page reads from CSS at render time so it stays in sync automatically.
+            </div>
+        `
+    },
+    {
         slug: 'glossary',
         title: 'Glossary',
         category: 'reference',
@@ -2904,6 +2929,251 @@ function helpIcon(slug, label) {
 // Expose on window so renderers across the codebase can use it without
 // reaching into the module's internals.
 window.helpIcon = helpIcon;
+
+// ─── Brand kit page ────────────────────────────────────────────────────────
+// Quick-reference cheatsheet at /brand. Source of truth for the brand kit
+// is the CSS custom properties on :root — this function reads them at render
+// time so the page can never drift from the live theme. Click any swatch to
+// copy its hex value to the clipboard. The matching markdown reference lives
+// at BRAND.md in the repo root.
+function renderBrandPage() {
+    const container = document.getElementById('brand-page-content');
+    if (!container) return;
+
+    // Resolved CSS variable values. We read from the :root computed style so
+    // a designer can edit the variable list and the brand page updates in
+    // lockstep. Hex colours are normalised to uppercase for display.
+    const rootStyle = getComputedStyle(document.documentElement);
+    const v = name => (rootStyle.getPropertyValue(name) || '').trim();
+    const tokens = {
+        primary:      v('--brand-primary'),
+        primaryGlow:  v('--brand-primary-glow'),
+        secondary:    v('--brand-secondary'),
+        bgDark:       v('--bg-dark'),
+        bgSurface:    v('--bg-surface'),
+        bgGlass:      v('--bg-glass'),
+        border:       v('--border-color'),
+        borderHover:  v('--border-hover'),
+        textPrimary:  v('--text-primary'),
+        textSecondary:v('--text-secondary'),
+        textMuted:    v('--text-muted'),
+        success:      v('--success'),
+        error:        v('--error'),
+        radiusSm:     v('--radius-sm'),
+        radiusMd:     v('--radius-md'),
+        radiusLg:     v('--radius-lg'),
+        sidebarWidth: v('--sidebar-width'),
+        transitionFast:   v('--transition-fast'),
+        transitionNormal: v('--transition-normal'),
+    };
+
+    const swatch = (label, value, onLight = false) => `
+        <button type="button" class="brand-swatch" data-copy="${stakingEscapeHtml(value)}"
+                style="background:${stakingEscapeHtml(value)};color:${onLight ? '#14101c' : '#fff'};">
+            <span class="brand-swatch-name">${stakingEscapeHtml(label)}</span>
+            <span class="brand-swatch-hex">${stakingEscapeHtml(value)}</span>
+        </button>`;
+
+    const tokenRow = (token, value) => `
+        <tr>
+            <td><code>${stakingEscapeHtml(token)}</code></td>
+            <td><code>${stakingEscapeHtml(value)}</code></td>
+        </tr>`;
+
+    container.innerHTML = `
+        <header class="brand-header">
+            <div>
+                <span class="brand-eyebrow">Polkadex Mainnet Explorer · Brand Kit v1.0</span>
+                <h1>Brand kit</h1>
+                <p class="brand-lead">A quick-reference cheatsheet for the visual identity that runs across the
+                Polkadex Mainnet Explorer. Click any colour swatch to copy its hex value.
+                Tokens are read live from the CSS custom properties on <code>:root</code>, so this
+                page always reflects what the site is actually rendering.</p>
+            </div>
+            <div class="brand-header-logo">
+                <img src="/logo.png" alt="Polkadex logo" onerror="this.style.display='none'">
+            </div>
+        </header>
+
+        <section class="brand-section">
+            <h2>Colour palette</h2>
+            <h3>Brand</h3>
+            <div class="brand-swatch-row">
+                ${swatch('Primary',   tokens.primary)}
+                ${swatch('Secondary', tokens.secondary)}
+            </div>
+
+            <h3>Surfaces</h3>
+            <div class="brand-swatch-row">
+                ${swatch('Background', tokens.bgDark)}
+                ${swatch('Surface',    tokens.bgSurface)}
+                ${swatch('Glass',      tokens.bgGlass)}
+            </div>
+
+            <h3>Text</h3>
+            <div class="brand-swatch-row">
+                ${swatch('Primary',   tokens.textPrimary, true)}
+                ${swatch('Secondary', tokens.textSecondary, true)}
+                ${swatch('Muted',     tokens.textMuted, true)}
+            </div>
+
+            <h3>Semantic</h3>
+            <div class="brand-swatch-row">
+                ${swatch('Success', tokens.success, true)}
+                ${swatch('Error',   tokens.error)}
+            </div>
+
+            <p class="brand-note">Use <strong>Primary</strong> for the most-important call to action on a screen
+            (only one per view). <strong>Secondary</strong> highlights successful actions, growth, and confirmation.
+            Keep semantic colours for their semantic role only — don't repaint a positive action red.</p>
+        </section>
+
+        <section class="brand-section">
+            <h2>Typography</h2>
+            <div class="brand-type-grid">
+                <div class="brand-type-sample">
+                    <span class="brand-type-label">Display · Inter 800, -0.01em</span>
+                    <span style="font-family: 'Inter', sans-serif; font-weight: 800; font-size: 2.4rem; letter-spacing: -0.01em; line-height: 1.1;">Polkadex Explorer</span>
+                </div>
+                <div class="brand-type-sample">
+                    <span class="brand-type-label">H1 · Inter 700</span>
+                    <span style="font-family: 'Inter', sans-serif; font-weight: 700; font-size: 1.7rem; line-height: 1.2;">Real-time on-chain data</span>
+                </div>
+                <div class="brand-type-sample">
+                    <span class="brand-type-label">H2 · Inter 700</span>
+                    <span style="font-family: 'Inter', sans-serif; font-weight: 700; font-size: 1.2rem;">Section heading</span>
+                </div>
+                <div class="brand-type-sample">
+                    <span class="brand-type-label">Body · Inter 400</span>
+                    <span style="font-family: 'Inter', sans-serif; font-weight: 400; font-size: 0.95rem; line-height: 1.6;">Most paragraph content lives at this size. Comfortable on long-form pages and dense list views alike.</span>
+                </div>
+                <div class="brand-type-sample">
+                    <span class="brand-type-label">Caption · Inter 400, muted</span>
+                    <span style="font-family: 'Inter', sans-serif; font-weight: 400; font-size: 0.82rem; color: var(--text-secondary);">Subtitles, table headers, secondary metadata.</span>
+                </div>
+                <div class="brand-type-sample">
+                    <span class="brand-type-label">Mono · Courier New</span>
+                    <span style="font-family: 'Courier New', monospace; font-size: 0.9rem; color: var(--brand-secondary);">e8ab9d4fJp…  block #12338677  /api/extrinsic</span>
+                </div>
+            </div>
+            <p class="brand-note">Primary face is <strong>Inter</strong> (Google Fonts, weights 300/400/500/600/700).
+            Monospace stack is system-default <code>Courier New, monospace</code> — used for addresses, hashes, URLs, and storage keys.</p>
+        </section>
+
+        <section class="brand-section">
+            <h2>Logo</h2>
+            <div class="brand-logo-grid">
+                <div class="brand-logo-card" style="background: var(--bg-dark);">
+                    <img src="/logo.png" alt="Polkadex logo on dark" onerror="this.parentElement.innerHTML='<div class=brand-logo-fallback>logo.png</div>'">
+                    <span>On dark</span>
+                </div>
+                <div class="brand-logo-card" style="background: #f5f3fa;">
+                    <img src="/logo.png" alt="Polkadex logo on light" onerror="this.parentElement.innerHTML='<div class=brand-logo-fallback style=color:#14101c>logo.png</div>'">
+                    <span style="color: #14101c;">On light</span>
+                </div>
+                <div class="brand-logo-card" style="background: var(--brand-primary);">
+                    <img src="/logo.png" alt="Polkadex logo on brand" onerror="this.parentElement.innerHTML='<div class=brand-logo-fallback>logo.png</div>'">
+                    <span>On brand</span>
+                </div>
+            </div>
+            <p class="brand-note">Keep the logo at <strong>at least 32&nbsp;px tall</strong> on screen,
+            <strong>at least 12&nbsp;mm tall</strong> in print. Maintain clear space equal to the height of the mark on all four sides.
+            Don't recolour, skew, add a drop shadow, or place over busy imagery.</p>
+        </section>
+
+        <section class="brand-section">
+            <h2>Iconography</h2>
+            <p>Icons come from <strong>Boxicons 2.1.4</strong> (loaded via the <code>bx-*</code> class system).
+            Standard sizes: <code>16px</code> inline with body text, <code>20px</code> for buttons,
+            <code>24px</code> for headings. Tint with <code>currentColor</code> by default; switch to
+            <code>--brand-primary</code> for emphasis or actionable affordances.</p>
+            <div class="brand-icon-row">
+                <span class="brand-icon-sample"><i class='bx bx-grid-alt'></i> grid-alt</span>
+                <span class="brand-icon-sample"><i class='bx bx-wallet'></i> wallet</span>
+                <span class="brand-icon-sample"><i class='bx bx-line-chart'></i> line-chart</span>
+                <span class="brand-icon-sample"><i class='bx bx-shield-quarter'></i> shield-quarter</span>
+                <span class="brand-icon-sample"><i class='bx bx-trophy'></i> trophy</span>
+                <span class="brand-icon-sample"><i class='bx bx-bar-chart-alt-2'></i> bar-chart-alt-2</span>
+                <span class="brand-icon-sample"><i class='bx bx-search'></i> search</span>
+                <span class="brand-icon-sample"><i class='bx bx-help-circle'></i> help-circle</span>
+            </div>
+        </section>
+
+        <section class="brand-section">
+            <h2>Spacing, radii, motion</h2>
+            <table class="brand-token-table">
+                <thead><tr><th>Token</th><th>Value</th></tr></thead>
+                <tbody>
+                    ${tokenRow('--radius-sm', tokens.radiusSm)}
+                    ${tokenRow('--radius-md', tokens.radiusMd)}
+                    ${tokenRow('--radius-lg', tokens.radiusLg)}
+                    ${tokenRow('--sidebar-width', tokens.sidebarWidth)}
+                    ${tokenRow('--transition-fast', tokens.transitionFast)}
+                    ${tokenRow('--transition-normal', tokens.transitionNormal)}
+                    ${tokenRow('--border-color', tokens.border)}
+                    ${tokenRow('--border-hover', tokens.borderHover)}
+                </tbody>
+            </table>
+            <p class="brand-note">Radii follow a 4&nbsp;px modular scale (8, 12, 16). Use <code>--radius-sm</code>
+            for inputs and pills, <code>--radius-md</code> for cards, <code>--radius-lg</code> for full panels and modals.
+            Transition <em>fast</em> for hover/focus state changes; <em>normal</em> for layout shifts.</p>
+        </section>
+
+        <section class="brand-section">
+            <h2>Voice in three lines</h2>
+            <ol class="brand-voice-list">
+                <li><strong>Direct.</strong> Lead with the verb. "Connect your wallet" beats "Authentication is available via wallet connection."</li>
+                <li><strong>Honest.</strong> Name limitations. "We cannot delete on-chain data" is more useful than a paragraph of legalese.</li>
+                <li><strong>Concrete.</strong> Show the number, not the adjective. "Backfilled to block 8,402,991" not "extensive history."</li>
+            </ol>
+        </section>
+
+        <section class="brand-section">
+            <h2>Don't</h2>
+            <ul class="brand-dont-list">
+                <li>Don't add new colours outside this palette. Extend by adjusting alpha on existing tokens.</li>
+                <li>Don't use the brand primary as a body-text colour — it's reserved for actions and emphasis.</li>
+                <li>Don't introduce third-party JavaScript or analytics. The privacy page promises none, and the brand follows.</li>
+                <li>Don't recolour the logo. If you need a single-tone version for a constrained surface, use the all-white or all-black version.</li>
+            </ul>
+        </section>
+
+        <section class="brand-section">
+            <h2>Assets &amp; further reference</h2>
+            <ul class="brand-asset-list">
+                <li><a href="/logo.png" class="item-link" download>logo.png</a> — primary mark, full colour.</li>
+                <li><a href="/favicon.png" class="item-link" download>favicon.png</a> — favicon and PWA icon.</li>
+                <li><a href="/manifest.webmanifest" class="item-link">manifest.webmanifest</a> — PWA manifest, includes icon list.</li>
+                <li>Markdown reference: <code>BRAND.md</code> at the repo root.</li>
+                <li>Live source of truth: the <code>:root</code> block in <code>styles.css</code>.</li>
+            </ul>
+        </section>
+    `;
+
+    // Click-to-copy on the swatch buttons. Use the Clipboard API where available
+    // and fall back to a hidden textarea + execCommand for older browsers /
+    // restricted-permissions environments. Show transient feedback inline.
+    container.querySelectorAll('.brand-swatch').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const value = btn.dataset.copy;
+            if (!value) return;
+            try {
+                await navigator.clipboard.writeText(value);
+            } catch (_) {
+                const ta = document.createElement('textarea');
+                ta.value = value; document.body.appendChild(ta);
+                ta.select(); try { document.execCommand('copy'); } catch (_) {}
+                document.body.removeChild(ta);
+            }
+            const original = btn.querySelector('.brand-swatch-hex').textContent;
+            btn.querySelector('.brand-swatch-hex').textContent = 'copied!';
+            setTimeout(() => {
+                const lbl = btn.querySelector('.brand-swatch-hex');
+                if (lbl) lbl.textContent = original;
+            }, 1100);
+        });
+    });
+}
 
 // Storage-notice banner wiring. Shown until dismissed; dismissal preference
 // is itself stored in pdex_banner_dismissed (acknowledged in the banner copy
@@ -3231,6 +3501,10 @@ function routeTo(target) {
                     renderHelpSidebar('');
                 }
                 wireHelpSearch();
+            } else if (mainTarget === 'brand') {
+                // /brand — static cheatsheet, no data fetch. Tokens are read
+                // live from :root inside renderBrandPage.
+                renderBrandPage();
             }
         } else {
             page.style.display = 'none';

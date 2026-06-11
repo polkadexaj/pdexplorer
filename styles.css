@@ -2838,3 +2838,242 @@ h1, h2, h3 { font-weight: 600; }
     .help-article-footer { grid-template-columns: 1fr; }
     .help-prevnext.next { text-align: left; align-items: flex-start; }
 }
+
+/* ─── Brand kit page ─────────────────────────────────────────────────────── */
+.brand-page { padding: 0 !important; }
+#brand-page-content {
+    width: 100%;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 28px 48px;
+}
+.brand-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 32px;
+    padding-bottom: 24px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+.brand-header > div:first-child { flex: 1; min-width: 0; }
+.brand-header-logo img { max-height: 64px; opacity: 0.9; }
+.brand-eyebrow {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--brand-primary);
+    margin-bottom: 6px;
+}
+.brand-header h1 {
+    margin: 0 0 10px;
+    font-size: 2.2rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+}
+.brand-lead {
+    color: var(--text-secondary);
+    font-size: 1rem;
+    line-height: 1.65;
+    margin: 0;
+    max-width: 720px;
+}
+.brand-section {
+    margin: 36px 0;
+}
+.brand-section h2 {
+    font-size: 1.3rem;
+    margin: 0 0 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.brand-section h3 {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-secondary);
+    margin: 22px 0 10px;
+    font-weight: 700;
+}
+.brand-note {
+    margin-top: 14px;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    max-width: 760px;
+}
+.brand-note code,
+.brand-section code {
+    background: rgba(255,255,255,0.05);
+    color: var(--brand-secondary);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85em;
+}
+
+/* Colour swatches — click to copy */
+.brand-swatch-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+    margin-bottom: 4px;
+}
+.brand-swatch {
+    appearance: none;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 18px 14px 14px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 96px;
+    text-align: left;
+    font-family: inherit;
+    transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.brand-swatch:hover {
+    transform: translateY(-2px);
+    border-color: var(--brand-primary);
+}
+.brand-swatch-name {
+    font-weight: 700;
+    font-size: 0.9rem;
+}
+.brand-swatch-hex {
+    font-family: 'Courier New', monospace;
+    font-size: 0.78rem;
+    opacity: 0.85;
+    margin-top: auto;
+}
+
+/* Typography preview grid */
+.brand-type-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.brand-type-sample {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px 18px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+}
+.brand-type-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+/* Logo cards */
+.brand-logo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+}
+.brand-logo-card {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 24px 18px 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    min-height: 140px;
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.brand-logo-card img {
+    max-height: 48px;
+    max-width: 80%;
+}
+.brand-logo-fallback {
+    padding: 18px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    text-transform: none;
+    letter-spacing: 0;
+    opacity: 0.75;
+}
+
+/* Icon row */
+.brand-icon-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 8px;
+}
+.brand-icon-sample {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    font-family: 'Courier New', monospace;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+.brand-icon-sample i {
+    font-size: 18px;
+    color: var(--brand-primary);
+}
+
+/* Token table */
+.brand-token-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+}
+.brand-token-table th {
+    background: rgba(255,255,255,0.04);
+    color: var(--text-primary);
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 700;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--border-color);
+}
+.brand-token-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+.brand-token-table tr:last-child td { border-bottom: none; }
+
+/* Voice list + Don't list */
+.brand-voice-list,
+.brand-dont-list,
+.brand-asset-list {
+    margin: 6px 0;
+    padding-left: 22px;
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    line-height: 1.65;
+}
+.brand-voice-list li,
+.brand-dont-list li,
+.brand-asset-list li { margin-bottom: 8px; }
+
+@media (max-width: 720px) {
+    .brand-header { flex-direction: column; gap: 12px; }
+    .brand-header-logo img { max-height: 48px; }
+    .brand-header h1 { font-size: 1.7rem; }
+    #brand-page-content { padding: 18px 14px 32px; }
+}
