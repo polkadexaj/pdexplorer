@@ -768,6 +768,68 @@
                 </div>
             </div>
 
+            <!-- Set / Clear on-chain identity modal -->
+            <!-- The identity pallet lets an account register a display name,
+                 email, twitter handle, etc. on chain. Filling these fields
+                 makes the address show up named instead of as a short SS58
+                 across the explorer (validators page, holders page, account
+                 details). A small refundable deposit is locked while the
+                 identity exists; clearing the identity returns the deposit. -->
+            <div id="identity-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass" style="width: 100%; max-width: 620px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1); max-height: 92vh; overflow-y: auto;">
+                    <button id="close-identity-modal" class="modal-close-btn"><i class='bx bx-x'></i></button>
+                    <h3 style="margin-bottom: 6px; font-size: 1.3rem;">On-chain identity <a href="/help/identity" class="help-inline-icon" title="Learn about on-chain identity" aria-label="Help: on-chain identity"><i class='bx bx-help-circle'></i></a></h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 18px; font-size: 0.88rem;">Register a display name and contact handles for this address. The data is stored on chain so other Polkadex apps see it too — not just this explorer. A small refundable deposit is locked while the identity exists.</p>
+
+                    <!-- Sub-identity warning slot — populated when the current
+                         account is a sub-identity of a parent. -->
+                    <div id="identity-modal-parent-warning" style="display:none; margin-bottom: 14px; padding: 10px 14px; background: rgba(245,166,35,0.1); border: 1px solid rgba(245,166,35,0.35); border-radius: var(--radius-sm); color: var(--text-primary); font-size: 0.85rem; line-height: 1.5;"></div>
+
+                    <!-- Status pill -->
+                    <div style="display:flex; gap:10px; align-items:center; margin-bottom: 16px;">
+                        <span id="identity-modal-status-pill" style="padding: 4px 12px; border-radius: 16px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: rgba(255,255,255,0.08); color: var(--text-secondary);">Loading…</span>
+                        <span id="identity-modal-deposit" style="font-size: 0.82rem; color: var(--text-secondary);"></span>
+                    </div>
+
+                    <!-- Form fields. All optional individually; at least one must be set. -->
+                    <label class="stake-label" for="identity-display">Display name <span style="color: var(--text-muted); font-weight: 400;">— shown across the explorer</span></label>
+                    <input type="text" id="identity-display" maxlength="32" placeholder="Satoshi" autocomplete="off" spellcheck="false"
+                           style="width:100%; padding:11px 14px; background: rgba(0,0,0,0.25); border:1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; margin-bottom: 12px;">
+
+                    <label class="stake-label" for="identity-legal">Legal name <span style="color: var(--text-muted); font-weight: 400;">— optional</span></label>
+                    <input type="text" id="identity-legal" maxlength="32" placeholder="" autocomplete="off"
+                           style="width:100%; padding:11px 14px; background: rgba(0,0,0,0.25); border:1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; margin-bottom: 12px;">
+
+                    <label class="stake-label" for="identity-email">Email</label>
+                    <input type="email" id="identity-email" maxlength="32" placeholder="you@example.com" autocomplete="off"
+                           style="width:100%; padding:11px 14px; background: rgba(0,0,0,0.25); border:1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; margin-bottom: 12px;">
+
+                    <label class="stake-label" for="identity-twitter">Twitter / X <span style="color: var(--text-muted); font-weight: 400;">— handle, with or without @</span></label>
+                    <input type="text" id="identity-twitter" maxlength="32" placeholder="@satoshi" autocomplete="off"
+                           style="width:100%; padding:11px 14px; background: rgba(0,0,0,0.25); border:1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; margin-bottom: 12px;">
+
+                    <label class="stake-label" for="identity-web">Website</label>
+                    <input type="url" id="identity-web" maxlength="32" placeholder="https://example.com" autocomplete="off"
+                           style="width:100%; padding:11px 14px; background: rgba(0,0,0,0.25); border:1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; margin-bottom: 12px;">
+
+                    <label class="stake-label" for="identity-riot">Matrix / Element <span style="color: var(--text-muted); font-weight: 400;">— e.g. @you:matrix.org</span></label>
+                    <input type="text" id="identity-riot" maxlength="32" placeholder="@you:matrix.org" autocomplete="off"
+                           style="width:100%; padding:11px 14px; background: rgba(0,0,0,0.25); border:1px solid var(--border-color); color: var(--text-primary); border-radius: var(--radius-sm); font-family: inherit; margin-bottom: 6px;">
+
+                    <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 16px;">Each field is limited to 32 bytes by the runtime. Leave any field blank to omit it; you must fill at least one.</p>
+
+                    <div id="identity-modal-error" class="staking-error" style="display: none; margin-bottom: 12px;"></div>
+
+                    <!-- Primary + secondary actions. Clear identity is only
+                         visible when one exists; otherwise the button row
+                         shows just the save action. -->
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <button id="submit-identity-tx-btn" class="modal-submit-btn" style="flex:1;">Save identity</button>
+                        <button id="clear-identity-tx-btn" class="staking-download-btn" style="display:none; padding: 11px 20px; background: rgba(255,77,77,0.1); color: #FF4D4D; border: 1px solid rgba(255,77,77,0.3); border-radius: var(--radius-sm); cursor: pointer; font-family: inherit; font-weight: 600;">Reset (clear)</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Discussions Page -->
             <div class="discussions-page page-section" data-page="discussions" style="display: none;">
                 <div id="discussions-content"></div>

@@ -2430,6 +2430,33 @@ const HELP_TOPICS = [
         `
     },
     {
+        slug: 'identity',
+        title: 'On-chain identity',
+        category: 'wallet',
+        keywords: 'identity display name display email twitter web matrix riot set clear reset register deposit',
+        body: `
+            <p class="lead">Register a display name, email, twitter handle, website, or Matrix ID on chain so other Polkadex apps see this address as a named entity — not just a raw <code>e…</code> address.</p>
+            <h3>How to set it</h3>
+            <ol class="help-steps">
+                <li>Open your <b>Wallet Dashboard</b> and click <b>Set identity</b> (or <b>Update identity</b> if you already have one).</li>
+                <li>Fill in any fields you want public. <b>Display name</b> is the one that shows up everywhere in the explorer; the rest are optional.</li>
+                <li>Click <b>Save identity</b>. Your wallet pops up to sign.</li>
+                <li>Within a couple of blocks, your new identity appears on the home page, validators list, holders ranking, and account-details pages.</li>
+            </ol>
+            <h3>About the deposit</h3>
+            <p>The identity pallet locks a small refundable PDEX deposit while your identity exists. The exact amount is shown in the modal — it's a few PDEX, scaling slightly with how many fields you fill. When you clear the identity, the deposit returns to your free balance immediately.</p>
+            <h3>Field limits</h3>
+            <p>Each field is capped at <b>32 bytes</b> by the runtime. UTF-8 emoji and CJK characters use 3–4 bytes each, so plan accordingly. The form will truncate gracefully if you exceed.</p>
+            <h3>Resetting (clearing) your identity</h3>
+            <p>The same modal has a red <b>Reset (clear)</b> button when an identity already exists. Click it, confirm, and sign — your identity is removed and the deposit returns to your free balance. You can set a new one any time.</p>
+            <div class="help-callout">
+                <b>Identity is public.</b> Anything you put here is on chain forever — even after you clear it, indexers may keep the historical version. Don't include personal info you wouldn't want associated with your address permanently.
+            </div>
+            <h3>Verification / judgements</h3>
+            <p>Registrars on Polkadex can attest that an identity is genuine — this shows up as a green check in some wallets and explorers. Requesting a judgement is a separate flow not yet exposed in the explorer UI; for now use <a href="https://polkadot.js.org/apps" target="_blank" rel="noopener" class="item-link">Polkadot.js Apps</a> if you need a verified identity.</p>
+        `
+    },
+    {
         slug: 'proxies-and-multisig',
         title: 'Proxies & multisig',
         category: 'wallet',
@@ -5757,6 +5784,10 @@ function renderWalletDashboard(data, price, rewardsPayload) {
                     <i class='bx bx-minus-circle'></i>
                     <div><strong>Unstake</strong><span>Begin the unbonding period</span></div>
                 </button>
+                <button class="wallet-action-btn" id="wallet-act-identity">
+                    <i class='bx bx-id-card'></i>
+                    <div><strong>${data.identity && data.identity !== 'Unknown' ? 'Update identity' : 'Set identity'}</strong><span>Display name, email, twitter</span></div>
+                </button>
             </div>` : buildViewOnlyCallout()}
         </div>` : ''}
 
@@ -5911,10 +5942,12 @@ function bindWalletActionHandlers() {
     const stakeBtn = document.getElementById('wallet-act-stake');
     const payoutBtn = document.getElementById('wallet-act-payout');
     const unstakeBtn = document.getElementById('wallet-act-unstake');
+    const identityBtn = document.getElementById('wallet-act-identity');
     if (sendBtn && !sendBtn.disabled) sendBtn.addEventListener('click', openSendModal);
     if (stakeBtn) stakeBtn.addEventListener('click', openStakeModal);
     if (payoutBtn && !payoutBtn.disabled) payoutBtn.addEventListener('click', openPayoutModal);
     if (unstakeBtn && !unstakeBtn.disabled) unstakeBtn.addEventListener('click', openUnstakeModal);
+    if (identityBtn) identityBtn.addEventListener('click', openIdentityModal);
 }
 
 // Wire up the "copy URL" affordance inside the read-only callout. The mobile
@@ -6017,6 +6050,10 @@ function buildWalletActionBarMarkup(data) {
         <button class="wallet-action-btn" id="wallet-act-unstake"${active > 0 ? '' : ' disabled title="No active bond to unstake."'}>
             <i class='bx bx-minus-circle'></i>
             <div><strong>Unstake</strong><span>Begin the unbonding period</span></div>
+        </button>
+        <button class="wallet-action-btn" id="wallet-act-identity">
+            <i class='bx bx-id-card'></i>
+            <div><strong>${data.identity && data.identity !== 'Unknown' ? 'Update identity' : 'Set identity'}</strong><span>Display name, email, twitter</span></div>
         </button>
     </div>`;
 }
@@ -6403,6 +6440,232 @@ async function submitUnstakeTx() {
             setTimeout(() => fetchWalletDashboard(data.address), 2500);
         }
     });
+}
+
+// --- Set / Clear on-chain identity -----------------------------------------
+// pallet_identity lets an account register a display name, email, twitter
+// handle, etc. Setting identity locks a refundable deposit (basicDeposit +
+// fieldDeposit * fields-set). Clearing identity returns the deposit.
+//
+// Each field is a `Data` enum on chain — { Raw: bytes } for filled, { None }
+// for empty. We coerce in `toIdData()` below. The 32-byte field-length cap
+// is enforced both client-side (maxlength on the input) and by the runtime.
+const IDENTITY_FIELD_KEYS = ['display', 'legal', 'email', 'twitter', 'web', 'riot'];
+const IDENTITY_FIELD_MAX_BYTES = 32;
+
+function toIdData(rawStr) {
+    const s = (rawStr == null ? '' : String(rawStr)).trim();
+    if (!s) return { None: null };
+    // Truncate at the byte-length the runtime accepts. UTF-8 bytes !== chars,
+    // so we use TextEncoder and truncate by byte count.
+    const encoded = new TextEncoder().encode(s);
+    if (encoded.length <= IDENTITY_FIELD_MAX_BYTES) return { Raw: s };
+    // Truncate to the byte limit and decode back, dropping any partial codepoint.
+    const truncated = encoded.slice(0, IDENTITY_FIELD_MAX_BYTES);
+    return { Raw: new TextDecoder().decode(truncated) };
+}
+
+function showIdentityError(msg) {
+    const el = document.getElementById('identity-modal-error');
+    if (el) { el.textContent = msg; el.style.display = 'block'; }
+}
+
+function hideIdentityError() {
+    const el = document.getElementById('identity-modal-error');
+    if (el) { el.style.display = 'none'; el.textContent = ''; }
+}
+
+async function openIdentityModal() {
+    const address = getStoredWallet();
+    if (!address) return alert('Please connect a wallet first.');
+    const modal = document.getElementById('identity-modal');
+    if (!modal) return;
+
+    // Reset UI to a known state.
+    hideIdentityError();
+    IDENTITY_FIELD_KEYS.forEach(k => {
+        const el = document.getElementById('identity-' + k);
+        if (el) el.value = '';
+    });
+    const pill = document.getElementById('identity-modal-status-pill');
+    const depositLine = document.getElementById('identity-modal-deposit');
+    const parentWarn = document.getElementById('identity-modal-parent-warning');
+    const clearBtn = document.getElementById('clear-identity-tx-btn');
+    const submitBtn = document.getElementById('submit-identity-tx-btn');
+    if (pill) { pill.textContent = 'Loading…'; pill.style.background = 'rgba(255,255,255,0.08)'; pill.style.color = 'var(--text-secondary)'; }
+    if (depositLine) depositLine.textContent = '';
+    if (parentWarn) parentWarn.style.display = 'none';
+    if (clearBtn) clearBtn.style.display = 'none';
+    if (submitBtn) submitBtn.textContent = 'Save identity';
+
+    modal.style.display = 'flex';
+
+    // Fetch current identity + deposit constants. Pre-fill if the address
+    // already has one set.
+    try {
+        const data = await fetchApiJson('/api/identity/' + encodeURIComponent(address));
+        // Cache for the deposit calculator
+        window._identityDeposit = {
+            basicDeposit: Number(data.basicDeposit) || 0,
+            fieldDeposit: Number(data.fieldDeposit) || 0,
+            existingDeposit: Number(data.deposit) || 0
+        };
+        // Status pill
+        if (pill) {
+            if (data.hasIdentity) {
+                pill.textContent = 'Identity set';
+                pill.style.background = 'rgba(0,230,118,0.15)';
+                pill.style.color = '#00E676';
+            } else {
+                pill.textContent = 'Not set';
+                pill.style.background = 'rgba(255,255,255,0.08)';
+                pill.style.color = 'var(--text-secondary)';
+            }
+        }
+        // Pre-populate fields from existing identity.
+        if (data.hasIdentity && data.info) {
+            IDENTITY_FIELD_KEYS.forEach(k => {
+                const el = document.getElementById('identity-' + k);
+                if (el && data.info[k]) el.value = data.info[k];
+            });
+            if (clearBtn) clearBtn.style.display = 'inline-block';
+            if (submitBtn) submitBtn.textContent = 'Update identity';
+        }
+        // Sub-identity warning (rare but real).
+        if (data.hasParent && parentWarn) {
+            parentWarn.style.display = 'block';
+            parentWarn.innerHTML = '<b>This account is a sub-identity</b> of a parent. Setting a fresh identity here will overwrite the sub-link, and your address will no longer inherit the parent\'s display name.';
+        }
+        // Initial deposit estimate.
+        updateIdentityDepositEstimate();
+    } catch (e) {
+        showIdentityError('Could not read current identity: ' + (e && e.message ? e.message : 'unknown error'));
+    }
+}
+
+function updateIdentityDepositEstimate() {
+    const meta = window._identityDeposit;
+    const depositLine = document.getElementById('identity-modal-deposit');
+    if (!meta || !depositLine) return;
+    // Substrate's identity pallet calculates the deposit as:
+    //   basicDeposit + fieldDeposit * (additional-fields-count)
+    // Here "additional" specifically means fields beyond display. The pallet
+    // also treats each non-empty struct field as adding to the byte cost — we
+    // approximate by counting non-empty fields beyond display.
+    let extraFields = 0;
+    IDENTITY_FIELD_KEYS.forEach(k => {
+        if (k === 'display') return;
+        const el = document.getElementById('identity-' + k);
+        if (el && el.value.trim()) extraFields++;
+    });
+    const estimate = meta.basicDeposit + meta.fieldDeposit * extraFields;
+    const verb = meta.existingDeposit > 0 ? 'Currently locked' : 'Deposit';
+    depositLine.textContent = `${verb}: ${stakingFormatPDEX(meta.existingDeposit || estimate)} PDEX (refundable on clear)`;
+}
+
+async function submitSetIdentity() {
+    hideIdentityError();
+    const data = currentWalletData;
+    if (!data) return showIdentityError('Wallet data is not loaded.');
+    if (!isSameAddress(getStoredWallet(), data.address)) return showIdentityError('Connect this wallet to set its identity.');
+
+    // Build the info object. The pallet rejects an all-None info object, so we
+    // require at least one filled field.
+    const info = {};
+    let anyFilled = false;
+    IDENTITY_FIELD_KEYS.forEach(k => {
+        const el = document.getElementById('identity-' + k);
+        const val = el ? el.value : '';
+        const enc = toIdData(val);
+        if (enc.Raw !== undefined) anyFilled = true;
+        info[k] = enc;
+    });
+    // pallet_identity also requires `image` and `additional` (we always send None / []).
+    info.image = { None: null };
+    info.additional = [];
+    if (!anyFilled) return showIdentityError('Fill at least one field — a display name is the most useful.');
+
+    // Light client-side validation on the formats people most often get wrong.
+    const email = document.getElementById('identity-email')?.value?.trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showIdentityError("That doesn't look like a valid email address.");
+    const web = document.getElementById('identity-web')?.value?.trim();
+    if (web && !/^https?:\/\//i.test(web)) return showIdentityError('Website should start with http:// or https://');
+
+    // Normalise the twitter handle: strip a leading "@" because the convention
+    // varies; chain consumers usually expect the handle without it.
+    const twitterEl = document.getElementById('identity-twitter');
+    if (twitterEl && twitterEl.value) {
+        const v = twitterEl.value.trim().replace(/^@+/, '');
+        info.twitter = toIdData(v);
+    }
+
+    await submitSignedTx({
+        buildTx: (api) => api.tx.identity.setIdentity(info),
+        label: 'Set identity',
+        button: document.getElementById('submit-identity-tx-btn'),
+        busyText: 'Signing…',
+        idleText: data && data.identity && data.identity !== 'Unknown' ? 'Update identity' : 'Save identity',
+        onError: (m) => showIdentityError(m),
+        onSuccess: () => {
+            const modal = document.getElementById('identity-modal');
+            if (modal) modal.style.display = 'none';
+            // Bust the server-side identity cache by re-fetching the dashboard
+            // — getIdentity() in server.js memoises but the cache won't have
+            // our new value, so the visible name will refresh on next paint.
+            setTimeout(() => fetchWalletDashboard(data.address), 2500);
+        }
+    });
+}
+
+async function submitClearIdentity() {
+    hideIdentityError();
+    const data = currentWalletData;
+    if (!data) return showIdentityError('Wallet data is not loaded.');
+    if (!isSameAddress(getStoredWallet(), data.address)) return showIdentityError('Connect this wallet to clear its identity.');
+    if (!confirm('Clear your on-chain identity and reclaim the deposit? You can set a new identity at any time.')) return;
+    await submitSignedTx({
+        buildTx: (api) => api.tx.identity.clearIdentity(),
+        label: 'Clear identity',
+        button: document.getElementById('clear-identity-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Reset (clear)',
+        onError: (m) => showIdentityError(m),
+        onSuccess: () => {
+            const modal = document.getElementById('identity-modal');
+            if (modal) modal.style.display = 'none';
+            setTimeout(() => fetchWalletDashboard(data.address), 2500);
+        }
+    });
+}
+
+// Wire close + submit + clear + live deposit recalc. Idempotent: callers can
+// invoke this multiple times (e.g. after the wallet page is re-rendered) and
+// only the first call attaches handlers.
+function wireIdentityModalHandlers() {
+    const modal = document.getElementById('identity-modal');
+    if (!modal || modal.dataset.wired === '1') return;
+    modal.dataset.wired = '1';
+    const closeBtn = document.getElementById('close-identity-modal');
+    if (closeBtn) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; });
+    modal.addEventListener('click', (e) => {
+        // Click outside the inner panel dismisses, matching the other modals.
+        if (e.target === modal) modal.style.display = 'none';
+    });
+    const submitBtn = document.getElementById('submit-identity-tx-btn');
+    if (submitBtn) submitBtn.addEventListener('click', submitSetIdentity);
+    const clearBtn = document.getElementById('clear-identity-tx-btn');
+    if (clearBtn) clearBtn.addEventListener('click', submitClearIdentity);
+    // Recalc the deposit estimate as the user types.
+    IDENTITY_FIELD_KEYS.forEach(k => {
+        const el = document.getElementById('identity-' + k);
+        if (el) el.addEventListener('input', updateIdentityDepositEstimate);
+    });
+}
+// Wire once at module load so the modal works even before the user opens it.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wireIdentityModalHandlers);
+} else {
+    wireIdentityModalHandlers();
 }
 
 // --- Send / Transfer modal -------------------------------------------------

@@ -1012,6 +1012,7 @@ const SITEMAP_STATIC_ROUTES = [
     { path: '/help/search',                   changefreq: 'monthly', priority: '0.5' },
     { path: '/help/sending-pdex',             changefreq: 'monthly', priority: '0.7' },
     { path: '/help/switching-wallets',        changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/identity',                 changefreq: 'monthly', priority: '0.6' },
     { path: '/help/proxies-and-multisig',     changefreq: 'monthly', priority: '0.6' },
     { path: '/help/how-staking-works',        changefreq: 'monthly', priority: '0.7' },
     { path: '/help/nominating',               changefreq: 'monthly', priority: '0.7' },
@@ -1935,6 +1936,111 @@ app.get('/api/multisigs/:address', async (req, res) => {
         res.json({ account: address, pending });
     } catch (err) {
         console.error('API Error /api/multisigs/:address:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- IDENTITY (set / clear / read) ---
+// The existing getIdentity() helper flattens identity to a display-name string
+// for UI display everywhere else in the explorer. This endpoint returns the
+// FULL structured info so the set-identity modal can pre-fill the form, plus
+// the chain's deposit constants so we can show the cost up front.
+//
+// Response shape:
+//   { address, hasIdentity, info: { display, legal, email, twitter, web, riot, image }
+//     hasParent, parent, judgements,
+//     deposit, basicDeposit, fieldDeposit, maxAdditionalFields }
+// Each info field is a plain string (or '' if unset / not Raw-encoded).
+app.get('/api/identity/:address', async (req, res) => {
+    if (!requireRpc(res)) return;
+    try {
+        const raw = (req.params.address || '').trim();
+        if (!isValidAddress(raw)) return res.status(400).json({ error: 'Invalid Polkadex address.' });
+        let address;
+        try { address = normalizeAddress(raw); } catch (e) { return res.status(400).json({ error: 'Invalid Polkadex address.' }); }
+        if (!globalApi.query.identity || !globalApi.query.identity.identityOf) {
+            return res.status(501).json({ error: 'Identity pallet not present on this runtime.' });
+        }
+
+        // Pull constants for the deposit calculator. The identity pallet exposes
+        // basicDeposit (flat) + fieldDeposit (per additional field) + maxAdditionalFields.
+        const planckToPdex = (raw) => {
+            try { return balanceToPDEX(raw); } catch (e) { return 0; }
+        };
+        const basicDeposit = globalApi.consts.identity && globalApi.consts.identity.basicDeposit
+            ? planckToPdex(globalApi.consts.identity.basicDeposit) : 0;
+        const fieldDeposit = globalApi.consts.identity && globalApi.consts.identity.fieldDeposit
+            ? planckToPdex(globalApi.consts.identity.fieldDeposit) : 0;
+        const maxAdditional = globalApi.consts.identity && globalApi.consts.identity.maxAdditionalFields
+            ? Number(globalApi.consts.identity.maxAdditionalFields.toString()) : 100;
+
+        // Read sub-identity link first — if this account is a sub-identity of
+        // a parent, setting a fresh identity here would orphan it from the
+        // parent. We surface this so the frontend can warn.
+        let hasParent = false, parent = null;
+        try {
+            const superOf = await globalApi.query.identity.superOf(address);
+            if (superOf && superOf.isSome) {
+                hasParent = true;
+                parent = superOf.unwrap()[0].toString();
+            }
+        } catch (e) { /* superOf may not exist on older runtimes */ }
+
+        // Read the main identity record.
+        const identityOpt = await globalApi.query.identity.identityOf(address);
+        // The pallet has two storage shapes across versions:
+        //   newer:  Option<Registration>
+        //   older:  (Registration, Hash | null)
+        // toHuman() normalises both to either an object or null/array.
+        const human = identityOpt && identityOpt.toHuman ? identityOpt.toHuman() : null;
+        let reg = null;
+        if (Array.isArray(human) && human[0]) reg = human[0];
+        else if (human && human.info) reg = human;
+        else if (human && human.toJSON) reg = human.toJSON ? human.toJSON() : null;
+
+        // Coerce each Data-typed field to a plain string. Data variants:
+        //   { Raw: '...' }       — the only one we can faithfully edit
+        //   { None: null }       — empty
+        //   { BlakeTwo256: ... } — hashed; we treat as empty for editing
+        const fieldStr = (field) => {
+            if (!field) return '';
+            if (typeof field === 'string') return field;
+            if (field.Raw !== undefined) return String(field.Raw || '');
+            if (field.raw !== undefined) return String(field.raw || '');
+            return '';
+        };
+
+        const info = reg && reg.info ? reg.info : {};
+        const judgements = (reg && Array.isArray(reg.judgements)) ? reg.judgements.map(j => {
+            // [registrarIndex, judgement] tuple
+            if (Array.isArray(j)) return { registrar: Number(j[0]), judgement: j[1] };
+            return j;
+        }) : [];
+
+        res.set('Cache-Control', 'no-store');
+        res.json({
+            address,
+            hasIdentity: !!reg,
+            info: {
+                display: fieldStr(info.display),
+                legal:   fieldStr(info.legal),
+                email:   fieldStr(info.email),
+                twitter: fieldStr(info.twitter),
+                web:     fieldStr(info.web),
+                riot:    fieldStr(info.riot),
+                image:   fieldStr(info.image)
+            },
+            hasParent,
+            parent,
+            judgements,
+            // Cost surface for the modal.
+            deposit: reg && reg.deposit ? planckToPdex(reg.deposit) : 0,
+            basicDeposit,
+            fieldDeposit,
+            maxAdditionalFields: maxAdditional
+        });
+    } catch (err) {
+        console.error('API Error /api/identity/:address:', err);
         res.status(500).json({ error: err.message });
     }
 });
