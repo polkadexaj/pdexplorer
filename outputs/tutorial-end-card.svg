@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Polkadex staking tutorial - end card
+  Mirrors the title card layout. Three help-article URLs the viewer can copy.
+  Hold for 15-20s with subtle music outro, or freeze on the last frame so
+  thumbnails generate from this composition.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
+
+  <defs>
+    <linearGradient id="accentGradient2" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00E676" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#08080C" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vignette2" cx="50%" cy="50%" r="75%">
+      <stop offset="0%" stop-color="#12121A" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.5"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1920" height="1080" fill="#08080C"/>
+  <rect width="1920" height="1080" fill="url(#accentGradient2)"/>
+  <rect width="1920" height="1080" fill="url(#vignette2)"/>
+
+  <!-- Decorative hex grid (mirrored to bottom-left to differ from title card) -->
+  <g opacity="0.05" stroke="#FFFFFF" stroke-width="1.4" fill="none">
+    <g transform="translate(180, 820)">
+      <polygon points="0,-44 38,-22 38,22 0,44 -38,22 -38,-22"/>
+      <polygon points="80,-44 118,-22 118,22 80,44 42,22 42,-22"/>
+      <polygon points="160,-44 198,-22 198,22 160,44 122,22 122,-22"/>
+      <polygon points="40,28 78,50 78,94 40,116 2,94 2,50"/>
+      <polygon points="120,28 158,50 158,94 120,116 82,94 82,50"/>
+    </g>
+  </g>
+
+  <!-- Top brand pink accent bar -->
+  <rect x="0" y="0" width="1920" height="10" fill="#E6007A"/>
+
+  <!-- Eyebrow -->
+  <text x="120" y="220"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="700"
+        font-size="22"
+        letter-spacing="6"
+        fill="#00E676">THANKS FOR WATCHING</text>
+
+  <!-- Headline -->
+  <text x="120" y="340"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="800"
+        font-size="110"
+        letter-spacing="-2"
+        fill="#FFFFFF">Learn more</text>
+
+  <!-- Three-link list with brand-pink bullets -->
+  <g font-family="'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <!-- Link 1 -->
+    <circle cx="140" cy="488" r="7" fill="#E6007A"/>
+    <text x="170" y="500" font-weight="600" font-size="40" fill="#FFFFFF">Nominating a validator</text>
+    <text x="170" y="546" font-weight="400" font-size="28" fill="#9CA3AF">explorer.polkadex.ee/help/nominating</text>
+
+    <!-- Link 2 -->
+    <circle cx="140" cy="638" r="7" fill="#E6007A"/>
+    <text x="170" y="650" font-weight="600" font-size="40" fill="#FFFFFF">Claiming staking rewards</text>
+    <text x="170" y="696" font-weight="400" font-size="28" fill="#9CA3AF">explorer.polkadex.ee/help/claiming-rewards</text>
+
+    <!-- Link 3 -->
+    <circle cx="140" cy="788" r="7" fill="#E6007A"/>
+    <text x="170" y="800" font-weight="600" font-size="40" fill="#FFFFFF">Staking Rewards page · realized APR</text>
+    <text x="170" y="846" font-weight="400" font-size="28" fill="#9CA3AF">explorer.polkadex.ee/help/staking-rewards-page</text>
+  </g>
+
+  <!-- Call-to-action footer -->
+  <rect x="120" y="950" width="80" height="4" fill="#00E676"/>
+  <text x="120" y="1010"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="600"
+        font-size="32"
+        fill="#FFFFFF">Full help center · explorer.polkadex.ee/help</text>
+
+  <rect x="1740" y="1066" width="180" height="6" fill="#E6007A"/>
+
+</svg>

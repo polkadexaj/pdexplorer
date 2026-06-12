@@ -1148,13 +1148,25 @@ app.get('/robots.txt', (req, res) => {
     const lines = [
         'User-agent: *',
         'Allow: /',
-        // /wallet (bare) is a public connect-wallet landing; only the personal
-        // /wallet/:addr dashboard is blocked. Note that "Disallow: /wallet/"
-        // matches "/wallet/anything" but not "/wallet" itself.
+        // Personal / dynamic surfaces — disallow so crawlers don't index per-user
+        // pages. Each is also noindex-tagged at render time as defence-in-depth.
+        //   /wallet           — public connect-wallet landing (indexable).
+        //   /wallet/<addr>    — personal dashboard (NOT indexable).
+        //   /watchlist        — personal local-storage page.
+        //   /search           — query-result page, no canonical content.
+        //   /api/             — JSON endpoints, not human-readable.
         'Allow: /wallet',
         'Disallow: /wallet/',
+        'Disallow: /watchlist',
         'Disallow: /search',
         'Disallow: /api/',
+        // Reference + content surfaces — explicitly allowed so the wildcard
+        // root Allow can't be mis-parsed by older or stricter crawlers.
+        'Allow: /help',
+        'Allow: /help/',
+        'Allow: /brand',
+        'Allow: /privacy',
+        'Allow: /cookies',
         '',
         'Sitemap: ' + SITE_URL + '/sitemap.xml',
         ''

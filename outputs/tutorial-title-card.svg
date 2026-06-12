@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Polkadex staking tutorial - title card
+  1920x1080, brand palette, Inter typography (system fallback).
+  Drop into your video editor as a still or fade in/out for 8-10 seconds.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
+
+  <defs>
+    <!-- Diagonal accent: brand pink fading into dark -->
+    <linearGradient id="accentGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E6007A" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#08080C" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Subtle vignette so the eye lands on the headline -->
+    <radialGradient id="vignette" cx="50%" cy="40%" r="80%">
+      <stop offset="0%" stop-color="#12121A" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.55"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="#08080C"/>
+  <rect width="1920" height="1080" fill="url(#accentGradient)"/>
+  <rect width="1920" height="1080" fill="url(#vignette)"/>
+
+  <!-- Decorative hex grid (low opacity, matches the brand kit's PDF cover) -->
+  <g opacity="0.06" stroke="#FFFFFF" stroke-width="1.4" fill="none">
+    <g transform="translate(1300, 200)">
+      <polygon points="0,-44 38,-22 38,22 0,44 -38,22 -38,-22"/>
+      <polygon points="80,-44 118,-22 118,22 80,44 42,22 42,-22"/>
+      <polygon points="160,-44 198,-22 198,22 160,44 122,22 122,-22"/>
+      <polygon points="40,28 78,50 78,94 40,116 2,94 2,50"/>
+      <polygon points="120,28 158,50 158,94 120,116 82,94 82,50"/>
+      <polygon points="200,28 238,50 238,94 200,116 162,94 162,50"/>
+      <polygon points="80,100 118,122 118,166 80,188 42,166 42,122"/>
+      <polygon points="160,100 198,122 198,166 160,188 122,166 122,122"/>
+      <polygon points="240,100 278,122 278,166 240,188 202,166 202,122"/>
+    </g>
+  </g>
+
+  <!-- Top pink accent bar (full bleed) -->
+  <rect x="0" y="0" width="1920" height="10" fill="#E6007A"/>
+
+  <!-- Eyebrow label -->
+  <text x="120" y="380"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="700"
+        font-size="22"
+        letter-spacing="6"
+        fill="#E6007A">POLKADEX MAINNET EXPLORER · TUTORIAL</text>
+
+  <!-- Main headline -->
+  <text x="120" y="500"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="800"
+        font-size="148"
+        letter-spacing="-3"
+        fill="#FFFFFF">How to stake PDEX</text>
+
+  <text x="120" y="660"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="800"
+        font-size="148"
+        letter-spacing="-3"
+        fill="#E6007A">in 3 minutes</text>
+
+  <!-- Subtitle / promise line -->
+  <text x="120" y="780"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="400"
+        font-size="36"
+        fill="#9CA3AF">Connect a wallet · pick validators · earn from the next era boundary</text>
+
+  <!-- URL footer with cyan/green underline -->
+  <rect x="120" y="930" width="80" height="4" fill="#00E676"/>
+  <text x="120" y="990"
+        font-family="'Inter', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="600"
+        font-size="32"
+        fill="#FFFFFF">explorer.polkadex.ee</text>
+
+  <!-- Bottom-right green accent dash -->
+  <rect x="1740" y="1066" width="180" height="6" fill="#00E676"/>
+
+</svg>
