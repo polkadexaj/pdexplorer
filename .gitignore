@@ -1,4 +1,5 @@
 node_modules/
+outputs/
 dist/
 *_cache.json
 cache.json
