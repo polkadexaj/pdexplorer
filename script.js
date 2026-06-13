@@ -4441,12 +4441,18 @@ async function loadStakingIndexStatus() {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         if (!data.backfillComplete) {
+            // Only surface the indexer state while it's still doing real work
+            // (backfill in progress). Once backfill is complete the user
+            // doesn't need to see operator chatter — match the convention used
+            // everywhere else in the explorer (governance, treasury, council).
             el.innerHTML = `<div class="gov-index-note" style="margin-top: 10px;"><i class='bx bx-loader-alt bx-spin'></i> Indexing past staking rewards from chain history — scanned back to block ${stakingFormatNumber(data.oldestScannedBlock)}. Older staking rewards will keep appearing as the crawl progresses.</div>`;
         } else {
-            el.innerHTML = `<span class="staking-index-status" style="margin-top: 10px; display: inline-block;">Indexer: blocks ${stakingFormatNumber(data.oldestScannedBlock)}–${stakingFormatNumber(data.latestScannedBlock)} · ${stakingFormatNumber(data.totalRewardsIndexed)} payouts · backfill complete</span>`;
+            el.innerHTML = '';
         }
     } catch (e) {
-        el.innerHTML = `<span class="staking-index-status" style="margin-top: 10px; display: inline-block;">Indexer: status unavailable</span>`;
+        // Status endpoint unreachable — stay silent rather than showing an
+        // operator-facing error to a user who has no way to act on it.
+        el.innerHTML = '';
     }
 }
 
