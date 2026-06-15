@@ -572,9 +572,26 @@ setup_backups() {
     chmod 0750 "$script_dst"
     ok "$script_dst (mode 0750)"
 
-    log "Creating backups directory at $DEPLOY_DIR/backups"
-    install -d -m 0750 "$DEPLOY_DIR/backups"
-    ok "$DEPLOY_DIR/backups (mode 0750)"
+    # Backups live OUTSIDE the deploy directory now (was $DEPLOY_DIR/backups
+    # in older revisions). Keeping them under /var/backup means they're not in
+    # the Docker build context, not in the repo, and not deleted by a stray
+    # `git clean -fdx` or `docker compose down -v`. Idempotent — if the dir
+    # already exists, the mode is reasserted.
+    local backup_dir="/var/backup"
+    log "Creating backups directory at $backup_dir"
+    install -d -m 0750 "$backup_dir"
+    ok "$backup_dir (mode 0750)"
+
+    # Migrate any pre-existing backups from the legacy location to the new
+    # one. Move (not copy) so storage doesn't double. Idempotent — if the
+    # legacy dir doesn't exist or is empty, the loop is a no-op.
+    local legacy_dir="$DEPLOY_DIR/backups"
+    if [ -d "$legacy_dir" ] && [ -n "$(ls -A "$legacy_dir" 2>/dev/null)" ]; then
+        log "Migrating existing backups from $legacy_dir to $backup_dir"
+        mv "$legacy_dir"/* "$backup_dir/" 2>/dev/null || true
+        rmdir "$legacy_dir" 2>/dev/null || log "  (legacy dir not empty after move — leaving in place)"
+        ok "Migrated"
+    fi
 
     log "Writing /etc/cron.d/pdexplorer-backup (runs nightly at 03:00 UTC)"
     cat > /etc/cron.d/pdexplorer-backup <<EOF
