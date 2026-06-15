@@ -54,7 +54,7 @@ set -euo pipefail
 
 # ---- Configuration ---------------------------------------------------------
 DOMAIN="${DOMAIN:-explorer.polkadex.ee}"
-LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-vivek@polkadex.ee}"
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-business@polkadex.ee}"
 REPO_URL="${REPO_URL:-https://github.com/polkadexaj/pdexscan.git}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/pdexplorer}"
 SSH_PORT="${SSH_PORT:-22}"
