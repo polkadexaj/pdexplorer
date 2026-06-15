@@ -1,0 +1,86 @@
+# Docker build-context exclusions.
+#
+# Without this file, `docker build` (and `docker compose up --build`) uploads
+# the ENTIRE repo directory to the build daemon, even though the Dockerfiles
+# only need a handful of source files. With the SQLite chain index and the
+# nightly backup snapshots living in the repo, that "entire repo" can run to
+# 15+ GB — every rebuild waits minutes just to transfer junk that's about to
+# be ignored.
+#
+# Keep this list in sync with Dockerfile.backend (which COPYs server.js + db.js
+# only) and Dockerfile.frontend (which COPYs the whole tree, hence relies on
+# this exclusion list to filter out the heavy stuff).
+
+# ─── Runtime data — never belongs in a built image ──────────────────────────
+# The SQLite chain index lives here when DATA_PATH defaults to ./data. Bind-
+# mounted into the container at runtime via docker-compose.yml, so excluding
+# it from the build context doesn't break anything; the volume mount supplies
+# the same files.
+data/
+
+# Nightly backup archives written by backup.sh. Big and tarball-like.
+backups/
+*.db
+*.db.gz
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ─── Dependencies & build artefacts ─────────────────────────────────────────
+# node_modules is reinstalled INSIDE the image — sending the host copy bloats
+# the context and risks injecting a glibc-linked binary into an alpine image.
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vite output goes here at build time; rebuilt inside the image.
+dist/
+.vite/
+
+# ─── Caches & temp ──────────────────────────────────────────────────────────
+# Cache JSON files written by server.js (cold-start fallbacks). Each is < 1 MB
+# but they get refreshed at runtime anyway.
+*_cache.json
+*.log
+
+# Scratchpad / generator outputs that aren't part of the deployable image.
+outputs/
+
+# ─── Version control + editor metadata ──────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Environment & secrets ──────────────────────────────────────────────────
+# The container reads .env via env_file in docker-compose; baking it into the
+# image is a leak vector.
+.env
+.env.local
+.env.*.local
+
+# ─── Local-only docs that don't need to ship in the image ───────────────────
+# These exist for repo readers but the running container doesn't use them.
+README.md
+SECURITY_AUDIT.md
+BRAND.md
+CLAUDE.md
+*.pdf
+
+# ─── Letsencrypt artefacts (bind-mounted, not built in) ─────────────────────
+certbot/
+
+# ─── Misc ───────────────────────────────────────────────────────────────────
+# Useful catch-all for editors that drop tilde backups.
+*~
+
+# NOTE: We DON'T exclude Dockerfile.* or docker-compose*.yml here — Docker
+# reads them out of the context, and excluding them can break `docker compose
+# build` depending on the invocation. They're tiny anyway.
