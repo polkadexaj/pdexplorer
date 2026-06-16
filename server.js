@@ -362,6 +362,117 @@ let rpcResetInFlight = false;
 let chainSS58 = 88; // Polkadex SS58 prefix; refreshed from the chain registry on connect.
 const identityCache = new Map();
 
+// ─── LRU caches for immutable chain reads ──────────────────────────────────
+// Substrate RPC calls that reference a specific block hash (or a block number
+// that's already finalised) are deterministically immutable — once we've
+// fetched them, the chain will never return a different answer for the same
+// key. Caching them takes pressure off the upstream RPC, which is especially
+// useful during indexer gap-fill (the same block is retried until it lands).
+//
+// Why hand-rolled instead of an npm dep: this is the only LRU in the
+// codebase, the implementation is ~30 lines, and adding a dep would mean
+// bumping package-lock and rebuilding the image. Map.delete + Map.set
+// preserves insertion order, which is exactly what we need for the LRU
+// recency move.
+//
+// IMPORTANT: cached values are polkadot.js codec objects that hold references
+// to the api's type registry. After the watchdog rebuilds the api (long-
+// outage path), these references become stale — `clearRpcCaches()` is called
+// at the start of every connectRpc() to prevent that.
+class LRU {
+    constructor(maxSize) {
+        this.maxSize = maxSize;
+        this.cache = new Map();
+        this.hits = 0;
+        this.misses = 0;
+    }
+    get(key) {
+        const val = this.cache.get(key);
+        if (val === undefined) { this.misses++; return undefined; }
+        // Move to MRU position by reinserting.
+        this.cache.delete(key);
+        this.cache.set(key, val);
+        this.hits++;
+        return val;
+    }
+    set(key, val) {
+        if (this.cache.has(key)) {
+            this.cache.delete(key);
+        } else if (this.cache.size >= this.maxSize) {
+            // Evict LRU (first inserted).
+            const oldest = this.cache.keys().next().value;
+            this.cache.delete(oldest);
+        }
+        this.cache.set(key, val);
+    }
+    clear() { this.cache.clear(); this.hits = 0; this.misses = 0; }
+    stats() {
+        const total = this.hits + this.misses;
+        return {
+            size: this.cache.size,
+            maxSize: this.maxSize,
+            hits: this.hits,
+            misses: this.misses,
+            hitRate: total > 0 ? Math.round(this.hits / total * 1000) / 10 + '%' : 'n/a'
+        };
+    }
+}
+
+// Three caches sized for the workload:
+//   blockCache       — full SignedBlock objects, biggest payload, smaller cap.
+//   blockHashCache   — Hash codec by block number, tiny payload, larger cap.
+//   eventsAtCache    — Vec<EventRecord> at a block hash, medium payload.
+// Sizes were chosen so each cache fits comfortably under ~50 MB at steady
+// state. Override via env if memory pressure ever becomes an issue.
+const RPC_BLOCK_CACHE_SIZE       = readPositiveInteger(process.env.RPC_BLOCK_CACHE_SIZE,       2000);
+const RPC_BLOCK_HASH_CACHE_SIZE  = readPositiveInteger(process.env.RPC_BLOCK_HASH_CACHE_SIZE,  5000);
+const RPC_EVENTS_AT_CACHE_SIZE   = readPositiveInteger(process.env.RPC_EVENTS_AT_CACHE_SIZE,   2000);
+const blockCache      = new LRU(RPC_BLOCK_CACHE_SIZE);
+const blockHashCache  = new LRU(RPC_BLOCK_HASH_CACHE_SIZE);
+const eventsAtCache   = new LRU(RPC_EVENTS_AT_CACHE_SIZE);
+
+function clearRpcCaches() {
+    blockCache.clear();
+    blockHashCache.clear();
+    eventsAtCache.clear();
+}
+
+// Cached lookup: blockNumber -> Hash. Only safe for finalised heights, which
+// is every block our indexer ever asks about (the head is fetched separately
+// via getHeader()). On reconnect, clearRpcCaches() wipes the table so we
+// don't serve a hash from a pre-reorg view.
+async function getBlockHashCached(blockNumber) {
+    if (blockNumber === undefined || blockNumber === null) {
+        // No-arg getBlockHash returns the current head; not cacheable.
+        return await globalApi.rpc.chain.getBlockHash();
+    }
+    const key = String(blockNumber);
+    const hit = blockHashCache.get(key);
+    if (hit !== undefined) return hit;
+    const hash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+    // toString() on a null/empty hash returns '0x000...'; don't cache misses.
+    if (hash && hash.toHex && hash.toHex() !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+        blockHashCache.set(key, hash);
+    }
+    return hash;
+}
+
+// Cached lookup: blockHash -> SignedBlock. Always safe — the hash uniquely
+// identifies the block content. Accepts either a string or a Hash codec; we
+// key by hex so both forms hit the same entry.
+async function getBlockCached(blockHash) {
+    if (!blockHash) {
+        // No-arg getBlock returns the current head's block; not cacheable.
+        return await globalApi.rpc.chain.getBlock();
+    }
+    const key = typeof blockHash === 'string' ? blockHash : blockHash.toHex();
+    const hit = blockCache.get(key);
+    if (hit !== undefined) return hit;
+    const block = await globalApi.rpc.chain.getBlock(blockHash);
+    if (block) blockCache.set(key, block);
+    return block;
+}
+
 function readPositiveInteger(value, fallback) {
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -727,10 +838,22 @@ function shortErrorMessage(err) {
 // so callers can skip the block without a log explosion. The single concise
 // warn is emitted by the caller, not here.
 async function getEventsAtBlock(blockHash) {
+    // Cache by hex form so callers passing a string vs. Hash codec hit the
+    // same entry. The hash uniquely identifies the block, so cached events
+    // are correct forever (until cleared on reconnect).
+    const key = !blockHash ? null : (typeof blockHash === 'string' ? blockHash : blockHash.toHex());
+    if (key) {
+        const hit = eventsAtCache.get(key);
+        if (hit !== undefined) return hit;
+    }
     try {
         const apiAt = await globalApi.at(blockHash);
-        return await apiAt.query.system.events();
+        const events = await apiAt.query.system.events();
+        if (key && events) eventsAtCache.set(key, events);
+        return events;
     } catch (_err) {
+        // Don't cache misses — a transient failure may be retried, and we
+        // want the retry to actually hit the chain.
         return null;
     }
 }
@@ -825,7 +948,7 @@ function mergeFinancialTransactions(existingTransactions, incomingTransactions) 
 // rationale on the two-field shape.
 async function scanBlockForTransactions(blockNumber) {
     try {
-        const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+        const blockHash = await getBlockHashCached(blockNumber);
         const [events, timestamp] = await Promise.all([
             getEventsAtBlock(blockHash),
             getBlockTimestampAt(blockHash)
@@ -1234,6 +1357,20 @@ app.get('/robots.txt', (req, res) => {
     res.type('text/plain').send(lines.join('\n'));
 });
 
+// Diagnostic: worker-local RPC cache stats. Useful for confirming the
+// LRU is doing what we think during a load test or post-deploy. Each
+// cluster worker has its own caches, so hitting this endpoint multiple
+// times in a row will round-robin across workers and show different numbers.
+app.get('/api/diag/rpc-cache', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({
+        pid: process.pid,
+        block:     blockCache.stats(),
+        blockHash: blockHashCache.stats(),
+        eventsAt:  eventsAtCache.stats()
+    });
+});
+
 // --- LIST ENDPOINTS (served from SQLite) ---
 app.get('/api/validators', (req, res) => {
     try { cacheMedium(res); res.json(db.getValidators()); }
@@ -1321,8 +1458,8 @@ app.get('/api/block/:id', async (req, res) => {
     try {
         const id = req.params.id.trim();
         let hash = id;
-        if (/^\d+$/.test(id)) hash = await globalApi.rpc.chain.getBlockHash(parseInt(id));
-        const signedBlock = await globalApi.rpc.chain.getBlock(hash);
+        if (/^\d+$/.test(id)) hash = await getBlockHashCached(parseInt(id));
+        const signedBlock = await getBlockCached(hash);
         if (!signedBlock) return res.status(404).json({ error: "Block not found" });
 
         const timestamp = getBlockTimestamp(signedBlock);
@@ -1357,11 +1494,11 @@ async function findExtrinsicInBlock(blockNumberOrHash, txHash) {
     let blockHash = blockNumberOrHash;
     if (/^\d+$/.test(String(blockNumberOrHash))) {
         try {
-            blockHash = await globalApi.rpc.chain.getBlockHash(parseInt(blockNumberOrHash, 10));
+            blockHash = await getBlockHashCached(parseInt(blockNumberOrHash, 10));
         } catch (_e) { return null; }
     }
     let signedBlock;
-    try { signedBlock = await globalApi.rpc.chain.getBlock(blockHash); }
+    try { signedBlock = await getBlockCached(blockHash); }
     catch (_e) { return null; }
     if (!signedBlock) return null;
     const extrinsics = signedBlock.block.extrinsics || [];
@@ -1588,7 +1725,7 @@ app.get('/api/search/:query', async (req, res) => {
     if (!requireRpc(res)) return;
     try {
         if (/^\d+$/.test(q)) {
-            const hash = await globalApi.rpc.chain.getBlockHash(parseInt(q));
+            const hash = await getBlockHashCached(parseInt(q));
             if (hash && !hash.isEmpty) {
                 const derivedBlock = await globalApi.derive.chain.getBlock(hash);
                 if (derivedBlock) return res.json({ type: 'block', data: { number: parseInt(q), hash: hash.toHex(), authorAddress: derivedBlock.author ? derivedBlock.author.toString() : "System", extrinsicsCount: derivedBlock.block.extrinsics.length, eventsCount: derivedBlock.events ? derivedBlock.events.length : 0 } });
@@ -2859,7 +2996,7 @@ function govStr(x) {
 // happen on the rare blocks that matter.
 async function scanBlockForGovernance(blockNumber, collectiveName) {
     try {
-        const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+        const blockHash = await getBlockHashCached(blockNumber);
         // Decode with the block's OWN runtime metadata — see getEventsAtBlock.
         const events = await getEventsAtBlock(blockHash);
         if (!events) return null;
@@ -3182,7 +3319,7 @@ async function syncDemocracy() {
                 // Recover the final tally from historical state (archive nodes only).
                 if (!tallyKnown) {
                     try {
-                        const histHash = await globalApi.rpc.chain.getBlockHash(Math.max(endBlock - 1, 0));
+                        const histHash = await getBlockHashCached(Math.max(endBlock - 1, 0));
                         const histInfo = await dem.referendumInfoOf.at(histHash, i);
                         if (histInfo && histInfo.isSome && histInfo.unwrap().isOngoing) {
                             const hs = histInfo.unwrap().asOngoing;
@@ -3306,7 +3443,7 @@ let isSyncingChain = false;
 // for db.insertBlocks / db.insertEvents. Throws on RPC failure so the caller
 // can decide whether to mark as a gap.
 async function scanSingleBlock(blockNumber) {
-    const hash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+    const hash = await getBlockHashCached(blockNumber);
     const derived = await globalApi.derive.chain.getBlock(hash);
     if (!derived) return null;
     const blockHash = derived.block.header.hash.toHex();
@@ -3568,7 +3705,7 @@ async function syncEvents() {
 
         while (blocksSearched < 50) {
             try {
-                const signedBlock = await globalApi.rpc.chain.getBlock(currentHash);
+                const signedBlock = await getBlockCached(currentHash);
                 // Block-bound metadata — events from this historical block
                 // need its own runtime to decode (see getEventsAtBlock).
                 const allEvents = await getEventsAtBlock(currentHash);
@@ -3707,7 +3844,7 @@ function extractPayoutInfo(extrinsic) {
 // row so the attempts counter that recordScanFailure just bumped sticks).
 async function scanBlockForRewards(blockNumber) {
     try {
-        const blockHash = await globalApi.rpc.chain.getBlockHash(blockNumber);
+        const blockHash = await getBlockHashCached(blockNumber);
         // Use the block's OWN runtime metadata for decoding — see getEventsAtBlock
         // for why. A null return means the block's events can't be decoded
         // even with historical metadata (typically because the archive node
@@ -3729,7 +3866,7 @@ async function scanBlockForRewards(blockNumber) {
         // Only fetch the full block (for era/validator context) when the block
         // actually contains payouts — most blocks do not.
         const [signedBlock, timestamp] = await Promise.all([
-            globalApi.rpc.chain.getBlock(blockHash),
+            getBlockCached(blockHash),
             getBlockTimestampAt(blockHash)
         ]);
         const blockHashHex = blockHash.toHex();
@@ -3996,6 +4133,11 @@ async function syncStakingRewards() {
 // every RECONNECT — a transient WS drop on the indexer worker would
 // otherwise wait up to one interval tick before catching up.
 async function connectRpc({ kickSyncsOnConnect = true } = {}) {
+    // Wipe cached chain reads. Their values are polkadot.js codec objects
+    // bound to the registry/types of the api instance we're about to
+    // (re)create — keeping them across a rebuild would risk type-mismatch
+    // errors on decode. Identity cache is a plain string map and survives.
+    clearRpcCaches();
     const wsProvider = new WsProvider(RPC_ENDPOINTS.length > 1 ? RPC_ENDPOINTS : RPC_ENDPOINTS[0], RPC_AUTO_RECONNECT_MS);
     wsProvider.on('connected', () => {
         rpcConnected = true;
