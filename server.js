@@ -99,6 +99,39 @@ import * as db from './db.js';
     console.debug = stamp('DEBUG', native.debug);
 })();
 
+// ─── Sync-error dedupe ─────────────────────────────────────────────────────
+// When the chain RPC is dead for a long time, every sync tick (and there are
+// many) emits the same multi-line "WebSocket is not connected" stack. Over
+// hours that's thousands of identical error blocks crowding out everything
+// else. logSyncError() collapses repeats: it logs the FIRST occurrence of a
+// given (label,message) pair immediately, then suppresses further identical
+// occurrences within SYNC_ERROR_DEDUP_WINDOW_MS, and emits a single rollup
+// "×N in the last Mm" line on the next non-suppressed log.
+const SYNC_ERROR_DEDUP_WINDOW_MS = 5 * 60 * 1000;
+const syncErrorSeen = new Map(); // key: "label:message" -> { firstAt, lastAt, count }
+
+function logSyncError(label, err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    const key = `${label}:${msg}`;
+    const now = Date.now();
+    const prev = syncErrorSeen.get(key);
+    if (prev && (now - prev.lastAt) < SYNC_ERROR_DEDUP_WINDOW_MS) {
+        // Within dedup window — suppress but bump the count.
+        prev.count++;
+        prev.lastAt = now;
+        return;
+    }
+    // Either first occurrence or window expired. If there were suppressed
+    // copies during the previous window, emit one rollup before resetting.
+    if (prev && prev.count > 1) {
+        const dur = Math.round((prev.lastAt - prev.firstAt) / 1000);
+        console.error(`${label} error: ${msg} (×${prev.count} over ${dur}s)`);
+    } else {
+        console.error(`${label} error: ${msg}`);
+    }
+    syncErrorSeen.set(key, { firstAt: now, lastAt: now, count: 1 });
+}
+
 const app = express();
 // Restrict CORS to known origins instead of the default wildcard. Same-origin
 // requests (no Origin header) are always allowed. Override the list via
@@ -247,6 +280,24 @@ const TREASURY_ACCOUNT = process.env.TREASURY_ACCOUNT || 'esoEt6uZ9vs23yW8aqTACL
 const RPC_ENDPOINTS = (process.env.POLKADEX_WS || 'wss://so.polkadex.ee')
     .split(',').map(s => s.trim()).filter(Boolean);
 const RPC_AUTO_RECONNECT_MS = readPositiveInteger(process.env.POLKADEX_WS_RECONNECT_MS, 2500);
+
+// RPC resilience watchdog thresholds. WsProvider auto-reconnects every
+// RPC_AUTO_RECONNECT_MS but in extreme outages (chain RPC down for hours)
+// the ApiPromise object on top can land in a half-reconnected state where
+// the underlying WS comes back up but the api keeps reporting disconnected.
+// We work around this in layers:
+//
+//   * RPC_RESET_AFTER_MS — after this much continuous disconnect, tear down
+//     globalApi and call connectRpc() fresh. This forces polkadot.js to
+//     re-handshake metadata + types, which is usually enough.
+//   * RPC_EXIT_AFTER_MS — if even an api rebuild doesn't restore service,
+//     exit so Docker (restart=unless-stopped) brings up a fresh container.
+//     Last-resort backstop; should rarely fire in practice.
+//
+// Operators can disable either by setting the env to a very large value.
+const RPC_RESET_AFTER_MS = readPositiveInteger(process.env.RPC_RESET_AFTER_MS, 5 * 60 * 1000);
+const RPC_EXIT_AFTER_MS  = readPositiveInteger(process.env.RPC_EXIT_AFTER_MS,  30 * 60 * 1000);
+const RPC_WATCHDOG_INTERVAL_MS = readPositiveInteger(process.env.RPC_WATCHDOG_INTERVAL_MS, 30 * 1000);
 let rpcConnected = false;
 
 // True only when both the `WsProvider` thinks it's connected *and* the
@@ -300,6 +351,14 @@ let isSyncingGovernance = false;
 const computingUnclaimed = new Set();
 let isCrawlingAccount = {};
 let globalApi = null;
+
+// Watchdog state. rpcDisconnectStartedAt is set when we first observe a
+// disconnect and cleared on a successful reconnect; the watchdog interval
+// reads it to decide when to escalate (rebuild api -> exit process).
+// rpcResetInFlight prevents concurrent reset attempts when the watchdog tick
+// overlaps with a slow reconnect.
+let rpcDisconnectStartedAt = null;
+let rpcResetInFlight = false;
 let chainSS58 = 88; // Polkadex SS58 prefix; refreshed from the chain registry on connect.
 const identityCache = new Map();
 
@@ -2484,7 +2543,9 @@ app.get('/api/wallet/:address', async (req, res) => {
 
 // --- BACKGROUND CRAWLERS ---
 async function syncTreasury() {
-    if (!globalApi || isSyncingTreasury) return;
+    // isRpcReady() also covers !globalApi, plus catches the half-reconnected
+    // case where globalApi exists but the WsProvider has dropped.
+    if (!isRpcReady() || isSyncingTreasury) return;
     isSyncingTreasury = true;
     try {
         if (!globalApi.query.treasury) {
@@ -2589,7 +2650,7 @@ async function syncTreasury() {
         }
         db.setSyncState('treasury', { lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
-        console.error('Error syncing treasury:', err.message);
+        logSyncError('Treasury sync', err);
         db.setSyncState('treasury', { lastSync: Date.now(), status: 'Error' });
     } finally {
         isSyncingTreasury = false;
@@ -2597,7 +2658,9 @@ async function syncTreasury() {
 }
 
 async function syncCouncil() {
-    if (!globalApi || isSyncingCouncil) return;
+    // isRpcReady() also covers !globalApi, plus catches the half-reconnected
+    // case where globalApi exists but the WsProvider has dropped.
+    if (!isRpcReady() || isSyncingCouncil) return;
     isSyncingCouncil = true;
     try {
         // The elections-phragmen pallet is registered under different names
@@ -2756,7 +2819,7 @@ async function syncCouncil() {
             });
         }
     } catch (err) {
-        console.error('Council sync error:', err);
+        logSyncError('Council sync', err);
     } finally {
         isSyncingCouncil = false;
     }
@@ -3020,7 +3083,7 @@ async function syncGovernance() {
         });
         console.log(`Governance indexer: blocks ${oldestScannedBlock}-${latestScannedBlock}, ${db.countTreasuryProposals()} treasury proposals, ${db.countCouncilMotions()} motions, backfill ${backfillComplete ? 'complete' : 'in progress'}.`);
     } catch (err) {
-        console.error('Governance sync error:', err.message);
+        logSyncError('Governance sync', err);
         db.setSyncState('governance', { ...db.getSyncState('governance'), status: 'Error', error: err.message });
         noteSyncError('governance');
     } finally {
@@ -3148,7 +3211,7 @@ async function syncDemocracy() {
         db.setSyncState('democracy', { lastSync: Date.now(), status: 'Synced' });
         console.log(`Democracy indexer: ${referendumCount} referenda, ${publicProposals.length} active proposals.`);
     } catch (err) {
-        console.error('Democracy sync error:', err);
+        logSyncError('Democracy sync', err);
         db.setSyncState('democracy', { ...db.getSyncState('democracy'), status: 'Error', error: err.message });
     } finally {
         isSyncingDemocracy = false;
@@ -3180,7 +3243,7 @@ async function syncData() {
         await syncValidatorHistory(activeEra, validators);
         db.replaceValidators(validatorData, { totalCount: validators.length, lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
-        console.error("Validator sync error:", err);
+        logSyncError('Validator sync', err);
         db.setSyncState('validators', { ...db.getSyncState('validators'), status: 'Error', error: err.message });
     } finally { isSyncing = false; }
 }
@@ -3205,7 +3268,7 @@ async function syncHolders() {
         }
         db.replaceHolders(holderData, { totalCount: entries.length, lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
-        console.error("Holder sync error:", err);
+        logSyncError('Holder sync', err);
         db.setSyncState('holders', { ...db.getSyncState('holders'), status: 'Error', error: err.message });
     } finally { isSyncingHolders = false; }
 }
@@ -3385,7 +3448,7 @@ async function syncChainIndex() {
             console.log(`[chain-index] head=${head} indexed=${oldestScannedBlock}-${latestScannedBlock} (${db.countBlocks()} blocks), backfill=${backfillComplete ? 'complete' : 'in progress'}, known gaps=${gaps.length}`);
         }
     } catch (err) {
-        console.error('Chain index sync error:', err && err.message ? err.message : err);
+        logSyncError('Chain index sync', err);
         db.setSyncState('chain_index', { ...db.getSyncState('chain_index'), status: 'Error', error: err && err.message ? err.message : String(err) });
         noteSyncError('chain_index');
     } finally {
@@ -3420,7 +3483,7 @@ async function syncBlocks() {
         db.insertBlocks(newBlocks);
         db.setSyncState('blocks', { lastSync: Date.now(), status: 'Synced' });
     } catch (err) {
-        console.error("Block sync error:", err);
+        logSyncError('Block sync', err);
         db.setSyncState('blocks', { ...db.getSyncState('blocks'), status: 'Error', error: err.message });
     } finally { isSyncingBlocks = false; }
 }
@@ -3936,10 +3999,20 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
     const wsProvider = new WsProvider(RPC_ENDPOINTS.length > 1 ? RPC_ENDPOINTS : RPC_ENDPOINTS[0], RPC_AUTO_RECONNECT_MS);
     wsProvider.on('connected', () => {
         rpcConnected = true;
-        console.log('[RPC] connected to Polkadex node');
+        // Note in the log how long the outage was, if any. Useful in postmortem.
+        if (rpcDisconnectStartedAt) {
+            const outageSec = Math.round((Date.now() - rpcDisconnectStartedAt) / 1000);
+            console.log(`[RPC] connected to Polkadex node (after ${outageSec}s outage)`);
+        } else {
+            console.log('[RPC] connected to Polkadex node');
+        }
+        rpcDisconnectStartedAt = null;
     });
     wsProvider.on('disconnected', () => {
         rpcConnected = false;
+        // Stamp the moment we first noticed disconnect. Watchdog reads this.
+        // Don't overwrite if already stamped — we want continuous-disconnect duration.
+        if (!rpcDisconnectStartedAt) rpcDisconnectStartedAt = Date.now();
         console.warn('[RPC] disconnected — auto-reconnect every ' + RPC_AUTO_RECONNECT_MS + ' ms');
     });
     wsProvider.on('error', (err) => {
@@ -3958,10 +4031,24 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
     // ApiPromise also emits these on top of WsProvider — useful when a single
     // request times out and the api lib decides to flag itself disconnected
     // before the underlying socket closes.
-    globalApi.on('disconnected', () => { rpcConnected = false; console.warn('[RPC] api disconnected'); });
-    globalApi.on('connected',    () => { rpcConnected = true;  console.log('[RPC] api connected'); });
+    globalApi.on('disconnected', () => {
+        rpcConnected = false;
+        if (!rpcDisconnectStartedAt) rpcDisconnectStartedAt = Date.now();
+        console.warn('[RPC] api disconnected');
+    });
+    globalApi.on('connected', () => {
+        rpcConnected = true;
+        if (rpcDisconnectStartedAt) {
+            const outageSec = Math.round((Date.now() - rpcDisconnectStartedAt) / 1000);
+            console.log(`[RPC] api connected (after ${outageSec}s outage)`);
+            rpcDisconnectStartedAt = null;
+        } else {
+            console.log('[RPC] api connected');
+        }
+    });
     globalApi.on('error',        (err) => { console.warn('[RPC] api error:', err && err.message ? err.message : err); });
     rpcConnected = globalApi.isConnected;
+    if (rpcConnected) rpcDisconnectStartedAt = null;
     console.log('Connected to Polkadex RPC at ' + RPC_ENDPOINTS.join(', '));
     if (globalApi.registry && globalApi.registry.chainSS58 != null) {
         chainSS58 = globalApi.registry.chainSS58;
@@ -3980,6 +4067,60 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
         syncStakingRewards(); syncCouncil(); syncTreasury(); syncDemocracy(); syncGovernance();
         refreshNetworkInfoInBackground();
         refreshTotalUnlockingInBackground();
+    }
+}
+
+// Resilience watchdog. Runs every RPC_WATCHDOG_INTERVAL_MS (default 30s) and
+// checks rpcDisconnectStartedAt. Two escalation steps:
+//
+//   1. > RPC_RESET_AFTER_MS (default 5 min): the WsProvider's built-in retry
+//      isn't getting us back. Tear down globalApi and call connectRpc() fresh,
+//      which forces polkadot.js to discard any stale subscription handles,
+//      cached metadata refs, etc., and re-establish from a clean slate.
+//
+//   2. > RPC_EXIT_AFTER_MS (default 30 min): even rebuilding the api hasn't
+//      restored service. Exit the process; the Docker `restart: unless-stopped`
+//      policy will spin up a fresh container. Last-resort backstop that should
+//      essentially never fire — but when it does, it ensures the explorer
+//      doesn't sit silently broken for hours waiting for human intervention.
+//
+// Both thresholds are env-tunable. To disable a layer entirely, set its value
+// very high (e.g. RPC_EXIT_AFTER_MS=86400000 for 24h).
+async function rpcWatchdog() {
+    if (!rpcDisconnectStartedAt) return;
+    if (rpcResetInFlight) return; // a previous reset attempt is still running
+    const outageMs = Date.now() - rpcDisconnectStartedAt;
+    const outageMin = Math.round(outageMs / 60000);
+
+    if (outageMs >= RPC_EXIT_AFTER_MS) {
+        console.error(`[RPC-WATCHDOG] disconnected for ${outageMin} min, exceeds RPC_EXIT_AFTER_MS — exiting so Docker restarts the container`);
+        // Flush logs synchronously before exiting. process.exit doesn't wait
+        // for stdout flush by default.
+        process.stderr.write('', () => process.exit(1));
+        // Belt-and-braces: if write callback never fires (shouldn't happen),
+        // exit anyway after a short delay.
+        setTimeout(() => process.exit(1), 500);
+        return;
+    }
+
+    if (outageMs >= RPC_RESET_AFTER_MS) {
+        console.warn(`[RPC-WATCHDOG] disconnected for ${outageMin} min, exceeds RPC_RESET_AFTER_MS — rebuilding ApiPromise from scratch`);
+        rpcResetInFlight = true;
+        try {
+            if (globalApi) {
+                try { await globalApi.disconnect(); } catch (e) { /* best effort */ }
+                globalApi = null;
+            }
+            // kickSyncsOnConnect=false because this worker may be HTTP-only;
+            // the on-reconnect handlers inside connectRpc still log success.
+            // For the indexer worker, the sync loops' next regular ticks will
+            // catch the restored connection within at most one interval.
+            await connectRpc({ kickSyncsOnConnect: false });
+        } catch (e) {
+            console.warn('[RPC-WATCHDOG] rebuild attempt failed:', e && e.message ? e.message : e);
+        } finally {
+            rpcResetInFlight = false;
+        }
     }
 }
 
@@ -4022,6 +4163,12 @@ function runWorker({ indexer }) {
         const wid = cluster.worker ? `worker ${cluster.worker.id}` : 'standalone';
         console.log(`Backend listening on port ${PORT} (${wid}, role=${tag})`);
     });
+
+    // RPC resilience watchdog. Runs in every worker (not just the indexer) so
+    // HTTP-only workers also recover their detail-endpoint RPC access after a
+    // long upstream outage. Each worker's WsProvider is independent, so they
+    // each maintain their own rpcDisconnectStartedAt and escalate separately.
+    setInterval(rpcWatchdog, RPC_WATCHDOG_INTERVAL_MS);
 
     if (indexer) startIndexerLoops();
 }
