@@ -759,6 +759,10 @@
                         <div><span>Active bond</span><strong id="unstake-active">--</strong></div>
                         <div><span>Already unbonding</span><strong id="unstake-unlocking">--</strong></div>
                         <div><span>Unbonding period</span><strong id="unstake-period">--</strong></div>
+                        <!-- Network minimum bond. If a partial unbond would leave LESS than this
+                             amount still bonded, the chain rejects it. Display it so users see the
+                             constraint before they type a value that lands in the dead zone. -->
+                        <div><span>Network minimum bond</span><strong id="unstake-min-bond">--</strong></div>
                     </div>
 
                     <label class="stake-label">Amount to unbond (PDEX)</label>

@@ -6473,6 +6473,15 @@ function openUnstakeModal() {
     document.getElementById('unstake-active').textContent = stakingFormatPDEX(s.activeStaked) + ' PDEX';
     document.getElementById('unstake-unlocking').textContent = stakingFormatPDEX(s.unlocking) + ' PDEX';
     document.getElementById('unstake-period').textContent = formatDuration(data.network && data.network.unbondingMs);
+    // Surface the network's minNominatorBond constraint so users see why a
+    // "leave a sliver bonded" amount won't be accepted. The chain rejects
+    // any partial unbond that would leave a non-zero residue below this
+    // threshold; the Max button is the safest way to unbond everything.
+    const minBond = Number((data.network && data.network.minStake) || 0);
+    const minBondEl = document.getElementById('unstake-min-bond');
+    if (minBondEl) minBondEl.textContent = minBond > 0
+        ? stakingFormatPDEX(minBond) + ' PDEX'
+        : '—';
     document.getElementById('unstake-modal').style.display = 'flex';
 }
 
@@ -6489,6 +6498,29 @@ async function submitUnstakeTx() {
     const active = Number((data.staking && data.staking.activeStaked) || 0);
     if (active <= 0) return fail('You have no active bonded stake to unbond.');
     if (amt > active) return fail(`Amount exceeds your active bonded stake (${stakingFormatPDEX(active)} PDEX).`);
+
+    // Guard against the "leave a sliver bonded" failure mode. The runtime
+    // requires the post-unbond residue to be either zero (full unbond, which
+    // implicitly chills the nomination) or at least minNominatorBond. Anything
+    // in between gets rejected — and on some runtime versions the rejection
+    // surfaces as a WASM trap rather than a clean InvalidTransaction error,
+    // which looks scary to users. Catching it here gives them a one-sentence
+    // fix instead of a stack trace.
+    //
+    // Use a small floating-point tolerance for the "full unbond" comparison
+    // because parseFloat("165.1328") may round-trip to 165.13279999... etc.
+    const minBond = Number((data.network && data.network.minStake) || 0);
+    const remaining = active - amt;
+    const fullUnbondTolerance = 1e-9;
+    if (minBond > 0 && remaining > fullUnbondTolerance && remaining < minBond) {
+        return fail(
+            `That amount would leave only ${stakingFormatPDEX(remaining)} PDEX bonded — ` +
+            `below the network minimum of ${stakingFormatPDEX(minBond)} PDEX. ` +
+            `Click Max to unbond everything (${stakingFormatPDEX(active)} PDEX), ` +
+            `or enter a smaller amount so that at least ${stakingFormatPDEX(minBond)} PDEX stays bonded.`
+        );
+    }
+
     await submitSignedTx({
         buildTx: (api) => api.tx.staking.unbond(pdexToPlanck(amtStr)),
         label: 'Unstake',

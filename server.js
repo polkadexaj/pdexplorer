@@ -369,6 +369,21 @@ let rpcResetInFlight = false;
 // has advanced for CHAIN_HEAD_STALE_MS.
 const CHAIN_HEAD_STALE_MS = readPositiveInteger(process.env.CHAIN_HEAD_STALE_MS, 5 * 60 * 1000);
 const CHAIN_HEAD_WATCHDOG_INTERVAL_MS = readPositiveInteger(process.env.CHAIN_HEAD_WATCHDOG_INTERVAL_MS, 60 * 1000);
+
+// ─── SubQuery indexer integration ──────────────────────────────────────────
+// Optional secondary read path. The /api/diag/subquery-lag endpoint queries
+// the indexer's GraphQL `_metadata` to report how many blocks behind chain
+// head it is. The healthy threshold is what later integration code will
+// also use to decide "trust the indexer's data or fall back to SQLite".
+//
+//   SUBQUERY_ENDPOINT       — GraphQL URL. Empty string disables the feature.
+//   SUBQUERY_TIMEOUT_MS     — abort any request taking longer than this.
+//   SUBQUERY_MAX_LAG_BLOCKS — above this lag, the indexer is unhealthy.
+//   POLKADEX_BLOCK_TIME_MS  — block time used to translate lag into seconds.
+const SUBQUERY_ENDPOINT       = (process.env.SUBQUERY_ENDPOINT || 'https://indexer.polkadex.ee/').trim();
+const SUBQUERY_TIMEOUT_MS     = readPositiveInteger(process.env.SUBQUERY_TIMEOUT_MS, 1500);
+const SUBQUERY_MAX_LAG_BLOCKS = readPositiveInteger(process.env.SUBQUERY_MAX_LAG_BLOCKS, 200);
+const POLKADEX_BLOCK_TIME_MS  = readPositiveInteger(process.env.POLKADEX_BLOCK_TIME_MS, 12000);
 let lastHeadValue = 0;
 let lastHeadAdvanceAt = Date.now();
 let chainStaleSince = null;            // timestamp when head first went stale
@@ -1397,6 +1412,81 @@ app.get('/api/diag/rpc-cache', (req, res) => {
         blockHash: blockHashCache.stats(),
         eventsAt:  eventsAtCache.stats()
     });
+});
+
+// SubQuery indexer lag check. Queries the indexer's GraphQL `_metadatas`
+// entity to read lastProcessedHeight vs targetHeight and reports how many
+// blocks behind the indexer is. The `healthy` flag is what future integration
+// code will gate on — when the indexer is too far behind, the explorer
+// should skip it and fall through to SQLite.
+//
+// The fetch is timed out via AbortController so a hung indexer doesn't pin
+// HTTP workers. 503 on any error — the indexer being unreachable IS an
+// unhealthy state worth surfacing to the caller, not a transparent passthrough.
+async function fetchSubqueryMetadata() {
+    if (!SUBQUERY_ENDPOINT) throw new Error('SUBQUERY_ENDPOINT not configured');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SUBQUERY_TIMEOUT_MS);
+    try {
+        const r = await fetch(SUBQUERY_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query: '{ _metadatas { nodes { lastProcessedHeight targetHeight chain genesisHash specName } } }'
+            }),
+            signal: controller.signal
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+        const json = await r.json();
+        const node = json && json.data && json.data._metadatas
+            && Array.isArray(json.data._metadatas.nodes) && json.data._metadatas.nodes[0];
+        if (!node) throw new Error('SubQuery returned no _metadata');
+        return {
+            lastProcessedHeight: Number(node.lastProcessedHeight) || 0,
+            targetHeight: Number(node.targetHeight) || 0,
+            chain: node.chain || null,
+            genesisHash: node.genesisHash || null,
+            specName: node.specName || null
+        };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+app.get('/api/diag/subquery-lag', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const startMs = Date.now();
+    try {
+        const meta = await fetchSubqueryMetadata();
+        const lagBlocks = Math.max(0, meta.targetHeight - meta.lastProcessedHeight);
+        const lagSeconds = Math.round(lagBlocks * POLKADEX_BLOCK_TIME_MS / 1000);
+        const lagMinutes = Math.round(lagSeconds / 60);
+        const healthy = lagBlocks <= SUBQUERY_MAX_LAG_BLOCKS;
+        res.json({
+            endpoint: SUBQUERY_ENDPOINT,
+            chain: meta.chain,
+            specName: meta.specName,
+            genesisHash: meta.genesisHash,
+            lastProcessedHeight: meta.lastProcessedHeight,
+            targetHeight: meta.targetHeight,
+            lagBlocks,
+            lagSeconds,
+            lagMinutes,
+            lagHours: Math.round(lagMinutes / 60 * 10) / 10,
+            healthThresholdBlocks: SUBQUERY_MAX_LAG_BLOCKS,
+            healthy,
+            latencyMs: Date.now() - startMs
+        });
+    } catch (err) {
+        res.status(503).json({
+            endpoint: SUBQUERY_ENDPOINT,
+            healthy: false,
+            error: err && err.name === 'AbortError'
+                ? `timed out after ${SUBQUERY_TIMEOUT_MS}ms`
+                : (err && err.message ? err.message : String(err)),
+            latencyMs: Date.now() - startMs
+        });
+    }
 });
 
 // --- LIST ENDPOINTS (served from SQLite) ---
