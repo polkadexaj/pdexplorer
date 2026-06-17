@@ -359,6 +359,20 @@ let globalApi = null;
 // overlaps with a slow reconnect.
 let rpcDisconnectStartedAt = null;
 let rpcResetInFlight = false;
+
+// Chain-head freshness tracking. A separate failure mode from "WS dropped":
+// the WebSocket stays connected but the upstream node stops advancing the
+// chain head (peer loss, clock skew rejecting incoming blocks, runtime
+// upgrade pause, etc.). The disconnect watchdog can't see this because the
+// WsProvider is happy. recordChainHead() is called every time syncChainIndex
+// observes a head, and the chainHeadWatchdog interval escalates when nothing
+// has advanced for CHAIN_HEAD_STALE_MS.
+const CHAIN_HEAD_STALE_MS = readPositiveInteger(process.env.CHAIN_HEAD_STALE_MS, 5 * 60 * 1000);
+const CHAIN_HEAD_WATCHDOG_INTERVAL_MS = readPositiveInteger(process.env.CHAIN_HEAD_WATCHDOG_INTERVAL_MS, 60 * 1000);
+let lastHeadValue = 0;
+let lastHeadAdvanceAt = Date.now();
+let chainStaleSince = null;            // timestamp when head first went stale
+let chainStaleRebuildAttempted = false;
 let chainSS58 = 88; // Polkadex SS58 prefix; refreshed from the chain registry on connect.
 const identityCache = new Map();
 
@@ -702,6 +716,15 @@ async function getIdentity(api, address) {
     const hasOverride = DISPLAY_NAME_OVERRIDES.has(cacheKey);
     if (!hasOverride && identityCache.has(cacheKey)) return identityCache.get(cacheKey);
 
+    // If the api is currently unusable (in flight during a reconnect, for
+    // example), return Unknown to the caller WITHOUT writing it to the cache.
+    // Otherwise a brief reconnect window would poison the cache with false-
+    // negative "Unknown" entries for addresses that DO have on-chain
+    // identities, and we'd never look them up again.
+    if (!api || !api.query || !api.query.identity) {
+        return DISPLAY_NAME_OVERRIDES.get(cacheKey) || "Unknown";
+    }
+
     const onChainName = await getOnChainIdentity(api, address);
     if (onChainName !== "Unknown") {
         identityCache.set(cacheKey, onChainName);
@@ -716,6 +739,11 @@ async function getIdentity(api, address) {
 async function getOnChainIdentity(api, address) {
     const cacheKey = address.toString();
     let name = "Unknown";
+    // Defensive null-check: the watchdog briefly nulls globalApi between
+    // disconnect and reconnect, and identity lookups can be in flight from
+    // any of the HTTP handlers. Catching this here keeps the reconnect
+    // window silent in logs and returns "Unknown" without falsely caching it.
+    if (!api || !api.query || !api.query.identity) return name;
     try {
         const superOf = await api.query.identity.superOf(address);
         if (superOf.isSome) {
@@ -1379,8 +1407,26 @@ app.get('/api/validators', (req, res) => {
 app.get('/api/network-info', async (req, res) => {
     try {
         const data = await getNetworkInfo();
+        // Attach chain-head freshness state. The indexer worker writes
+        // chain_head_state to SQLite as it polls the chain; every worker
+        // (including HTTP-only ones) reads from there so the frontend can
+        // render a "chain may be stalled" banner uniformly.
+        const headState = db.getKv('chain_head_state') || null;
+        const lastAdvanceAt = headState ? Number(headState.lastAdvanceAt) || 0 : 0;
+        const sinceAdvance = lastAdvanceAt ? Date.now() - lastAdvanceAt : null;
+        const isStale = lastAdvanceAt
+            ? (Date.now() - lastAdvanceAt) > CHAIN_HEAD_STALE_MS
+            : false; // never-recorded state isn't stale — it's just "unknown"
         cacheMedium(res);
-        res.json(data);
+        res.json({
+            ...data,
+            chainHead: {
+                value: headState ? headState.value : null,
+                lastAdvanceAt,
+                staleSeconds: sinceAdvance != null ? Math.round(sinceAdvance / 1000) : null,
+                isStale
+            }
+        });
     } catch (err) {
         // Note: no cache header on the error fallback — Cloudflare must not
         // pin "Error" status. Browsers retry naturally on the next interval.
@@ -3525,6 +3571,9 @@ async function syncChainIndex() {
     try {
         const state = db.getSyncState('chain_index');
         const head = (await globalApi.rpc.chain.getHeader()).number.toNumber();
+        // Feed the freshness watchdog. recordChainHead is a no-op when head
+        // didn't advance, so calling it on every tick is cheap.
+        recordChainHead(head);
         let initialized = !!state.initialized;
         let latestScannedBlock = Number(state.latestScannedBlock) || 0;
         let oldestScannedBlock = Number(state.oldestScannedBlock) || 0;
@@ -4212,6 +4261,78 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
     }
 }
 
+// Called by syncChainIndex whenever it observes the chain's latest head. The
+// number-only comparison lets us treat any advance — even by one block — as
+// proof the upstream is alive. Recording it from one canonical site keeps
+// the dataflow simple: we don't have to instrument every getHeader() call.
+function recordChainHead(headNum) {
+    if (!Number.isFinite(headNum)) return;
+    if (headNum > lastHeadValue) {
+        lastHeadValue = headNum;
+        lastHeadAdvanceAt = Date.now();
+        // Persist to shared SQLite so HTTP-only workers can read freshness
+        // state in /api/network-info. Only the indexer worker writes here;
+        // every worker reads. The kv has very low write rate (once per new
+        // block ≈ every 12s) so this is essentially free.
+        try {
+            db.setKv('chain_head_state', {
+                value: headNum,
+                lastAdvanceAt: lastHeadAdvanceAt
+            });
+        } catch (e) { /* best effort — never block the indexer on a kv write */ }
+        // Clear stale state if we were previously stuck.
+        if (chainStaleSince) {
+            const dur = Math.round((Date.now() - chainStaleSince) / 1000);
+            console.log(`[CHAIN-WATCHDOG] head advanced to #${headNum} — resuming normal operation (was stale for ${dur}s)`);
+            chainStaleSince = null;
+            chainStaleRebuildAttempted = false;
+        }
+    }
+}
+
+// Chain-head freshness watchdog. Catches the silent-stall failure mode where
+// the WS stays connected but the upstream node stops producing/accepting
+// blocks. Triggers one api rebuild attempt in case the stall is really a
+// stuck polkadot.js api; after that, just logs periodically and leaves the
+// existing 30-min process.exit backstop as the ultimate fallback.
+//
+// The api-rebuild attempt is fired exactly once per stale episode (gated by
+// chainStaleRebuildAttempted). If the chain is genuinely paused (e.g., a
+// long runtime upgrade), looping rebuilds would just thrash without helping.
+async function chainHeadWatchdog() {
+    // Skip if the connection-level watchdog already has a different problem
+    // in flight — no point stacking interventions.
+    if (rpcDisconnectStartedAt || rpcResetInFlight) return;
+    if (!isRpcReady()) return;
+
+    const sinceAdvance = Date.now() - lastHeadAdvanceAt;
+    if (sinceAdvance < CHAIN_HEAD_STALE_MS) return;
+
+    // Head is stale.
+    if (!chainStaleSince) {
+        chainStaleSince = Date.now();
+        console.warn(`[CHAIN-WATCHDOG] chain head #${lastHeadValue} hasn't advanced in ${Math.round(sinceAdvance / 60000)} min — upstream node may have stalled`);
+    }
+
+    // One-shot api rebuild attempt per stale episode.
+    if (!chainStaleRebuildAttempted) {
+        chainStaleRebuildAttempted = true;
+        console.warn(`[CHAIN-WATCHDOG] forcing api rebuild in case the api itself is stuck`);
+        rpcResetInFlight = true;
+        try {
+            if (globalApi) {
+                try { await globalApi.disconnect(); } catch (_) {}
+                globalApi = null;
+            }
+            await connectRpc({ kickSyncsOnConnect: false });
+        } catch (e) {
+            console.warn('[CHAIN-WATCHDOG] rebuild attempt failed:', e && e.message ? e.message : e);
+        } finally {
+            rpcResetInFlight = false;
+        }
+    }
+}
+
 // Resilience watchdog. Runs every RPC_WATCHDOG_INTERVAL_MS (default 30s) and
 // checks rpcDisconnectStartedAt. Two escalation steps:
 //
@@ -4311,6 +4432,13 @@ function runWorker({ indexer }) {
     // long upstream outage. Each worker's WsProvider is independent, so they
     // each maintain their own rpcDisconnectStartedAt and escalate separately.
     setInterval(rpcWatchdog, RPC_WATCHDOG_INTERVAL_MS);
+
+    // Chain-head freshness watchdog. ONLY useful on the indexer worker — it's
+    // the only worker that calls syncChainIndex and therefore the only one
+    // that feeds recordChainHead(). HTTP-only workers never observe head, so
+    // running the watchdog there would falsely fire after CHAIN_HEAD_STALE_MS
+    // every time.
+    if (indexer) setInterval(chainHeadWatchdog, CHAIN_HEAD_WATCHDOG_INTERVAL_MS);
 
     if (indexer) startIndexerLoops();
 }

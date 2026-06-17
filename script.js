@@ -554,6 +554,12 @@ async function fetchNetworkInformation() {
     try {
         const response = await fetch('/api/network-info');
         const data = await response.json();
+        // Chain-head freshness banner. The backend's chain-head watchdog sets
+        // chainHead.isStale=true when no new block has arrived in N minutes,
+        // which usually means the upstream chain RPC has lost peers or
+        // stalled even though it's still accepting WS connections. Surface
+        // it so users aren't silently looking at stale data.
+        renderChainStaleBanner(data.chainHead);
         if (!data.networkInfo) return;
         const info = data.networkInfo;
 
@@ -571,6 +577,56 @@ async function fetchNetworkInformation() {
     } catch (err) {
         console.error("Error fetching network information:", err);
     }
+}
+
+// Sticky banner that warns when the chain head hasn't advanced recently.
+// Mounts on every page (not just home) because the data freshness affects
+// everything the explorer renders — a stale chain means stale validators,
+// stale balances, stale governance state.
+function renderChainStaleBanner(chainHead) {
+    const ID = 'chain-stale-banner';
+    let el = document.getElementById(ID);
+    const stale = chainHead && chainHead.isStale;
+
+    if (!stale) {
+        if (el) el.remove();
+        return;
+    }
+
+    // Build (or update) the banner. Keep it light — one row, amber, dismissible
+    // only via the next non-stale fetch (so a "x" close button would just
+    // come back on the next 30s tick).
+    const minutesStale = chainHead.staleSeconds != null
+        ? Math.max(1, Math.round(chainHead.staleSeconds / 60))
+        : null;
+    const headLabel = chainHead.value != null
+        ? `block #${Number(chainHead.value).toLocaleString('en-US')}`
+        : 'the chain';
+    const detail = minutesStale != null
+        ? `${headLabel} hasn't advanced in ${minutesStale} minute${minutesStale === 1 ? '' : 's'}`
+        : `${headLabel} hasn't advanced in a while`;
+
+    const html = `
+        <div style="display:flex; align-items:center; gap:14px; padding:12px 22px; background: rgba(245, 166, 35, 0.12); border-bottom: 1px solid rgba(245, 166, 35, 0.45); color: #fbeac4; font-size: 0.88rem; line-height: 1.45;">
+            <i class='bx bx-error-circle' style="font-size: 20px; color: #f5a623; flex-shrink: 0;"></i>
+            <div style="flex: 1;">
+                <strong style="color: #fff;">Chain may be stalled:</strong>
+                ${stakingEscapeHtml(detail)}. The data on this page may be out of date until the upstream chain RPC recovers.
+                Indicator clears automatically when blocks resume.
+            </div>
+        </div>`;
+
+    if (el) {
+        el.innerHTML = html;
+        return;
+    }
+    el = document.createElement('div');
+    el.id = ID;
+    el.innerHTML = html;
+    // Insert at the very top of <body> so it sits above the sidebar / topbar
+    // on every page without competing with the storage-notice banner at the
+    // bottom of the viewport.
+    document.body.insertBefore(el, document.body.firstChild);
 }
 
 function subscribeNewBlocks(api) {
