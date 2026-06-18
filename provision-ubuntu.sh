@@ -431,6 +431,98 @@ EOF
 # When the site is fronted by Cloudflare's proxy, only Cloudflare's edge nodes
 # should be able to reach 80/443 on the origin. Direct hits to the VPS IP
 # (bypassing Cloudflare's WAF / rate limits / DDoS protection) get dropped.
+
+# Generate the DOCKER-USER block in /etc/ufw/after.rules from the Cloudflare
+# IP lists. Idempotent — the block is replaced between BEGIN/END markers so
+# repeated calls don't accumulate stale rules. Called from both the cloudflare
+# phase and the periodic refresh script, so it lives at the file-scope here.
+write_docker_user_block() {
+    local v4_file="$1"
+    local v6_file="$2"
+    local after_rules=/etc/ufw/after.rules
+    local marker_begin='# BEGIN cloudflare-docker-user (managed by provision-ubuntu.sh)'
+    local marker_end='# END cloudflare-docker-user'
+
+    # Build the new block into a temp file
+    local tmp_block
+    tmp_block=$(mktemp)
+    {
+        echo "$marker_begin"
+        echo "*filter"
+        echo ":DOCKER-USER - [0:0]"
+        echo "# Allow loopback so containers can talk to host services."
+        echo "-A DOCKER-USER -i lo -j RETURN"
+        echo "# Allow established/related so return packets reach the original sender."
+        echo "-A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+        echo "# Allow inter-container traffic (default Docker bridge network)."
+        echo "-A DOCKER-USER -s 172.16.0.0/12 -j RETURN"
+        echo "# Per-CIDR ACCEPT for Cloudflare-only 80/443 origin access."
+        while IFS= read -r cidr; do
+            [ -z "$cidr" ] && continue
+            echo "-A DOCKER-USER -p tcp -s $cidr -m multiport --dports 80,443 -j RETURN"
+        done < "$v4_file"
+        echo "# Default-drop for any other traffic targeting 80/443 on containers."
+        echo "-A DOCKER-USER -p tcp -m multiport --dports 80,443 -j DROP"
+        echo "# Everything else (other published container ports) passes through."
+        echo "-A DOCKER-USER -j RETURN"
+        echo "COMMIT"
+        echo "$marker_end"
+    } > "$tmp_block"
+
+    # Also build the IPv6 block (separate *filter table for ip6tables).
+    local tmp_block6
+    tmp_block6=$(mktemp)
+    {
+        echo "# BEGIN cloudflare-docker-user-v6 (managed by provision-ubuntu.sh)"
+        echo "*filter"
+        echo ":DOCKER-USER - [0:0]"
+        echo "-A DOCKER-USER -i lo -j RETURN"
+        echo "-A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+        while IFS= read -r cidr; do
+            [ -z "$cidr" ] && continue
+            echo "-A DOCKER-USER -p tcp -s $cidr -m multiport --dports 80,443 -j RETURN"
+        done < "$v6_file"
+        echo "-A DOCKER-USER -p tcp -m multiport --dports 80,443 -j DROP"
+        echo "-A DOCKER-USER -j RETURN"
+        echo "COMMIT"
+        echo "# END cloudflare-docker-user-v6"
+    } > "$tmp_block6"
+
+    # Splice into /etc/ufw/after.rules (v4) and /etc/ufw/after6.rules (v6)
+    splice_managed_block "$after_rules" "$marker_begin" "$marker_end" "$tmp_block"
+    splice_managed_block /etc/ufw/after6.rules \
+        '# BEGIN cloudflare-docker-user-v6 (managed by provision-ubuntu.sh)' \
+        '# END cloudflare-docker-user-v6' "$tmp_block6"
+
+    rm -f "$tmp_block" "$tmp_block6"
+}
+
+# Insert (or replace) a managed block bounded by two marker lines in a file.
+# Appends the block if no existing block is found.
+splice_managed_block() {
+    local target="$1"
+    local marker_begin="$2"
+    local marker_end="$3"
+    local payload="$4"
+
+    [ -f "$target" ] || die "Target file missing: $target"
+
+    if grep -qF "$marker_begin" "$target"; then
+        # Replace the existing block in-place.
+        local tmp
+        tmp=$(mktemp)
+        awk -v b="$marker_begin" -v e="$marker_end" -v f="$payload" '
+            $0 == b { skip=1; while ((getline line < f) > 0) print line; close(f); next }
+            skip && $0 == e { skip=0; next }
+            !skip { print }
+        ' "$target" > "$tmp"
+        mv "$tmp" "$target"
+    else
+        # Append before COMMIT if a *filter section exists, else just append.
+        printf '\n%s\n' "$(cat "$payload")" >> "$target"
+    fi
+}
+
 setup_cloudflare_only() {
     log "Phase 4: Cloudflare-only firewall"
 
@@ -475,13 +567,33 @@ setup_cloudflare_only() {
         ufw allow proto tcp from "$cidr" to any port 443 comment 'Cloudflare proxy v6' >/dev/null
     done < "$cf_dir/ips-v6"
     ufw reload >/dev/null
-    ok "UFW 80/443 now restricted to Cloudflare ranges only"
+    ok "UFW 80/443 now restricted to Cloudflare ranges only (host-bound traffic)"
+
+    # ---- DOCKER-USER chain filtering ----
+    # UFW's `ufw allow ... port 80` rules only filter traffic destined for the
+    # host's INPUT chain. Traffic destined for ports published by Docker
+    # containers (`docker run -p 80:80`) traverses the FORWARD/DOCKER chains
+    # instead, skipping UFW entirely. Without the block below, anyone on the
+    # internet can reach the nginx container directly via the origin IP,
+    # bypassing Cloudflare's WAF, rate limits, and edge cache.
+    #
+    # The DOCKER-USER chain is processed BEFORE DOCKER's DNAT rules — exactly
+    # the right insertion point. We add an explicit ACCEPT for each Cloudflare
+    # CIDR, then a default DROP for 80/443. Loopback and ESTABLISHED traffic
+    # are returned early so internal compose-network traffic is unaffected.
+    #
+    # Lives in /etc/ufw/after.rules so `ufw reload` re-applies it.
+    log "Adding DOCKER-USER chain filter to /etc/ufw/after.rules (closes the Docker-bypass-UFW gap)"
+    write_docker_user_block "$cf_dir/ips-v4" "$cf_dir/ips-v6"
+    ufw reload >/dev/null
+    ok "DOCKER-USER chain now drops non-Cloudflare traffic to 80/443"
 
     log "Installing weekly refresh systemd timer (Cloudflare publishes range changes occasionally)"
     cat >/usr/local/sbin/cloudflare-ufw-refresh <<'EOF'
 #!/usr/bin/env bash
-# Refresh UFW rules with Cloudflare's current IP ranges. Runs weekly via
-# cloudflare-ufw-refresh.timer. Idempotent — no-op when ranges haven't changed.
+# Refresh UFW rules + DOCKER-USER block with Cloudflare's current IP ranges.
+# Runs weekly via cloudflare-ufw-refresh.timer. Idempotent — no-op when ranges
+# haven't changed.
 set -euo pipefail
 cf_dir=/etc/cloudflare
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -497,7 +609,7 @@ ufw status numbered 2>/dev/null \
     | awk -F'[][]' '/Cloudflare proxy/ {print $2}' \
     | sort -rn \
     | while read -r n; do yes | ufw delete "$n" >/dev/null 2>&1 || true; done
-# Add new.
+# Add new UFW rules (host-bound traffic).
 while IFS= read -r cidr; do
     [ -z "$cidr" ] && continue
     ufw allow proto tcp from "$cidr" to any port 80  comment 'Cloudflare proxy' >/dev/null
@@ -510,8 +622,76 @@ while IFS= read -r cidr; do
 done < "$tmp/ips-v6"
 mv "$tmp/ips-v4" "$cf_dir/ips-v4"
 mv "$tmp/ips-v6" "$cf_dir/ips-v6"
+
+# Regenerate the DOCKER-USER block in /etc/ufw/after{,6}.rules so traffic
+# destined for Docker-published ports is also filtered to Cloudflare-only.
+# This MUST stay in sync with the host-bound UFW rules above.
+rewrite_docker_user_block() {
+    local v4_file="$1"
+    local v6_file="$2"
+    local after_rules=/etc/ufw/after.rules
+    local after6_rules=/etc/ufw/after6.rules
+    local marker_begin='# BEGIN cloudflare-docker-user (managed by provision-ubuntu.sh)'
+    local marker_end='# END cloudflare-docker-user'
+    local marker_begin6='# BEGIN cloudflare-docker-user-v6 (managed by provision-ubuntu.sh)'
+    local marker_end6='# END cloudflare-docker-user-v6'
+
+    local tmp_block tmp_block6
+    tmp_block=$(mktemp); tmp_block6=$(mktemp)
+    {
+        echo "$marker_begin"
+        echo "*filter"
+        echo ":DOCKER-USER - [0:0]"
+        echo "-A DOCKER-USER -i lo -j RETURN"
+        echo "-A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+        echo "-A DOCKER-USER -s 172.16.0.0/12 -j RETURN"
+        while IFS= read -r cidr; do
+            [ -z "$cidr" ] && continue
+            echo "-A DOCKER-USER -p tcp -s $cidr -m multiport --dports 80,443 -j RETURN"
+        done < "$v4_file"
+        echo "-A DOCKER-USER -p tcp -m multiport --dports 80,443 -j DROP"
+        echo "-A DOCKER-USER -j RETURN"
+        echo "COMMIT"
+        echo "$marker_end"
+    } > "$tmp_block"
+    {
+        echo "$marker_begin6"
+        echo "*filter"
+        echo ":DOCKER-USER - [0:0]"
+        echo "-A DOCKER-USER -i lo -j RETURN"
+        echo "-A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+        while IFS= read -r cidr; do
+            [ -z "$cidr" ] && continue
+            echo "-A DOCKER-USER -p tcp -s $cidr -m multiport --dports 80,443 -j RETURN"
+        done < "$v6_file"
+        echo "-A DOCKER-USER -p tcp -m multiport --dports 80,443 -j DROP"
+        echo "-A DOCKER-USER -j RETURN"
+        echo "COMMIT"
+        echo "$marker_end6"
+    } > "$tmp_block6"
+
+    for pair in "$after_rules|$marker_begin|$marker_end|$tmp_block" \
+                "$after6_rules|$marker_begin6|$marker_end6|$tmp_block6"; do
+        IFS='|' read -r target mb me pf <<< "$pair"
+        if grep -qF "$mb" "$target"; then
+            local out
+            out=$(mktemp)
+            awk -v b="$mb" -v e="$me" -v f="$pf" '
+                $0 == b { skip=1; while ((getline line < f) > 0) print line; close(f); next }
+                skip && $0 == e { skip=0; next }
+                !skip { print }
+            ' "$target" > "$out"
+            mv "$out" "$target"
+        else
+            printf '\n%s\n' "$(cat "$pf")" >> "$target"
+        fi
+    done
+    rm -f "$tmp_block" "$tmp_block6"
+}
+rewrite_docker_user_block "$cf_dir/ips-v4" "$cf_dir/ips-v6"
+
 ufw reload >/dev/null
-logger -t cloudflare-ufw-refresh "Updated UFW with new Cloudflare ranges"
+logger -t cloudflare-ufw-refresh "Updated UFW + DOCKER-USER with new Cloudflare ranges"
 EOF
     chmod +x /usr/local/sbin/cloudflare-ufw-refresh
 
