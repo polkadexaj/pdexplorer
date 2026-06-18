@@ -434,6 +434,18 @@ EOF
 setup_cloudflare_only() {
     log "Phase 4: Cloudflare-only firewall"
 
+    # Pre-flight: this phase mutates UFW rules and assumes the harden phase
+    # already set up the base policy (default deny + SSH/80/443 open). Running
+    # it on a host without UFW would either error cryptically or leave the
+    # firewall in a partial state. Refuse early with an actionable message.
+    command -v ufw >/dev/null 2>&1 \
+        || die "UFW not installed. Run 'sudo bash $0 harden' first."
+    ufw status 2>/dev/null | grep -q 'Status: active' \
+        || die "UFW is not active. Run 'sudo bash $0 harden' first."
+    ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp +ALLOW" \
+        || warn "SSH on port ${SSH_PORT} is not explicitly allowed in UFW. " \
+                "Confirm you have another way in (console / session in progress) before continuing."
+
     local cf_dir=/etc/cloudflare
     install -d -m 0755 "$cf_dir"
 
