@@ -384,6 +384,14 @@ const SUBQUERY_ENDPOINT       = (process.env.SUBQUERY_ENDPOINT || 'https://index
 const SUBQUERY_TIMEOUT_MS     = readPositiveInteger(process.env.SUBQUERY_TIMEOUT_MS, 1500);
 const SUBQUERY_MAX_LAG_BLOCKS = readPositiveInteger(process.env.SUBQUERY_MAX_LAG_BLOCKS, 200);
 const POLKADEX_BLOCK_TIME_MS  = readPositiveInteger(process.env.POLKADEX_BLOCK_TIME_MS, 12000);
+
+// Minimum acceptable peer count for /api/diag/rpc-health to report healthy.
+// A node with fewer than this is likely struggling to receive new blocks.
+const RPC_HEALTH_MIN_PEERS    = readPositiveInteger(process.env.RPC_HEALTH_MIN_PEERS, 3);
+// Maximum time to wait for the chain RPC's system_health response before
+// declaring it unhealthy. Should be well under the external monitor's
+// timeout (Cloudflare LB monitor uses 5s).
+const RPC_HEALTH_TIMEOUT_MS   = readPositiveInteger(process.env.RPC_HEALTH_TIMEOUT_MS, 3000);
 let lastHeadValue = 0;
 let lastHeadAdvanceAt = Date.now();
 let chainStaleSince = null;            // timestamp when head first went stale
@@ -1487,6 +1495,108 @@ app.get('/api/diag/subquery-lag', async (req, res) => {
             latencyMs: Date.now() - startMs
         });
     }
+});
+
+// Composite RPC health endpoint. Reports the same multi-signal view that the
+// local check-rpc-health.sh script produces, but over HTTP so external
+// monitors (UptimeRobot keyword check, Healthchecks.io, dashboards) can poll
+// without SSH access. Returns 200 with healthy:true when ALL of:
+//   - The explorer's WsProvider is connected to the chain RPC
+//   - system.health() reports peers >= RPC_HEALTH_MIN_PEERS
+//   - isSyncing is false
+//   - Chain head has advanced within CHAIN_HEAD_STALE_MS
+// Returns 503 with a per-check breakdown otherwise. The breakdown shape is
+// stable so dashboards can chart individual signals over time.
+//
+// Each worker has its own globalApi and lastHeadValue, so repeated calls
+// against the load-balanced cluster may round-robin across slightly different
+// per-worker views. The drift is bounded by the indexer worker's tick rate
+// (~12s) — not significant for an external monitor.
+app.get('/api/diag/rpc-health', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const startMs = Date.now();
+
+    const checks = {
+        rpcConnected: false,
+        minPeers: false,
+        notSyncing: false,
+        headFresh: false
+    };
+
+    const out = {
+        endpoint: RPC_ENDPOINTS && RPC_ENDPOINTS[0] ? RPC_ENDPOINTS[0] : null,
+        pid: process.pid,
+        checks,
+        peers: null,
+        isSyncing: null,
+        shouldHavePeers: null,
+        head: {
+            value: lastHeadValue || null,
+            lastAdvanceAt: lastHeadAdvanceAt || null,
+            secondsSinceAdvance: lastHeadAdvanceAt
+                ? Math.round((Date.now() - lastHeadAdvanceAt) / 1000)
+                : null,
+            staleThresholdSeconds: Math.round(CHAIN_HEAD_STALE_MS / 1000)
+        },
+        thresholds: {
+            minPeers: RPC_HEALTH_MIN_PEERS,
+            staleMs: CHAIN_HEAD_STALE_MS
+        },
+        healthy: false,
+        latencyMs: null,
+        error: null
+    };
+
+    // Check 1 — explorer's WsProvider is connected.
+    if (!isRpcReady()) {
+        out.error = 'WsProvider not connected — explorer is between reconnects';
+        out.latencyMs = Date.now() - startMs;
+        return res.status(503).json(out);
+    }
+    checks.rpcConnected = true;
+
+    // Check 2+3 — system.health() with explicit timeout. polkadot.js calls
+    // don't have built-in timeouts; if the upstream is hung, the call could
+    // wait indefinitely. Promise.race against a timer ensures we always
+    // return within RPC_HEALTH_TIMEOUT_MS.
+    let healthJson;
+    try {
+        const health = await Promise.race([
+            globalApi.rpc.system.health(),
+            new Promise((_, reject) => setTimeout(
+                () => reject(new Error(`system_health timeout after ${RPC_HEALTH_TIMEOUT_MS}ms`)),
+                RPC_HEALTH_TIMEOUT_MS
+            ))
+        ]);
+        // toJSON gives us plain primitives — { peers: N, isSyncing: bool, shouldHavePeers: bool }.
+        healthJson = health.toJSON();
+    } catch (e) {
+        out.error = e && e.message ? e.message : String(e);
+        out.latencyMs = Date.now() - startMs;
+        return res.status(503).json(out);
+    }
+
+    out.peers = Number(healthJson.peers);
+    out.isSyncing = Boolean(healthJson.isSyncing);
+    out.shouldHavePeers = Boolean(healthJson.shouldHavePeers);
+    checks.minPeers   = out.peers >= RPC_HEALTH_MIN_PEERS;
+    checks.notSyncing = !out.isSyncing;
+
+    // Check 4 — chain head advanced recently. Uses the watchdog's tracker
+    // rather than fetching head again here (one less RPC roundtrip per probe).
+    if (lastHeadAdvanceAt) {
+        checks.headFresh = (Date.now() - lastHeadAdvanceAt) < CHAIN_HEAD_STALE_MS;
+    } else {
+        // Never observed a head — could be cold start. Mark as failing
+        // explicitly so external monitors notice rather than treating "unknown"
+        // as "healthy by default."
+        checks.headFresh = false;
+        out.error = 'chain head has never been observed (cold start? wait one indexer tick)';
+    }
+
+    out.healthy = checks.rpcConnected && checks.minPeers && checks.notSyncing && checks.headFresh;
+    out.latencyMs = Date.now() - startMs;
+    res.status(out.healthy ? 200 : 503).json(out);
 });
 
 // --- LIST ENDPOINTS (served from SQLite) ---
