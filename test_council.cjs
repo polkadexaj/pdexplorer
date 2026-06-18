@@ -1,7 +1,7 @@
 const { ApiPromise, WsProvider } = require('@polkadot/api');
 
 async function main() {
-    const wsProvider = new WsProvider('wss://so.polkadex.ee');
+    const wsProvider = new WsProvider('wss://rpc.polkadex.ee');
     const api = await ApiPromise.create({ provider: wsProvider });
     
     console.log("Pallets:");

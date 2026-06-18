@@ -78,7 +78,8 @@ Live: **https://explorer.polkadex.ee/**
                                           │  WebSocket (wss://)
                                           ▼
                           ┌────────────────────────────────────────────┐
-                          │  Polkadex node RPC (e.g. so.polkadex.ee)   │
+                          │  Polkadex RPC (wss://rpc.polkadex.ee — CF  │
+                          │  LB fronting so.polkadex.ee + faradaynodes)│
                           └────────────────────────────────────────────┘
 ```
 
@@ -258,7 +259,7 @@ All knobs are env vars. None are required to start — every value has a sensibl
 
 | Env var                       | Default                | Notes                                                         |
 | ----------------------------- | ---------------------- | ------------------------------------------------------------- |
-| `POLKADEX_WS`                 | `wss://so.polkadex.ee` | Comma-separated WS endpoints (first = primary, rest = fallback) |
+| `POLKADEX_WS`                 | `wss://rpc.polkadex.ee` | Comma-separated WS endpoints (first = primary, rest = fallback). Default is the Cloudflare LB that fronts the origin pool — auto-fails over between origins. |
 | `POLKADEX_WS_RECONNECT_MS`    | `2500`                 | Reconnect interval after a dropped socket                     |
 
 ### Indexer
@@ -302,7 +303,7 @@ A typical `/opt/pdexplorer/.env`:
 DOMAIN=explorer.polkadex.ee
 LETSENCRYPT_EMAIL=you@example.com
 DATA_PATH=/opt/pdexplorer/data
-POLKADEX_WS=wss://so.polkadex.ee
+POLKADEX_WS=wss://rpc.polkadex.ee
 CMC_API_KEY=your-cmc-key-here
 ALLOWED_ORIGINS=https://explorer.polkadex.ee
 ```

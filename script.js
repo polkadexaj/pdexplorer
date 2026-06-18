@@ -472,7 +472,10 @@ async function init() {
         statusIndicator.classList.remove('live');
         statusIndicator.style.background = 'orange';
 
-        const wsProvider = new WsProvider('wss://so.polkadex.ee');
+        // Cloudflare LB endpoint — auto-fails over between origin nodes
+        // (so.polkadex.ee, polkadex-rpc.faradaynodes.com, ...) so this single
+        // URL is resilient without the frontend needing to know the topology.
+        const wsProvider = new WsProvider('wss://rpc.polkadex.ee');
         globalApi = await ApiPromise.create({ provider: wsProvider });
 
         networkStatusText.innerText = "Polkadex Connected";

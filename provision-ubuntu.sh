@@ -347,7 +347,9 @@ LETSENCRYPT_EMAIL=$LETSENCRYPT_EMAIL
 DATA_PATH=$DEPLOY_DIR/data
 
 # ---- Chain RPC (comma-separated WS endpoints; first = primary)
-POLKADEX_WS=wss://so.polkadex.ee
+# rpc.polkadex.ee is the Cloudflare Load Balancer endpoint that fronts the
+# origin pool. Override with `ws://127.0.0.1:9944` if you run a local node.
+POLKADEX_WS=wss://rpc.polkadex.ee
 
 # ---- API
 ALLOWED_ORIGINS=https://$DOMAIN

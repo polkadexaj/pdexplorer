@@ -2,7 +2,7 @@ import { ApiPromise, WsProvider } from '@polkadot/api';
 import fs from 'fs/promises';
 
 async function run() {
-    const wsProvider = new WsProvider('wss://so.polkadex.ee');
+    const wsProvider = new WsProvider('wss://rpc.polkadex.ee');
     const api = await ApiPromise.create({ provider: wsProvider });
     
     const entries = await api.query.system.account.entries();

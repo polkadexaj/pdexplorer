@@ -277,7 +277,12 @@ const TREASURY_ACCOUNT = process.env.TREASURY_ACCOUNT || 'esoEt6uZ9vs23yW8aqTACL
 // POLKADEX_WS to a comma-separated list (your private node first, plus any
 // public fallbacks) when the default endpoint is rate-limiting — that's the
 // single biggest cause of `WebSocket is not connected`.
-const RPC_ENDPOINTS = (process.env.POLKADEX_WS || 'wss://so.polkadex.ee')
+// rpc.polkadex.ee is a Cloudflare Load Balancer endpoint that fronts multiple
+// origin nodes (so.polkadex.ee, polkadex-rpc.faradaynodes.com, ...). Using
+// the LB endpoint here means the explorer benefits from automatic failover
+// when an origin goes unhealthy, without each client having to know about
+// every origin. Override POLKADEX_WS in .env to point at a private node.
+const RPC_ENDPOINTS = (process.env.POLKADEX_WS || 'wss://rpc.polkadex.ee')
     .split(',').map(s => s.trim()).filter(Boolean);
 const RPC_AUTO_RECONNECT_MS = readPositiveInteger(process.env.POLKADEX_WS_RECONNECT_MS, 2500);
 
@@ -1529,6 +1534,18 @@ app.get('/api/diag/rpc-health', async (req, res) => {
         headFresh: false
     };
 
+    // Head freshness must be read from SQLite, not the in-process variable.
+    // recordChainHead() only runs on the indexer worker (it's the only worker
+    // that calls syncChainIndex). HTTP-only workers initialize lastHeadAdvanceAt
+    // at boot and never update it — so after CHAIN_HEAD_STALE_MS, their copy
+    // is permanently stale. The cluster round-robins requests across all 4
+    // workers, so ~75% of probes would falsely report headFresh=false.
+    // db.setKv('chain_head_state', ...) is written by the indexer and visible
+    // to every worker, so reading from there gives a consistent answer.
+    const headState = db.getKv('chain_head_state') || null;
+    const headValue = headState ? headState.value : null;
+    const headAdvanceAt = headState ? Number(headState.lastAdvanceAt) || null : null;
+
     const out = {
         endpoint: RPC_ENDPOINTS && RPC_ENDPOINTS[0] ? RPC_ENDPOINTS[0] : null,
         pid: process.pid,
@@ -1537,10 +1554,10 @@ app.get('/api/diag/rpc-health', async (req, res) => {
         isSyncing: null,
         shouldHavePeers: null,
         head: {
-            value: lastHeadValue || null,
-            lastAdvanceAt: lastHeadAdvanceAt || null,
-            secondsSinceAdvance: lastHeadAdvanceAt
-                ? Math.round((Date.now() - lastHeadAdvanceAt) / 1000)
+            value: headValue,
+            lastAdvanceAt: headAdvanceAt,
+            secondsSinceAdvance: headAdvanceAt
+                ? Math.round((Date.now() - headAdvanceAt) / 1000)
                 : null,
             staleThresholdSeconds: Math.round(CHAIN_HEAD_STALE_MS / 1000)
         },
@@ -1588,14 +1605,15 @@ app.get('/api/diag/rpc-health', async (req, res) => {
     checks.minPeers   = out.peers >= RPC_HEALTH_MIN_PEERS;
     checks.notSyncing = !out.isSyncing;
 
-    // Check 4 — chain head advanced recently. Uses the watchdog's tracker
-    // rather than fetching head again here (one less RPC roundtrip per probe).
-    if (lastHeadAdvanceAt) {
-        checks.headFresh = (Date.now() - lastHeadAdvanceAt) < CHAIN_HEAD_STALE_MS;
+    // Check 4 — chain head advanced recently. Read from SQLite (see comment
+    // at the top of this handler) so HTTP-only workers report consistently
+    // with the indexer worker.
+    if (headAdvanceAt) {
+        checks.headFresh = (Date.now() - headAdvanceAt) < CHAIN_HEAD_STALE_MS;
     } else {
-        // Never observed a head — could be cold start. Mark as failing
-        // explicitly so external monitors notice rather than treating "unknown"
-        // as "healthy by default."
+        // Never observed a head — could be cold start or the indexer worker
+        // hasn't ticked yet. Mark as failing explicitly so external monitors
+        // notice rather than treating "unknown" as "healthy by default."
         checks.headFresh = false;
         out.error = 'chain head has never been observed (cold start? wait one indexer tick)';
     }
@@ -4714,11 +4732,56 @@ function startIndexerLoops() {
 
 // Surface anything that escapes a sync's try/catch so we never see a
 // silent "WebSocket is not connected" trail again.
+
+// Cooldown between forced api rebuilds triggered from process-level error
+// handlers — without this, a stuck WS that fires many timeouts per second
+// would thrash the reconnect path.
+const STUCK_WS_REBUILD_COOLDOWN_MS = readPositiveInteger(
+    process.env.STUCK_WS_REBUILD_COOLDOWN_MS, 30 * 1000);
+let lastStuckWsRebuildAt = 0;
+
+// "No response received from RPC endpoint in 60s" is polkadot.js's per-request
+// timeout. It fires from a deferred setTimeout, escapes the call site as an
+// uncaughtException, and indicates the WS is alive at TCP layer but the
+// upstream isn't responding to JSON-RPC requests. The connection-level
+// watchdog wouldn't catch this for 5+ minutes (it waits for chain-head-stale).
+// We trigger an immediate api rebuild so a fresh WS connection can land on a
+// different Cloudflare LB origin within seconds.
+function isPolkadotWsRequestTimeout(err) {
+    return err && err.message
+        && /No response received from RPC endpoint/.test(err.message);
+}
+
+async function rebuildApiOnce(reason) {
+    if (rpcResetInFlight) return;
+    if (Date.now() - lastStuckWsRebuildAt < STUCK_WS_REBUILD_COOLDOWN_MS) return;
+    lastStuckWsRebuildAt = Date.now();
+    rpcResetInFlight = true;
+    console.warn(`[RPC] forcing api rebuild (reason: ${reason})`);
+    try {
+        if (globalApi) {
+            try { await globalApi.disconnect(); } catch (_) { /* best effort */ }
+            globalApi = null;
+        }
+        await connectRpc({ kickSyncsOnConnect: false });
+    } catch (e) {
+        console.warn('[RPC] rebuild attempt failed:', e && e.message ? e.message : e);
+    } finally {
+        rpcResetInFlight = false;
+    }
+}
+
 process.on('unhandledRejection', (err) => {
     console.error('Unhandled promise rejection:', err && err.stack ? err.stack : err);
+    if (isPolkadotWsRequestTimeout(err)) {
+        setImmediate(() => rebuildApiOnce('60s request timeout (rejection)'));
+    }
 });
 process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err && err.stack ? err.stack : err);
+    if (isPolkadotWsRequestTimeout(err)) {
+        setImmediate(() => rebuildApiOnce('60s request timeout (exception)'));
+    }
 });
 
 // ---- Bootstrap: cluster primary vs worker ---------------------------------
