@@ -479,6 +479,10 @@ function clearRpcCaches() {
 // via getHeader()). On reconnect, clearRpcCaches() wipes the table so we
 // don't serve a hash from a pre-reorg view.
 async function getBlockHashCached(blockNumber) {
+    // Guard against the brief window between a WsProvider disconnect and the
+    // watchdog rebuilding globalApi — in-flight scan tasks can land here with
+    // globalApi=null and otherwise throw a misleading TypeError.
+    if (!isRpcReady()) throw new Error('rpc not ready (disconnected mid-fetch)');
     if (blockNumber === undefined || blockNumber === null) {
         // No-arg getBlockHash returns the current head; not cacheable.
         return await globalApi.rpc.chain.getBlockHash();
@@ -498,6 +502,8 @@ async function getBlockHashCached(blockNumber) {
 // identifies the block content. Accepts either a string or a Hash codec; we
 // key by hex so both forms hit the same entry.
 async function getBlockCached(blockHash) {
+    // See getBlockHashCached for the disconnect-race rationale.
+    if (!isRpcReady()) throw new Error('rpc not ready (disconnected mid-fetch)');
     if (!blockHash) {
         // No-arg getBlock returns the current head's block; not cacheable.
         return await globalApi.rpc.chain.getBlock();
@@ -3689,7 +3695,12 @@ let isSyncingChain = false;
 // for db.insertBlocks / db.insertEvents. Throws on RPC failure so the caller
 // can decide whether to mark as a gap.
 async function scanSingleBlock(blockNumber) {
+    // Guard up-front so the post-hash derive.chain.getBlock call doesn't
+    // dereference a null globalApi after a disconnect that lands between the
+    // two awaits. The catch in scanChainRange treats this as a per-block fail.
+    if (!isRpcReady()) throw new Error('rpc not ready (disconnected mid-fetch)');
     const hash = await getBlockHashCached(blockNumber);
+    if (!isRpcReady()) throw new Error('rpc not ready (disconnected mid-fetch)');
     const derived = await globalApi.derive.chain.getBlock(hash);
     if (!derived) return null;
     const blockHash = derived.block.header.hash.toHex();
