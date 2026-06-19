@@ -1354,9 +1354,13 @@ const SITEMAP_STATIC_ROUTES = [
     { path: '/help/troubleshooting',          changefreq: 'monthly', priority: '0.6' },
     { path: '/help/glossary',                 changefreq: 'monthly', priority: '0.5' },
     { path: '/help/brand-kit',                changefreq: 'monthly', priority: '0.4' },
+    { path: '/help/governance-calendar',      changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/governance-notifications', changefreq: 'monthly', priority: '0.4' },
     // Brand kit cheatsheet — designer-/dev-facing reference, indexable so
     // searches for "Polkadex brand colours" / "Polkadex logo download" land here.
-    { path: '/brand',                         changefreq: 'monthly', priority: '0.5' }
+    { path: '/brand',                         changefreq: 'monthly', priority: '0.5' },
+    // Unified governance calendar — referenda, motions, treasury together.
+    { path: '/calendar',                      changefreq: 'daily',   priority: '0.6' }
     // Note: /watchlist intentionally omitted (noindex — personal page).
 ];
 const SITEMAP_TOP_VALIDATORS = readPositiveInteger(process.env.SITEMAP_TOP_VALIDATORS, 100);
@@ -2326,6 +2330,183 @@ app.get('/api/democracy', (req, res) => {
     } catch (err) {
         console.error('API Error /api/democracy:', err);
         res.status(500).json({ error: 'Failed to fetch democracy data' });
+    }
+});
+
+// --- Governance: latest events (for notification polling) ---------------------
+// Small, hot endpoint that frontend polls every ~30s to detect new referenda
+// or proposals. Returns just the indices + tabled timestamps the frontend
+// compares against locally-stored "last seen" values; payload stays under
+// ~1KB so polling cost is negligible. cacheShort so an update reaches users
+// within ~10s of the indexer recording it.
+app.get('/api/governance/latest', (req, res) => {
+    try {
+        const meta = db.getKv('democracy_meta') || {};
+        const referenda = db.getDemocracyReferenda();
+        const proposals = meta.publicProposals || [];
+
+        const latestReferendum = referenda.length > 0 ? {
+            refIndex: Number(referenda[0].refIndex) || 0,
+            status: referenda[0].status || null,
+            endBlock: referenda[0].endBlock || null,
+            proposal: referenda[0].proposal || null,
+            isActive: referenda[0].status === 'ongoing' || referenda[0].status === 'started'
+        } : null;
+
+        // Public proposals come from the chain in array form; element 0 is the
+        // most recently submitted on most runtimes. Defensive in case ordering
+        // ever changes upstream — take the max-index entry.
+        let latestProposal = null;
+        if (proposals.length > 0) {
+            let top = proposals[0];
+            for (const p of proposals) {
+                if ((Number(p.index) || 0) > (Number(top.index) || 0)) top = p;
+            }
+            latestProposal = {
+                index: Number(top.index) || 0,
+                proposer: top.proposer || null,
+                deposit: top.deposit || null,
+                preimage: top.preimage || null
+            };
+        }
+
+        cacheShort(res);
+        res.json({
+            latestReferendum,
+            latestProposal,
+            activeReferendaCount: meta.activeReferenda || 0,
+            activeProposalsCount: meta.activeProposals || 0,
+            lastSync: meta.lastSync || 0
+        });
+    } catch (err) {
+        console.error('API Error /api/governance/latest:', err);
+        res.status(500).json({ error: 'Failed to fetch latest governance events' });
+    }
+});
+
+// --- Governance: unified calendar ---------------------------------------------
+// One endpoint feeding the /calendar page. Aggregates democracy referenda,
+// council motions, and treasury proposals into a single time-anchored event
+// list. Each event carries: id, kind, title, status, startBlock/Time,
+// endBlock/Time (where applicable), isActive, link. Frontend can group/sort
+// by time, filter by kind, or render as month-grid or list.
+//
+// End times for in-progress events are estimated from the chain's current
+// block + per-block average (Polkadex runs ~12s blocks). For resolved
+// events we use the recorded resolved_at timestamp directly.
+app.get('/api/governance/calendar', async (req, res) => {
+    try {
+        const referenda = db.getDemocracyReferenda();
+        const treasury  = db.getTreasuryProposals();
+        const motions   = db.getCouncilMotions();
+        const meta      = db.getKv('democracy_meta') || {};
+
+        const currentBlock = meta.currentBlock || 0;
+        const currentTime  = Date.now();
+        const BLOCK_TIME_MS = 12000; // Polkadex BABE expectedBlockTime
+
+        // Convert an absolute block number to estimated wall-clock time. Returns
+        // null when we don't have a current-block anchor (cold start). Used for
+        // both future end times (referenda) and past block-only timestamps.
+        const blockToTime = (block) => {
+            if (!block || !currentBlock) return null;
+            const blockDiff = Number(block) - currentBlock;
+            return currentTime + blockDiff * BLOCK_TIME_MS;
+        };
+
+        const events = [];
+
+        // Democracy referenda. Ongoing entries have an end_block that hasn't
+        // happened yet; resolved entries (passed/cancelled/notpassed) have an
+        // end_block in the past.
+        for (const r of referenda) {
+            const isActive = r.status === 'ongoing' || r.status === 'started';
+            events.push({
+                id: 'ref-' + r.refIndex,
+                kind: 'referendum',
+                title: 'Referendum #' + r.refIndex,
+                status: r.status || 'unknown',
+                proposal: r.proposal || null,
+                ayes: r.ayes || null,
+                nays: r.nays || null,
+                turnout: r.turnout || null,
+                startBlock: null, // we don't store the tabled block
+                startTime: null,
+                endBlock: r.endBlock || null,
+                endTime: blockToTime(r.endBlock),
+                isActive,
+                link: '/democracy?ref=' + r.refIndex
+            });
+        }
+
+        // Treasury proposals — proposed_at / resolved_at are real epoch ms.
+        for (const p of treasury) {
+            const isActive = p.status === 'proposed' || !p.status;
+            events.push({
+                id: 'treasury-' + p.id,
+                kind: 'treasury',
+                title: 'Treasury Proposal #' + p.id,
+                status: p.status || 'proposed',
+                proposer: p.proposer || null,
+                proposerName: p.proposerName || null,
+                beneficiary: p.beneficiary || null,
+                beneficiaryName: p.beneficiaryName || null,
+                value: p.value || null,
+                startBlock: p.proposedBlock || null,
+                startTime: p.proposedAt || blockToTime(p.proposedBlock),
+                endBlock: p.resolvedBlock || null,
+                endTime: p.resolvedAt || blockToTime(p.resolvedBlock),
+                isActive,
+                link: '/treasury?proposal=' + p.id
+            });
+        }
+
+        // Council motions — similar to treasury, with proposer + extrinsic info.
+        for (const m of motions) {
+            const isActive = m.status === 'proposed' || !m.status;
+            events.push({
+                id: 'motion-' + m.motionIndex,
+                kind: 'motion',
+                title: 'Council Motion #' + m.motionIndex,
+                status: m.status || 'proposed',
+                proposer: m.proposer || null,
+                proposerName: m.proposerName || null,
+                section: m.section || null,
+                method: m.method || null,
+                threshold: m.threshold || null,
+                ayes: m.ayes || null,
+                nays: m.nays || null,
+                startBlock: m.proposedBlock || null,
+                startTime: m.proposedAt || blockToTime(m.proposedBlock),
+                endBlock: m.resolvedBlock || null,
+                endTime: m.resolvedAt || blockToTime(m.resolvedBlock),
+                isActive,
+                link: '/council?motion=' + m.motionIndex
+            });
+        }
+
+        // Sort: most recently-active first (max of endTime, startTime); active
+        // events float above resolved when timestamps tie.
+        events.sort((a, b) => {
+            if (a.isActive && !b.isActive) return -1;
+            if (b.isActive && !a.isActive) return 1;
+            const at = a.endTime || a.startTime || 0;
+            const bt = b.endTime || b.startTime || 0;
+            return bt - at;
+        });
+
+        cacheLong(res);
+        res.json({
+            events,
+            count: events.length,
+            activeCount: events.filter(e => e.isActive).length,
+            currentBlock,
+            blockTimeMs: BLOCK_TIME_MS,
+            lastUpdate: Date.now()
+        });
+    } catch (err) {
+        console.error('API Error /api/governance/calendar:', err);
+        res.status(500).json({ error: 'Failed to fetch governance calendar' });
     }
 });
 

@@ -484,6 +484,11 @@ async function init() {
 
         fetchNetworkStats(globalApi);
         fetchNetworkInformation();
+        // Start the governance notification poller — runs every minute,
+        // surfaces homepage banner + toast when a new referendum or proposal
+        // is detected since the user's last seen index. Safe no-op if the
+        // endpoint isn't reachable.
+        startGovernancePolling();
 
         // Fetch initial dashboard data so it isn't empty on load
         try {
@@ -631,6 +636,191 @@ function renderChainStaleBanner(chainHead) {
     // bottom of the viewport.
     document.body.insertBefore(el, document.body.firstChild);
 }
+
+// ─── Governance notifications ────────────────────────────────────────────────
+// Polls /api/governance/latest periodically and surfaces new democracy events
+// in two ways:
+//   1. Persistent banner on the homepage (under #governance-notice-zone) when
+//      a new referendum or proposal index is higher than what the user has
+//      seen before. One row per kind; each has a close button that dismisses
+//      THIS specific index (so a later, newer event will pop back up).
+//   2. Global toast in the bottom-right that auto-dismisses after 6 seconds,
+//      shown when the polling cycle first detects something new while the
+//      user is browsing. Toasts also have close buttons.
+//
+// Storage keys (documented at /cookies):
+//   pdex_gov_seen_ref            number  — highest ref index user has been notified of
+//   pdex_gov_seen_proposal       number  — highest proposal index seen
+//   pdex_gov_banner_dismissed_ref       number — banner close state per index
+//   pdex_gov_banner_dismissed_proposal  number
+//
+// The "seen" and "dismissed" markers diverge: dismissing the banner doesn't
+// mark the event as "seen" — the next new event will still pop, this one
+// just gets hidden. Visiting the referendum / proposal page (or the calendar)
+// marks both kinds as seen via markGovernanceSeen().
+
+const GOVERNANCE_POLL_INTERVAL_MS = 60 * 1000;
+let governanceLastFetch = { latestReferendum: null, latestProposal: null };
+let governancePollTimer = null;
+
+function getLsNumber(key) {
+    try { const v = parseInt(localStorage.getItem(key) || '0', 10); return Number.isFinite(v) ? v : 0; }
+    catch (_) { return 0; }
+}
+function setLsNumber(key, val) {
+    try { localStorage.setItem(key, String(Math.max(0, Number(val) || 0))); }
+    catch (_) { /* private mode etc — silent */ }
+}
+
+function markGovernanceSeen(kind, index) {
+    if (kind === 'referendum') {
+        const cur = getLsNumber('pdex_gov_seen_ref');
+        if (index > cur) setLsNumber('pdex_gov_seen_ref', index);
+    } else if (kind === 'proposal') {
+        const cur = getLsNumber('pdex_gov_seen_proposal');
+        if (index > cur) setLsNumber('pdex_gov_seen_proposal', index);
+    }
+}
+
+async function pollGovernanceLatest() {
+    try {
+        const res = await fetch('/api/governance/latest', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const seenRef       = getLsNumber('pdex_gov_seen_ref');
+        const seenProp      = getLsNumber('pdex_gov_seen_proposal');
+        const dismissedRef  = getLsNumber('pdex_gov_banner_dismissed_ref');
+        const dismissedProp = getLsNumber('pdex_gov_banner_dismissed_proposal');
+
+        // Detect "newly noticed" relative to the previous poll. Used for toasts;
+        // banner display is purely based on seen-vs-current.
+        const prev = governanceLastFetch;
+        const firstPoll = prev.latestReferendum === null && prev.latestProposal === null;
+
+        if (data.latestReferendum && data.latestReferendum.refIndex > seenRef && data.latestReferendum.refIndex > dismissedRef) {
+            renderGovernanceBanner('referendum', data.latestReferendum);
+            if (!firstPoll && (!prev.latestReferendum || data.latestReferendum.refIndex > prev.latestReferendum.refIndex)) {
+                showGovernanceToast('New Polkadex referendum tabled: #' + data.latestReferendum.refIndex,
+                    '/democracy?ref=' + data.latestReferendum.refIndex);
+            }
+        } else {
+            removeGovernanceBanner('referendum');
+        }
+
+        if (data.latestProposal && data.latestProposal.index > seenProp && data.latestProposal.index > dismissedProp) {
+            renderGovernanceBanner('proposal', data.latestProposal);
+            if (!firstPoll && (!prev.latestProposal || data.latestProposal.index > prev.latestProposal.index)) {
+                showGovernanceToast('New public proposal tabled: #' + data.latestProposal.index,
+                    '/democracy?proposal=' + data.latestProposal.index);
+            }
+        } else {
+            removeGovernanceBanner('proposal');
+        }
+
+        governanceLastFetch = {
+            latestReferendum: data.latestReferendum,
+            latestProposal:   data.latestProposal
+        };
+    } catch (err) {
+        // Don't spam the console — polling failures are expected during reconnects.
+        // The next tick will retry.
+    }
+}
+
+function startGovernancePolling() {
+    if (governancePollTimer) return;
+    pollGovernanceLatest();
+    governancePollTimer = setInterval(pollGovernanceLatest, GOVERNANCE_POLL_INTERVAL_MS);
+}
+
+function renderGovernanceBanner(kind, payload) {
+    const zone = document.getElementById('governance-notice-zone');
+    // Render only on the home page — the zone div is inside data-page="home".
+    if (!zone) return;
+    const ID = 'gov-banner-' + kind;
+    let el = document.getElementById(ID);
+
+    const label = kind === 'referendum'
+        ? `Referendum #${payload.refIndex}`
+        : `Public Proposal #${payload.index}`;
+    const subtitle = kind === 'referendum'
+        ? (payload.isActive ? 'Voting is open' : 'Recently tabled')
+        : 'Awaiting seconding';
+    const href = kind === 'referendum'
+        ? '/democracy?ref=' + payload.refIndex
+        : '/democracy?proposal=' + payload.index;
+    const idx = kind === 'referendum' ? payload.refIndex : payload.index;
+
+    const html = `
+        <div class="governance-banner ${kind}" role="status">
+            <i class='bx bx-bell governance-banner-icon'></i>
+            <div class="governance-banner-body">
+                <strong>New ${label}</strong>
+                <span class="governance-banner-subtitle">${subtitle} — click to view and vote.</span>
+            </div>
+            <a class="governance-banner-cta" href="${href}" data-spa-link="true">View</a>
+            <button type="button" class="governance-banner-close" aria-label="Dismiss"
+                data-gov-banner-close="${kind}" data-gov-banner-idx="${idx}">
+                <i class='bx bx-x'></i>
+            </button>
+        </div>`;
+
+    // Build the element from the HTML string and stamp the id so we can find
+    // it again to replace on the next poll. Using <template> avoids the
+    // .innerHTML wrapping div that #governance-notice-zone would otherwise
+    // accumulate around each banner.
+    const tmpl = document.createElement('template');
+    tmpl.innerHTML = html.trim();
+    const node = tmpl.content.firstChild;
+    node.id = ID;
+    if (el) el.replaceWith(node);
+    else zone.appendChild(node);
+}
+
+function removeGovernanceBanner(kind) {
+    const el = document.getElementById('gov-banner-' + kind);
+    if (el) el.remove();
+}
+
+function showGovernanceToast(message, href) {
+    let zone = document.getElementById('governance-toast-zone');
+    if (!zone) {
+        zone = document.createElement('div');
+        zone.id = 'governance-toast-zone';
+        document.body.appendChild(zone);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'governance-toast';
+    toast.innerHTML = `
+        <i class='bx bx-bell'></i>
+        <a href="${href}" data-spa-link="true" class="governance-toast-msg">${message}</a>
+        <button type="button" class="governance-toast-close" aria-label="Dismiss">
+            <i class='bx bx-x'></i>
+        </button>`;
+    zone.appendChild(toast);
+    const dismiss = () => {
+        if (!toast.parentNode) return;
+        toast.classList.add('dismissing');
+        setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 250);
+    };
+    toast.querySelector('.governance-toast-close').addEventListener('click', dismiss);
+    setTimeout(dismiss, 6000);
+}
+
+// Global click handler for governance banner close buttons + SPA links.
+// Attached once at startup; data-attribute lookup is cheap.
+document.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('[data-gov-banner-close]');
+    if (closeBtn) {
+        const kind = closeBtn.getAttribute('data-gov-banner-close');
+        const idx  = parseInt(closeBtn.getAttribute('data-gov-banner-idx') || '0', 10);
+        if (kind === 'referendum') setLsNumber('pdex_gov_banner_dismissed_ref', idx);
+        else if (kind === 'proposal') setLsNumber('pdex_gov_banner_dismissed_proposal', idx);
+        removeGovernanceBanner(kind);
+        e.preventDefault();
+        return;
+    }
+});
 
 function subscribeNewBlocks(api) {
     api.rpc.chain.subscribeNewHeads(async (header) => {
@@ -2141,7 +2331,11 @@ const ROUTE_SEO = {
     // Brand kit cheatsheet. Public, indexable. Targets designers and devs
     // searching for "Polkadex brand colours" or "Polkadex logo download".
     'brand':              { title: 'Brand kit — Polkadex Mainnet Explorer',
-                            description: 'Polkadex Mainnet Explorer brand kit: colour palette, typography, logo usage, iconography, spacing tokens, voice. Click any swatch to copy its hex value.' }
+                            description: 'Polkadex Mainnet Explorer brand kit: colour palette, typography, logo usage, iconography, spacing tokens, voice. Click any swatch to copy its hex value.' },
+    // Governance calendar — unified timeline of referenda, treasury proposals,
+    // and council motions with end-of-vote countdowns.
+    'calendar':           { title: 'Governance calendar — Polkadex Mainnet Explorer',
+                            description: 'Calendar view of all active and recent Polkadex on-chain governance: democracy referenda, council motions, treasury proposals, with voting end times.' }
 };
 
 // Update <title>, meta[description], canonical, and Open Graph / Twitter tags
@@ -2815,6 +3009,45 @@ const HELP_TOPICS = [
             <div class="help-callout">
                 <b>Source of truth.</b> When the brand evolves, edit the <code>:root</code> block in <code>styles.css</code> and the <code>BRAND.md</code> file together — the <a href="/brand" class="item-link">/brand</a> page reads from CSS at render time so it stays in sync automatically.
             </div>
+        `
+    },
+    {
+        slug: 'governance-calendar',
+        title: 'Governance calendar',
+        category: 'gov',
+        keywords: 'calendar governance referendum referenda motion treasury proposal schedule timeline',
+        body: `
+            <p class="lead">The Governance Calendar at <a href="/calendar" class="item-link"><b>/calendar</b></a> gives you a single view of every active and recent on-chain governance event: democracy referenda, council motions, and treasury proposals — with their tabled dates, voting end times, and current status.</p>
+            <h3>What you'll see</h3>
+            <ul>
+                <li><b>Active events</b> float to the top with a live "X days Y hours left" countdown until voting closes.</li>
+                <li><b>Recent activity</b> is sorted by most recently resolved.</li>
+                <li><b>Filter pills</b> let you narrow to just referenda, motions, or treasury proposals.</li>
+                <li><b>List vs Month view</b>: list view is sortable, paginated, and filterable by text. Month view is a 7-column grid with coloured dots per event — click a dot to open that proposal.</li>
+            </ul>
+            <h3>How end times are calculated</h3>
+            <p>For events with a known wall-clock end timestamp (treasury, motions), we display that directly. For referenda that end at a future block, we estimate using the current chain head and Polkadex's ~12-second block time. Estimates drift by a few minutes over a 7-day voting period — close enough to plan around.</p>
+            <h3>Related</h3>
+            <p>For per-pallet detail, see the <a href="/democracy" class="item-link"><b>Democracy</b></a>, <a href="/council" class="item-link"><b>Council</b></a>, and <a href="/treasury" class="item-link"><b>Treasury</b></a> pages. The calendar is a roll-up of those.</p>
+        `
+    },
+    {
+        slug: 'governance-notifications',
+        title: 'New-event notifications',
+        category: 'gov',
+        keywords: 'notification banner toast new referendum proposal alert announcement',
+        body: `
+            <p class="lead">The explorer surfaces new democracy events so you don't have to manually check every visit. Notifications fire when a referendum is tabled or a new public proposal is submitted on-chain.</p>
+            <h3>Where you'll see them</h3>
+            <ul>
+                <li><b>Homepage banner</b>: a coloured row at the top of the dashboard with the event ID and a View button. Persists until you click the ✕ close button or visit the event's page.</li>
+                <li><b>Toast notification</b>: a brief popup in the bottom-right when the explorer's poller first detects a new event while you're browsing. Auto-dismisses after 6 seconds; click to open, ✕ to dismiss early.</li>
+            </ul>
+            <h3>How "new" is decided</h3>
+            <p>The explorer keeps the highest referendum and proposal index you've previously seen in your browser's local storage. When the on-chain index is higher, you get a banner. Closing the banner stops THIS index from popping up again; a later event still triggers a fresh banner.</p>
+            <p>Visiting the <a href="/calendar" class="item-link">Calendar</a> page also marks events as "seen" — useful if you've reviewed today's governance and want to start fresh.</p>
+            <h3>Privacy</h3>
+            <p>The poll runs every 60 seconds against <code>/api/governance/latest</code> and only reads public on-chain state. No tracking. The "last seen" indices live in your browser and are documented at <a href="/cookies" class="item-link">/cookies</a>.</p>
         `
     },
     {
@@ -3591,10 +3824,224 @@ function routeTo(target) {
                 // /brand — static cheatsheet, no data fetch. Tokens are read
                 // live from :root inside renderBrandPage.
                 renderBrandPage();
+            } else if (mainTarget === 'calendar') {
+                // /calendar — unified governance timeline. Fetches once on
+                // route entry; sorted active-first, then most-recent.
+                renderCalendarPage();
+                // Mark active referenda/proposals as "seen" — visiting the
+                // calendar implies awareness, so future banners only pop on
+                // events after this index.
+                markGovernanceSeen('referendum', getLsNumber('pdex_gov_seen_ref'));
+                markGovernanceSeen('proposal',   getLsNumber('pdex_gov_seen_proposal'));
             }
         } else {
             page.style.display = 'none';
         }
+    });
+}
+
+// ─── Governance calendar ─────────────────────────────────────────────────────
+// /calendar route: unified timeline of democracy referenda, council motions,
+// and treasury proposals. Fetched once per page entry from /api/governance/calendar.
+// Two views toggled by pill buttons:
+//   - List (default): scrollable, time-sorted, kind-filterable. Uses makeTable.
+//   - Month: a 7-column grid view of the current month + adjacent for context.
+// Both modes are driven by the same in-memory `events` array.
+
+let calendarEvents = [];
+let calendarFilter = 'all';   // 'all' | 'referendum' | 'motion' | 'treasury'
+let calendarView   = 'list';  // 'list' | 'month'
+let calendarMonthOffset = 0;  // 0 = current month, -1 = previous, +1 = next
+
+async function renderCalendarPage() {
+    const container = document.getElementById('calendar-page-content');
+    if (!container) return;
+
+    container.innerHTML = `
+        <div class="calendar-header">
+            <h1>Governance calendar ${helpIcon('governance-calendar', 'About this page')}</h1>
+            <p class="calendar-tagline">
+                On-chain governance at a glance — referenda, treasury proposals, and council motions
+                with their lifecycle dates and current status.
+            </p>
+        </div>
+        <div class="calendar-controls">
+            <div class="calendar-pills" role="tablist" aria-label="Filter by event type">
+                <button type="button" class="pill active" data-cal-filter="all">All</button>
+                <button type="button" class="pill" data-cal-filter="referendum">Referenda</button>
+                <button type="button" class="pill" data-cal-filter="motion">Council motions</button>
+                <button type="button" class="pill" data-cal-filter="treasury">Treasury</button>
+            </div>
+            <div class="calendar-view-toggle" role="tablist" aria-label="View style">
+                <button type="button" class="pill active" data-cal-view="list">
+                    <i class='bx bx-list-ul'></i> List
+                </button>
+                <button type="button" class="pill" data-cal-view="month">
+                    <i class='bx bx-calendar'></i> Month
+                </button>
+            </div>
+        </div>
+        <div id="calendar-body" class="calendar-body">
+            <div class="calendar-loading">Loading governance events…</div>
+        </div>
+    `;
+
+    // Wire pills.
+    container.querySelectorAll('[data-cal-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            container.querySelectorAll('[data-cal-filter]').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            calendarFilter = btn.getAttribute('data-cal-filter');
+            paintCalendarBody();
+        });
+    });
+    container.querySelectorAll('[data-cal-view]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            container.querySelectorAll('[data-cal-view]').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            calendarView = btn.getAttribute('data-cal-view');
+            calendarMonthOffset = 0;
+            paintCalendarBody();
+        });
+    });
+
+    try {
+        const res = await fetch('/api/governance/calendar', { cache: 'no-store' });
+        const data = await parseJsonResponse(res);
+        calendarEvents = Array.isArray(data.events) ? data.events : [];
+        paintCalendarBody();
+    } catch (err) {
+        const body = document.getElementById('calendar-body');
+        if (body) body.innerHTML = `<div class="calendar-error">Couldn't load governance events: ${stakingEscapeHtml(err.message || String(err))}</div>`;
+    }
+}
+
+function calendarFilteredEvents() {
+    if (calendarFilter === 'all') return calendarEvents;
+    return calendarEvents.filter(e => e.kind === calendarFilter);
+}
+
+function paintCalendarBody() {
+    const body = document.getElementById('calendar-body');
+    if (!body) return;
+    const events = calendarFilteredEvents();
+    if (events.length === 0) {
+        body.innerHTML = `<div class="calendar-empty">No ${calendarFilter === 'all' ? '' : calendarFilter + ' '}governance events to show yet.</div>`;
+        return;
+    }
+    if (calendarView === 'list') paintCalendarList(body, events);
+    else paintCalendarMonth(body, events);
+}
+
+function paintCalendarList(body, events) {
+    // Active first (already sorted server-side), then time-descending.
+    body.innerHTML = '<div id="calendar-table-mount"></div>';
+    makeTable({
+        mount: '#calendar-table-mount',
+        rows: events,
+        columns: [
+            { key: 'kind', label: 'Kind', sortable: true,
+                render: (v) => `<span class="calendar-kind-badge kind-${v}">${stakingEscapeHtml(calendarKindLabel(v))}</span>` },
+            { key: 'title', label: 'Item', sortable: true,
+                render: (v, row) => `<a href="${row.link}" data-spa-link="true">${stakingEscapeHtml(v)}</a>` },
+            { key: 'status', label: 'Status', sortable: true,
+                render: (v, row) => `<span class="calendar-status ${row.isActive ? 'active' : 'resolved'}">${stakingEscapeHtml(v || '—')}</span>` },
+            { key: 'startTime', label: 'Tabled', sortable: true,
+                render: (v) => v ? formatLocalDate(new Date(v)) : '—' },
+            { key: 'endTime', label: 'Ends / Ended', sortable: true,
+                render: (v, row) => {
+                    if (!v) return '—';
+                    const when = formatLocalDate(new Date(v));
+                    if (!row.isActive) return when;
+                    // Active — add a countdown.
+                    const remaining = v - Date.now();
+                    if (remaining <= 0) return when + ' <span class="calendar-countdown soon">(closing)</span>';
+                    const days = Math.floor(remaining / 86400000);
+                    const hours = Math.floor((remaining % 86400000) / 3600000);
+                    const label = days >= 1 ? `${days}d ${hours}h` : `${hours}h`;
+                    return when + ` <span class="calendar-countdown">(${label} left)</span>`;
+                } }
+        ],
+        defaultSort: { col: 'endTime', dir: 'desc' },
+        pageSize: 25,
+        filterPlaceholder: 'Filter by ID, status, proposer…'
+    });
+}
+
+function calendarKindLabel(kind) {
+    if (kind === 'referendum') return 'Referendum';
+    if (kind === 'motion')     return 'Motion';
+    if (kind === 'treasury')   return 'Treasury';
+    return kind || '—';
+}
+
+function paintCalendarMonth(body, events) {
+    const now = new Date();
+    now.setMonth(now.getMonth() + calendarMonthOffset);
+    const year  = now.getFullYear();
+    const month = now.getMonth();
+    const monthLabel = now.toLocaleString('default', { month: 'long', year: 'numeric' });
+
+    // Build a 6-row × 7-col grid starting from the Sunday on/before the 1st.
+    const first = new Date(year, month, 1);
+    const startSunday = new Date(first);
+    startSunday.setDate(first.getDate() - first.getDay());
+
+    // Bucket events into "day index" relative to startSunday for fast lookup.
+    const buckets = new Map();
+    const dayKey = (d) => Math.floor((d - startSunday) / 86400000);
+    events.forEach(e => {
+        const stamps = [e.startTime, e.endTime].filter(Boolean);
+        stamps.forEach(t => {
+            const d = new Date(t);
+            const k = dayKey(d);
+            if (k < 0 || k > 41) return;
+            if (!buckets.has(k)) buckets.set(k, []);
+            buckets.get(k).push({ event: e, isEnd: t === e.endTime });
+        });
+    });
+
+    let cells = '';
+    for (let i = 0; i < 42; i++) {
+        const d = new Date(startSunday);
+        d.setDate(startSunday.getDate() + i);
+        const inMonth = d.getMonth() === month;
+        const isToday = d.toDateString() === new Date().toDateString();
+        const dayEvents = buckets.get(i) || [];
+        const dots = dayEvents.slice(0, 4).map(({ event, isEnd }) =>
+            `<a class="calendar-dot kind-${event.kind}" href="${event.link}" data-spa-link="true"
+                title="${stakingEscapeHtml(event.title)} — ${isEnd ? 'ends' : 'tabled'}">
+                ${stakingEscapeHtml(event.title.replace(/^[^#]*/, ''))}
+             </a>`).join('');
+        const overflow = dayEvents.length > 4 ? `<span class="calendar-dot-more">+${dayEvents.length - 4}</span>` : '';
+        cells += `
+            <div class="calendar-cell ${inMonth ? '' : 'out-of-month'} ${isToday ? 'today' : ''}">
+                <div class="calendar-cell-date">${d.getDate()}</div>
+                <div class="calendar-cell-events">${dots}${overflow}</div>
+            </div>`;
+    }
+
+    body.innerHTML = `
+        <div class="calendar-month-header">
+            <button type="button" class="pill" data-cal-month-nav="-1" aria-label="Previous month">
+                <i class='bx bx-chevron-left'></i>
+            </button>
+            <div class="calendar-month-label">${monthLabel}</div>
+            <button type="button" class="pill" data-cal-month-nav="+1" aria-label="Next month">
+                <i class='bx bx-chevron-right'></i>
+            </button>
+        </div>
+        <div class="calendar-weekheader">
+            ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => `<div>${d}</div>`).join('')}
+        </div>
+        <div class="calendar-grid">${cells}</div>
+    `;
+
+    body.querySelectorAll('[data-cal-month-nav]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            calendarMonthOffset += parseInt(btn.getAttribute('data-cal-month-nav'), 10);
+            paintCalendarBody();
+        });
     });
 }
 

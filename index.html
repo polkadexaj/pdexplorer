@@ -189,6 +189,7 @@
                 <a href="/democracy" class="nav-item" data-target="democracy"><i class='bx bx-book-content'></i> Democracy</a>
                 <a href="/council" class="nav-item" data-target="council"><i class='bx bx-group'></i> Council</a>
                 <a href="/treasury" class="nav-item" data-target="treasury"><i class='bx bx-wallet'></i> Treasury</a>
+                <a href="/calendar" class="nav-item" data-target="calendar"><i class='bx bx-calendar'></i> Calendar</a>
                 <a href="/discussions" class="nav-item" data-target="discussions"><i class='bx bx-chat'></i> Discussions</a>
                 
                 <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Community Projects</div>
@@ -245,6 +246,13 @@
 
             <!-- Dashboard Content -->
             <div class="dashboard page-section" data-page="home">
+                <!-- Governance notice: persistent banner that appears when a
+                     new referendum or public proposal has been tabled since
+                     the user's last visit. JS-driven; populated by
+                     pollGovernanceLatest() in script.js. Has its own close
+                     button per item; close state survives reloads (localStorage). -->
+                <div id="governance-notice-zone"></div>
+
                 <!-- Top Stats Grid -->
                 <section class="stats-grid">
                     <div class="stat-card glass">
@@ -969,6 +977,15 @@
                 <div id="brand-page-content"></div>
             </div>
 
+            <!-- Governance calendar (/calendar) -->
+            <!-- Unified timeline of democracy referenda, council motions, and
+                 treasury proposals. JS-rendered into #calendar-page-content;
+                 see renderCalendarPage() in script.js for the render path.
+                 Two view modes (list + month) and a kind filter live inside. -->
+            <div class="calendar-page page-section" data-page="calendar" style="display: none;">
+                <div id="calendar-page-content"></div>
+            </div>
+
             <!-- Help Center -->
             <!-- Two-column layout: category sidebar on the left, article on the
                  right. Populated by script.js (HELP_TOPICS + renderHelp*). The
@@ -1078,6 +1095,10 @@
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_tour_seen_v1</code></td><td style="padding: 10px 12px;">A boolean flag once you've completed the onboarding tour.</td><td style="padding: 10px 12px;">So we don't pop the tour up again every visit.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_banner_dismissed</code></td><td style="padding: 10px 12px;">A flag set when you dismiss the storage notice banner.</td><td style="padding: 10px 12px;">So we don't show it again.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_apr_period</code></td><td style="padding: 10px 12px;">The APR-history window you last picked (7d / 30d / 90d / 6m / 1y / all-time).</td><td style="padding: 10px 12px;">So your selection persists on the My Account page.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_ref</code></td><td style="padding: 10px 12px;">The highest democracy referendum index you've been notified of.</td><td style="padding: 10px 12px;">So new-event banners and toasts only pop for referenda tabled after the last one you saw.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_proposal</code></td><td style="padding: 10px 12px;">The highest public-proposal index you've been notified of.</td><td style="padding: 10px 12px;">Same as above for democracy public proposals.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_banner_dismissed_ref</code></td><td style="padding: 10px 12px;">Index of the most recent referendum banner you closed.</td><td style="padding: 10px 12px;">So a banner you dismissed stays dismissed for that specific event; a newer event still triggers a fresh one.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_banner_dismissed_proposal</code></td><td style="padding: 10px 12px;">Index of the most recent proposal banner you closed.</td><td style="padding: 10px 12px;">Same as above for public proposals.</td></tr>
                                 </tbody>
                             </table>
                         </div>
