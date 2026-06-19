@@ -430,6 +430,20 @@ let globalApi = null;
 let rpcDisconnectStartedAt = null;
 let rpcResetInFlight = false;
 
+// Generation counter: incremented at the start of every connectRpc() call.
+// Each WsProvider/ApiPromise's event handlers capture the generation they
+// were registered under. When a stale (orphaned) handler fires after a
+// rebuild, it sees a mismatched generation and no-ops — preventing zombie
+// handlers from older WsProvider instances from mutating global state
+// (rpcConnected / rpcDisconnectStartedAt) after they've been logically
+// replaced. This was the root cause of the indexer worker getting stuck
+// after RPC incidents: many concurrent in-flight calls during disconnect
+// caused multiple rebuilds in quick succession, each leaving event handlers
+// behind, and the resulting zombie events kept resetting rpcDisconnectStartedAt
+// to "now" so the watchdog's outage timer never advanced past the reset
+// threshold.
+let rpcGen = 0;
+
 // Chain-head freshness tracking. A separate failure mode from "WS dropped":
 // the WebSocket stays connected but the upstream node stops advancing the
 // chain head (peer loss, clock skew rejecting incoming blocks, runtime
@@ -4482,8 +4496,20 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
     // (re)create — keeping them across a rebuild would risk type-mismatch
     // errors on decode. Identity cache is a plain string map and survives.
     clearRpcCaches();
+
+    // Bump the generation. Event handlers below capture `myGen` in closure;
+    // when any handler fires, it compares against the current `rpcGen` and
+    // bails if it's stale (i.e., a later connectRpc() has run since). This
+    // prevents zombie handlers from old WsProvider/ApiPromise instances —
+    // which polkadot.js's auto-reconnect can keep firing for some time after
+    // we've called disconnect() — from corrupting rpcDisconnectStartedAt or
+    // rpcConnected. See module-scope comment on `rpcGen`.
+    const myGen = ++rpcGen;
+    const isStale = () => myGen !== rpcGen;
+
     const wsProvider = new WsProvider(RPC_ENDPOINTS.length > 1 ? RPC_ENDPOINTS : RPC_ENDPOINTS[0], RPC_AUTO_RECONNECT_MS);
     wsProvider.on('connected', () => {
+        if (isStale()) return;
         rpcConnected = true;
         // Note in the log how long the outage was, if any. Useful in postmortem.
         if (rpcDisconnectStartedAt) {
@@ -4495,6 +4521,7 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
         rpcDisconnectStartedAt = null;
     });
     wsProvider.on('disconnected', () => {
+        if (isStale()) return;
         rpcConnected = false;
         // Stamp the moment we first noticed disconnect. Watchdog reads this.
         // Don't overwrite if already stamped — we want continuous-disconnect duration.
@@ -4502,6 +4529,7 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
         console.warn('[RPC] disconnected — auto-reconnect every ' + RPC_AUTO_RECONNECT_MS + ' ms');
     });
     wsProvider.on('error', (err) => {
+        if (isStale()) return;
         console.warn('[RPC] provider error:', err && err.message ? err.message : err);
     });
 
@@ -4514,15 +4542,23 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
         console.error('[RPC] ApiPromise.create failed; provider will keep retrying:', err && err.message ? err.message : err);
         return;
     }
+    // If a newer connectRpc() ran while we were awaiting ApiPromise.create,
+    // discard this one rather than overwriting the newer globalApi.
+    if (isStale()) {
+        try { await globalApi.disconnect(); } catch (_) { /* best effort */ }
+        return;
+    }
     // ApiPromise also emits these on top of WsProvider — useful when a single
     // request times out and the api lib decides to flag itself disconnected
     // before the underlying socket closes.
     globalApi.on('disconnected', () => {
+        if (isStale()) return;
         rpcConnected = false;
         if (!rpcDisconnectStartedAt) rpcDisconnectStartedAt = Date.now();
         console.warn('[RPC] api disconnected');
     });
     globalApi.on('connected', () => {
+        if (isStale()) return;
         rpcConnected = true;
         if (rpcDisconnectStartedAt) {
             const outageSec = Math.round((Date.now() - rpcDisconnectStartedAt) / 1000);
@@ -4532,7 +4568,10 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
             console.log('[RPC] api connected');
         }
     });
-    globalApi.on('error',        (err) => { console.warn('[RPC] api error:', err && err.message ? err.message : err); });
+    globalApi.on('error', (err) => {
+        if (isStale()) return;
+        console.warn('[RPC] api error:', err && err.message ? err.message : err);
+    });
     rpcConnected = globalApi.isConnected;
     if (rpcConnected) rpcDisconnectStartedAt = null;
     console.log('Connected to Polkadex RPC at ' + RPC_ENDPOINTS.join(', '));
