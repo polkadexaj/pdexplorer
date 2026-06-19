@@ -7097,8 +7097,13 @@ async function submitStakeTx() {
     if (hasAmount) {
         const amt = parseFloat(amtStr);
         if (!Number.isFinite(amt) || amt <= 0) return showStakeError('Enter a valid amount.');
-        if (amt > available) return showStakeError(`Amount exceeds your available balance (${stakingFormatPDEX(available)} PDEX).`);
-        if (amt > available - 0.01) return showStakeError(`Keep at least 0.01 PDEX free for the transaction fee. Try ${stakingFormatPDEX(Math.max(0, available - 0.01))} PDEX or less.`);
+        // 1e-6 PDEX tolerance absorbs parseFloat / toFixed(4) precision drift
+        // so a user who types the displayed balance manually doesn't get a
+        // false "exceeds available" rejection. The 0.01 fee buffer below is
+        // orders of magnitude larger than this tolerance, so it's still safe.
+        const balanceTolerance = 1e-6;
+        if (amt > available + balanceTolerance) return showStakeError(`Amount exceeds your available balance (${stakingFormatPDEX(available)} PDEX).`);
+        if (amt > available - 0.01 + balanceTolerance) return showStakeError(`Keep at least 0.01 PDEX free for the transaction fee. Try ${stakingFormatPDEX(Math.max(0, available - 0.01))} PDEX or less.`);
         if (!hasBond) {
             const minStake = Number((data.network && data.network.minStake) || 0);
             if (minStake > 0 && amt < minStake) {
@@ -7727,8 +7732,14 @@ async function submitSendTx() {
 
     const available = getStakeableBalance(data);
     const feeBuffer = (sendLastFeePDEX != null) ? Math.max(sendLastFeePDEX * 1.2, SEND_FEE_BUFFER / 5) : SEND_FEE_BUFFER;
-    if (amt > available) return showSendError(`Amount exceeds your transferable balance (${stakingFormatPDEX(available)} PDEX).`);
-    if (amt > available - feeBuffer) return showSendError(`Keep at least ~${stakingFormatPDEX(feeBuffer)} PDEX free for the network fee. Try ${stakingFormatPDEX(Math.max(0, available - feeBuffer))} PDEX or less.`);
+    // Float-tolerance pad: the displayed "available" balance is a float that
+    // can drift by a few ULPs from the on-chain u128. A user who types the
+    // displayed value back in shouldn't get a false "exceeds balance"
+    // rejection. The fee buffer below is dynamically computed and orders of
+    // magnitude larger than this pad, so it's still safe.
+    const balanceTolerance = 1e-6;
+    if (amt > available + balanceTolerance) return showSendError(`Amount exceeds your transferable balance (${stakingFormatPDEX(available)} PDEX).`);
+    if (amt > available - feeBuffer + balanceTolerance) return showSendError(`Keep at least ~${stakingFormatPDEX(feeBuffer)} PDEX free for the network fee. Try ${stakingFormatPDEX(Math.max(0, available - feeBuffer))} PDEX or less.`);
 
     // Warn the user if sending below the existential deposit to a recipient
     // that probably doesn't exist yet — the runtime will reject the transfer.
