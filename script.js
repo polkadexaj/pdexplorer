@@ -3849,9 +3849,9 @@ function routeTo(target) {
 // Both modes are driven by the same in-memory `events` array.
 
 let calendarEvents = [];
-let calendarFilter = 'all';   // 'all' | 'referendum' | 'motion' | 'treasury'
-let calendarView   = 'list';  // 'list' | 'month'
-let calendarMonthOffset = 0;  // 0 = current month, -1 = previous, +1 = next
+let calendarFilter = 'all';    // 'all' | 'referendum' | 'motion' | 'treasury'
+let calendarView   = 'month';  // 'list' | 'month' — month is the default per user intent
+let calendarMonthOffset = 0;   // 0 = current month, -1 = previous, +1 = next
 
 async function renderCalendarPage() {
     const container = document.getElementById('calendar-page-content');
@@ -3873,10 +3873,10 @@ async function renderCalendarPage() {
                 <button type="button" class="pill" data-cal-filter="treasury">Treasury</button>
             </div>
             <div class="calendar-view-toggle" role="tablist" aria-label="View style">
-                <button type="button" class="pill active" data-cal-view="list">
+                <button type="button" class="pill" data-cal-view="list">
                     <i class='bx bx-list-ul'></i> List
                 </button>
-                <button type="button" class="pill" data-cal-view="month">
+                <button type="button" class="pill active" data-cal-view="month">
                     <i class='bx bx-calendar'></i> Month
                 </button>
             </div>
@@ -4043,6 +4043,65 @@ function paintCalendarMonth(body, events) {
             paintCalendarBody();
         });
     });
+}
+
+// Open the relevant governance detail modal when arriving at /democracy,
+// /treasury, or /council with a query string identifying a specific item.
+// Called by each governance page's fetch handler AFTER its data is loaded,
+// so the lookup can succeed. returnPage='calendar' means the modal's close
+// button will navigate the user back to /calendar via the existing
+// closeGovernanceDetailModal logic.
+//
+// Supported query params:
+//   /democracy?ref=N        → opens referendum #N
+//   /democracy?proposal=N   → opens public proposal #N
+//   /treasury?proposal=N    → opens treasury proposal #N
+//   /council?motion=N       → opens council motion #N
+function tryOpenFromQueryString(page) {
+    let params;
+    try { params = new URLSearchParams(window.location.search || ''); }
+    catch (_) { return; }
+
+    if (page === 'democracy' && typeof democracyData === 'object' && democracyData) {
+        const refIdx = params.get('ref');
+        if (refIdx != null && refIdx !== '') {
+            const referenda = Array.isArray(democracyData.referenda) ? democracyData.referenda : [];
+            const row = referenda.find(r => String(r.refIndex) === String(refIdx));
+            if (row) {
+                openGovernanceDetailModal({ kind: 'referendum', row, returnPage: 'calendar' });
+                return;
+            }
+        }
+        const propIdx = params.get('proposal');
+        if (propIdx != null && propIdx !== '') {
+            const props = Array.isArray(democracyData.publicProposals) ? democracyData.publicProposals : [];
+            const row = props.find(p => String(p.index) === String(propIdx));
+            if (row) {
+                openGovernanceDetailModal({ kind: 'public-proposal', row, returnPage: 'calendar' });
+                return;
+            }
+        }
+    } else if (page === 'treasury' && typeof treasuryData === 'object' && treasuryData) {
+        const propIdx = params.get('proposal');
+        if (propIdx != null && propIdx !== '') {
+            const props = Array.isArray(treasuryData.allProposals) ? treasuryData.allProposals : [];
+            const row = props.find(p => String(p.id) === String(propIdx));
+            if (row) {
+                openGovernanceDetailModal({ kind: 'treasury', row, returnPage: 'calendar' });
+                return;
+            }
+        }
+    } else if (page === 'council' && typeof councilData === 'object' && councilData) {
+        const motionIdx = params.get('motion');
+        if (motionIdx != null && motionIdx !== '') {
+            const motions = Array.isArray(councilData.motions) ? councilData.motions : [];
+            const row = motions.find(m => String(m.motionIndex) === String(motionIdx));
+            if (row) {
+                openGovernanceDetailModal({ kind: 'motion', row, returnPage: 'calendar' });
+                return;
+            }
+        }
+    }
 }
 
 function renderJSONTree(obj, indent = 0) {
@@ -7938,6 +7997,9 @@ async function fetchDemocracyData() {
         if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
         democracyData = data;
         renderDemocracy();
+        // Deep-link: if we arrived from /calendar with ?ref=N or ?proposal=N,
+        // open the matching detail modal now that data is loaded.
+        tryOpenFromQueryString('democracy');
     } catch (e) {
         root.innerHTML = `
             <div class="list-container glass" style="padding:40px;text-align:center;">
@@ -8394,6 +8456,9 @@ async function fetchCouncilData() {
         renderList(runnersUp, 'council-runnersup-list');
         renderList(candidates, 'council-candidates-list');
         renderCouncilMotions(data);
+        // Deep-link: if we arrived from /calendar with ?motion=N, open the
+        // matching motion detail modal now that data is loaded.
+        tryOpenFromQueryString('council');
     } catch (err) {
         console.error('Failed to fetch council data', err);
         const failMsg = '<tr><td colspan="2" style="text-align:center; padding:20px; color: var(--error);">Failed to load council data.</td></tr>';
@@ -8856,6 +8921,9 @@ async function fetchTreasuryData() {
         if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
         treasuryData = data;
         renderTreasury();
+        // Deep-link: if we arrived from /calendar with ?proposal=N, open the
+        // matching treasury proposal modal now that data is loaded.
+        tryOpenFromQueryString('treasury');
     } catch (e) {
         root.innerHTML = `
             <div class="list-container glass" style="padding:40px;text-align:center;">
@@ -9277,6 +9345,10 @@ function closeGovernanceDetailModal({ restorePage = true } = {}) {
     } else if (state.returnPage === 'council' && state.returnTab) {
         const tabBtn = document.querySelector(`.council-page .account-tab[data-tab="${state.returnTab}"]`);
         if (tabBtn) tabBtn.click();
+    } else if (state.returnPage === 'calendar') {
+        // User came from /calendar — send them back. SPA navigates to /calendar
+        // and re-renders the month/list view from cached events.
+        navigateTo('calendar');
     }
 }
 
