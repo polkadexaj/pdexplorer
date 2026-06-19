@@ -353,9 +353,21 @@ const RPC_AUTO_RECONNECT_MS = readPositiveInteger(process.env.POLKADEX_WS_RECONN
 //     Last-resort backstop; should rarely fire in practice.
 //
 // Operators can disable either by setting the env to a very large value.
-const RPC_RESET_AFTER_MS = readPositiveInteger(process.env.RPC_RESET_AFTER_MS, 5 * 60 * 1000);
+// 5-min default was sized for the single-origin era, when a real upstream
+// outage was the dominant disconnect cause and rebuilds during transient
+// blips were undesired noise. With the CF Load Balancer now fronting two
+// origins, the failure mode flips: the LB is statistically almost always
+// reachable, so any disconnect lasting >30s is far more likely to be
+// "WsProvider stuck after origin churn" than "the entire LB is down" —
+// in which case a fresh rebuild lets the new connection re-roll onto a
+// healthy origin. Failover drill confirmed this empirically: with the old
+// 5-min reset, automatic failover to Faraday took 5m11s. With a 30s reset,
+// the same drill recovers within ~45s of nginx going down on the primary.
+const RPC_RESET_AFTER_MS = readPositiveInteger(process.env.RPC_RESET_AFTER_MS, 30 * 1000);
 const RPC_EXIT_AFTER_MS  = readPositiveInteger(process.env.RPC_EXIT_AFTER_MS,  30 * 60 * 1000);
-const RPC_WATCHDOG_INTERVAL_MS = readPositiveInteger(process.env.RPC_WATCHDOG_INTERVAL_MS, 30 * 1000);
+// Watchdog tick has to be shorter than RPC_RESET_AFTER_MS for the reset
+// threshold to fire promptly. 10s gives ~3 ticks of grace before the 30s reset.
+const RPC_WATCHDOG_INTERVAL_MS = readPositiveInteger(process.env.RPC_WATCHDOG_INTERVAL_MS, 10 * 1000);
 let rpcConnected = false;
 
 // True only when both the `WsProvider` thinks it's connected *and* the
@@ -4802,8 +4814,20 @@ let lastStuckWsRebuildAt = 0;
 // We trigger an immediate api rebuild so a fresh WS connection can land on a
 // different Cloudflare LB origin within seconds.
 function isPolkadotWsRequestTimeout(err) {
-    return err && err.message
-        && /No response received from RPC endpoint/.test(err.message);
+    if (!err || !err.message) return false;
+    // Two patterns from polkadot.js that both indicate the WS is wedged:
+    //
+    //   "No response received from RPC endpoint in 60s"
+    //     - Per-request timeout. WS is TCP-connected but request is silently
+    //       dropping. Force a rebuild so a new WS lands on a different LB origin.
+    //
+    //   "Connection was closed before it was established"
+    //     - WsProvider tried to reconnect but the socket closed mid-handshake.
+    //       Surfaces continuously every 2.5s while the provider auto-retries on
+    //       a dead origin. Force-rebuild lets the next attempt re-roll through
+    //       the LB to a healthy origin.
+    return /No response received from RPC endpoint/.test(err.message)
+        || /Connection was closed before it was established/.test(err.message);
 }
 
 async function rebuildApiOnce(reason) {
