@@ -161,6 +161,42 @@ const RECENT_SYNC_INTERVAL = 12 * 1000;
 // at most ~5 minutes while the background refresh catches up.
 const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 10 * 60 * 1000);
 
+// Cache for staking.minNominatorBond. This value changes very rarely (only by
+// governance vote) but is critical for the unstake modal's pre-flight check
+// and the user-facing "Network minimum bond" display. Without a cache, a
+// transient RPC error during the wallet load silently returns 0, which the
+// frontend then treats as "no constraint" and skips the protective check —
+// users see WASM traps instead of friendly "leave at least N PDEX" messages.
+// Cache lasts an hour; refreshed lazily on /api/wallet hits.
+const MIN_NOMINATOR_BOND_TTL_MS = readPositiveInteger(
+    process.env.MIN_NOMINATOR_BOND_TTL_MS, 60 * 60 * 1000);
+let cachedMinNominatorBond = { value: 0, fetchedAt: 0 };
+
+async function getMinNominatorBondCached() {
+    const now = Date.now();
+    const fresh = cachedMinNominatorBond.value > 0
+        && (now - cachedMinNominatorBond.fetchedAt) < MIN_NOMINATOR_BOND_TTL_MS;
+    if (fresh) return cachedMinNominatorBond.value;
+    if (!isRpcReady()) {
+        // Don't blank the cache when RPC is mid-reconnect — serve the last
+        // good value if we have one, even if technically stale.
+        return cachedMinNominatorBond.value;
+    }
+    try {
+        const v = balanceToPDEX(await globalApi.query.staking.minNominatorBond());
+        if (v > 0) {
+            cachedMinNominatorBond = { value: v, fetchedAt: now };
+        }
+        return cachedMinNominatorBond.value;
+    } catch (err) {
+        // Log the failure (vs the previous silent swallow) so we can spot
+        // patterns in production. Keep returning the cached value if any.
+        console.warn('[wallet] minNominatorBond fetch failed:',
+            err && err.message ? err.message : err);
+        return cachedMinNominatorBond.value;
+    }
+}
+
 // Governance sync cadence (council motions, treasury proposals, democracy
 // referenda). These changed every 5 minutes by default historically;
 // override via GOVERNANCE_REFRESH_MS for all three at once, or use the
@@ -2888,8 +2924,9 @@ app.get('/api/wallet/:address', async (req, res) => {
         // Network staking parameters.
         const networkData = await getNetworkInfo().catch(() => null);
         const ni = networkData ? networkData.networkInfo : null;
-        let minStake = 0;
-        try { minStake = balanceToPDEX(await globalApi.query.staking.minNominatorBond()); } catch (e) { }
+        // Caches the value and serves a stale-but-good copy through reconnect
+        // blips so the unstake modal never silently loses its constraint info.
+        const minStake = await getMinNominatorBondCached();
         const constNumber = c => { try { return c != null ? Number(c.toString()) : 0; } catch (e) { return 0; } };
         const staking = globalApi.consts.staking || {};
         const babe = globalApi.consts.babe || {};

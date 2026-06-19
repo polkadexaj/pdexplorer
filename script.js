@@ -6523,6 +6523,19 @@ async function submitUnstakeTx() {
             `or enter a smaller amount so that at least ${stakingFormatPDEX(minBond)} PDEX stays bonded.`
         );
     }
+    // When the network minimum isn't known (the backend couldn't fetch it, so
+    // data.network.minStake is 0 or missing), we can't do the precise check
+    // above. Warn the user so a partial unbond doesn't go to chain and trap.
+    // Allow Max (full unbond) because that always succeeds regardless of
+    // minNominatorBond.
+    if (!(minBond > 0) && remaining > fullUnbondTolerance) {
+        return fail(
+            `The network minimum bond couldn't be read from the chain, so we can't ` +
+            `safely validate a partial unbond — the chain may reject it with a runtime ` +
+            `error. Click Max to unbond everything (${stakingFormatPDEX(active)} PDEX), ` +
+            `or try again in a moment.`
+        );
+    }
 
     await submitSignedTx({
         buildTx: (api) => api.tx.staking.unbond(pdexToPlanck(amtStr)),
@@ -6530,13 +6543,39 @@ async function submitUnstakeTx() {
         button: document.getElementById('submit-unstake-tx-btn'),
         busyText: 'Signing…',
         idleText: 'Sign & Unstake',
-        onError: fail,
+        onError: (err) => fail(decodeUnstakeError(err, { active, amt, minBond })),
         onSuccess: () => {
             const modal = document.getElementById('unstake-modal');
             if (modal) modal.style.display = 'none';
             setTimeout(() => fetchWalletDashboard(data.address), 2500);
         }
     });
+}
+
+// Translate the scariest runtime errors into one-sentence user guidance.
+// The chain returns a WASM unreachable trap when staking.unbond is rejected
+// during validate_transaction (e.g., the residue would be below
+// minNominatorBond but our client-side check couldn't catch it because we
+// didn't have a fresh value). Surfacing the raw stack trace makes users
+// think the explorer is broken; this turns it into actionable advice.
+function decodeUnstakeError(rawErr, ctx) {
+    const msg = (rawErr && (rawErr.message || String(rawErr))) || '';
+    // WASM trap from TaggedTransactionQueue_validate_transaction:
+    if (/wasm.*unreachable|TaggedTransactionQueue|Verification Error.*1002/i.test(msg)) {
+        const lines = [
+            `The chain rejected this unbond. The usual cause is that the post-unbond ` +
+            `remainder would fall below the network's minNominatorBond.`
+        ];
+        if (ctx && ctx.active > 0) {
+            lines.push(
+                `Try clicking Max to unbond everything (${stakingFormatPDEX(ctx.active)} PDEX). ` +
+                `Full unbond always succeeds regardless of minNominatorBond.`
+            );
+        }
+        return lines.join(' ');
+    }
+    // Otherwise return the raw message — it's almost always already user-readable.
+    return msg || 'Unstake failed. Please try again or refresh the page.';
 }
 
 // --- Set / Clear on-chain identity -----------------------------------------
