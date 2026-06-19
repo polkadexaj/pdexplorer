@@ -4645,8 +4645,23 @@ async function chainHeadWatchdog() {
 // Both thresholds are env-tunable. To disable a layer entirely, set its value
 // very high (e.g. RPC_EXIT_AFTER_MS=86400000 for 24h).
 async function rpcWatchdog() {
-    if (!rpcDisconnectStartedAt) return;
     if (rpcResetInFlight) return; // a previous reset attempt is still running
+
+    // SAFETY: detect the "missed event" case. polkadot.js fires `disconnected`
+    // events to set rpcDisconnectStartedAt and `connected` events to clear it.
+    // When the WS rapidly cycles (open→close→open→close — typical when CF LB
+    // routes to a sick origin that accepts TCP but immediately drops the
+    // upgrade), the `connected` events transiently clear the marker even
+    // though we're not actually usable. The original watchdog then sees no
+    // marker → returns → and we get stuck "between reconnects" with no
+    // periodic rebuild firing. This safety arms the marker from observed
+    // state whenever it's missing while isRpcReady() returns false.
+    if (!isRpcReady() && !rpcDisconnectStartedAt) {
+        rpcDisconnectStartedAt = Date.now();
+        console.warn('[RPC-WATCHDOG] missed event — WS not ready but no disconnect marker; arming from now');
+    }
+
+    if (!rpcDisconnectStartedAt) return;
     const outageMs = Date.now() - rpcDisconnectStartedAt;
     const outageMin = Math.round(outageMs / 60000);
 
