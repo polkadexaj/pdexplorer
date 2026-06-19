@@ -3341,12 +3341,69 @@ h1, h2, h3 { font-weight: 600; }
 .calendar-dot.kind-treasury   { background: rgba(155, 89, 255, 0.22); }
 .calendar-dot-more { color: rgba(255,255,255,0.5); font-size: 0.72rem; padding: 2px 6px; }
 
+/* ─── .pill: chip-style toggle / nav button (calendar filters, view toggle,
+        month prev/next). Two modes: idle = subtle glass chip; .active = solid
+        brand-primary chip. Designed to match .reward-filter-btn semantics
+        while standing alone outside a group container too. ────────────────── */
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 500;
+    font-family: inherit;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast),
+                color var(--transition-fast),
+                border-color var(--transition-fast),
+                box-shadow var(--transition-fast),
+                transform var(--transition-fast);
+}
+.pill i { font-size: 1rem; line-height: 1; }
+.pill:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.07);
+    border-color: rgba(230, 0, 122, 0.35);
+}
+.pill:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--brand-primary-glow);
+    border-color: var(--brand-primary);
+}
+.pill:active { transform: translateY(1px); }
+.pill.active {
+    background: var(--brand-primary);
+    border-color: var(--brand-primary);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(230, 0, 122, 0.28);
+}
+.pill.active:hover {
+    background: #ff1f8f;
+    border-color: #ff1f8f;
+    color: #fff;
+}
+/* Icon-only variant for the month prev/next chevrons */
+.pill[data-cal-month-nav] {
+    padding: 7px 10px;
+    color: var(--text-primary);
+}
+.pill[data-cal-month-nav] i { font-size: 1.2rem; }
+
 @media (max-width: 720px) {
     #calendar-page-content { padding: 16px 14px 40px; }
     .calendar-controls { flex-direction: column; align-items: stretch; }
+    .calendar-pills, .calendar-view-toggle { justify-content: flex-start; }
     .calendar-cell { min-height: 64px; padding: 4px; }
     .calendar-cell-date { font-size: 0.78rem; }
     .calendar-dot { font-size: 0.66rem; padding: 1px 4px; }
+    .pill { font-size: 0.78rem; padding: 6px 12px; }
 }
 
 /* ─── Email alerts CTA + subscribe modal ─────────────────────────────────── */

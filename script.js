@@ -2957,11 +2957,14 @@ const HELP_TOPICS = [
         slug: 'unstaking',
         title: 'Unstaking & unbonding',
         category: 'staking',
-        keywords: 'unstake unbond withdraw cool down 28 days unlock',
+        keywords: 'unstake unbond withdraw cool down 28 days unlock chill min nominator bond max',
         body: `
             <p>Click <b>Unstake</b> on the dashboard. Enter the PDEX amount you want to unbond. The modal shows the current unbonding period — typically 28 days — and your existing unlocking balance (if any).</p>
             <p>After signing, the PDEX moves into the <b>unbonding</b> state. When the 28 days elapse, one more call (<code>withdrawUnbonded</code>) returns it to your free balance. The explorer prompts you when withdrawal becomes available.</p>
             <p>You can have multiple in-flight unbonding chunks at once, each with its own clock.</p>
+            <h3>Partial vs. full unbond</h3>
+            <p>The network enforces a <b>minimum bond</b> — usually 100 PDEX. A partial unbond that would leave you below that threshold is rejected by the runtime. The modal shows the current minimum so you can size your unbond accordingly.</p>
+            <p>Clicking <b>Max</b> performs a full unbond. The explorer batches a <code>chill</code> call before <code>unbond</code> in a single atomic transaction — this removes your stash from the nominator set first so the runtime accepts an active bond of zero. After a full unbond your nominations are cleared; if you later top up with <code>bond_extra</code>, you'll need to re-nominate before earning rewards again.</p>
         `
     },
     {
@@ -4348,16 +4351,11 @@ function renderJSONTree(obj, indent = 0) {
 }
 
 window.switchAccountTab = function (tabName) {
-    document.querySelectorAll('.account-tab-btn').forEach(btn => btn.classList.remove('active', 'tab-active'));
+    // Toggle the .active class on the .account-tab buttons — visual treatment
+    // (pink underline, hover, transitions) is handled entirely by CSS.
     document.querySelectorAll('.account-tab-btn').forEach(btn => {
-        if (btn.innerText.toLowerCase() === tabName.toLowerCase()) {
-            btn.classList.add('active', 'tab-active');
-            btn.style.color = 'var(--brand-secondary)';
-            btn.style.borderBottom = '2px solid var(--brand-secondary)';
-        } else {
-            btn.style.color = 'var(--text-secondary)';
-            btn.style.borderBottom = 'none';
-        }
+        const isActive = (btn.dataset.accountTab || btn.innerText.trim().toLowerCase()) === tabName.toLowerCase();
+        btn.classList.toggle('active', isActive);
     });
 
     document.getElementById('account-tab-transactions').style.display = tabName === 'transactions' ? 'block' : 'none';
@@ -4432,9 +4430,9 @@ async function fetchAccountDetails(address) {
             </div>
             
             <div style="margin-bottom: 20px;">
-                <div style="display: flex; gap: 20px; padding: 0 20px; border-bottom: 1px solid var(--border-color); margin-bottom: 15px;">
-                    <button class="account-tab-btn" onclick="switchAccountTab('transactions')" style="background: none; border: none; cursor: pointer; padding: 10px 5px; font-size: 14px; color: var(--brand-secondary); border-bottom: 2px solid var(--brand-secondary); font-family: 'Inter', sans-serif;">Transactions</button>
-                    <button class="account-tab-btn" onclick="switchAccountTab('events')" style="background: none; border: none; cursor: pointer; padding: 10px 5px; font-size: 14px; color: var(--text-secondary); font-family: 'Inter', sans-serif;">Events</button>
+                <div class="account-tabs" style="padding: 0 20px; margin-bottom: 15px;">
+                    <button type="button" class="account-tab account-tab-btn active" data-account-tab="transactions" onclick="switchAccountTab('transactions')">Transactions</button>
+                    <button type="button" class="account-tab account-tab-btn" data-account-tab="events" onclick="switchAccountTab('events')">Events</button>
                 </div>
                 
                 <div id="account-tab-transactions">
@@ -7188,11 +7186,14 @@ async function submitPayoutTx() {
 // --- Unstake modal ---
 // When the user clicks Max, we record their intent here AND store the exact
 // active-stake planck (a string, u128) from the backend. submitUnstakeTx
-// reads this and passes the EXACT planck to api.tx.staking.unbond() — bypassing
-// the float-roundtrip (parseFloat of toFixed(4)) that was tripping both the
-// "amount exceeds active" check and the "below minNominatorBond" residue
-// check. Any user keystroke in the input field clears the intent because
-// the user has chosen a custom amount.
+// reads this and passes the EXACT planck to staking.unbond(), batched with a
+// staking.chill() so the InsufficientBond check at the end of pallet_staking's
+// unbond() doesn't reject the call. (Without chill, the runtime sees
+// active=0 < MinNominatorBond and traps with WASM unreachable — even though
+// "post-unbond active is zero" looks like the user's intent on the surface.
+// chill() is idempotent: safe to include even if the stash isn't nominating.)
+// Any user keystroke in the input field clears the intent because the user
+// has chosen a custom amount.
 let unstakeFullUnbondIntent = false;
 let unstakeMaxPlanck = null;
 
@@ -7236,18 +7237,35 @@ async function submitUnstakeTx() {
     // Full-unbond fast path: user clicked Max and the backend supplied the
     // exact planck u128. Skip the float-based checks entirely (they were
     // never meaningful for the maximum case) and pass the precise string
-    // straight into the unbond call. Full unbond is always accepted by the
-    // chain — it bypasses minNominatorBond by implicitly chilling the
-    // nomination — so there's nothing else to validate client-side.
+    // straight into the unbond call.
+    //
+    // We MUST batch a staking.chill() before staking.unbond() because the
+    // pallet's unbond() runs an InsufficientBond check at the end:
+    //     ensure!(ledger.active >= MinNominatorBond, InsufficientBond)
+    // when the stash is in Nominators::contains_key. After a full unbond
+    // ledger.active is 0, so 0 >= 100 fails and the runtime traps. chill()
+    // removes the stash from the Nominators set first, so the post-check
+    // computes min_active_bond = 0 and the ensure! passes.
+    //
+    // utility.batchAll is atomic — either both succeed or both revert, so
+    // the user never ends up chilled-but-not-unbonded.
     if (unstakeFullUnbondIntent && unstakeMaxPlanck && /^[0-9]+$/.test(String(unstakeMaxPlanck))) {
         const planckStr = String(unstakeMaxPlanck);
         await submitSignedTx({
-            buildTx: (api) => api.tx.staking.unbond(planckStr),
+            buildTx: (api) => api.tx.utility.batchAll([
+                api.tx.staking.chill(),
+                api.tx.staking.unbond(planckStr),
+            ]),
             label: 'Unstake',
             button: document.getElementById('submit-unstake-tx-btn'),
             busyText: 'Signing…',
             idleText: 'Sign & Unstake',
-            onError: (err) => fail(decodeUnstakeError(err, { active: Number(data.staking.activeStaked) || 0, amt: Number(data.staking.activeStaked) || 0, minBond: Number((data.network && data.network.minStake) || 0) })),
+            onError: (err) => fail(decodeUnstakeError(err, {
+                active: Number(data.staking.activeStaked) || 0,
+                amt: Number(data.staking.activeStaked) || 0,
+                minBond: Number((data.network && data.network.minStake) || 0),
+                isFullUnbond: true,
+            })),
             onSuccess: () => {
                 const modal = document.getElementById('unstake-modal');
                 if (modal) modal.style.display = 'none';
@@ -7268,11 +7286,12 @@ async function submitUnstakeTx() {
 
     // Guard against the "leave a sliver bonded" failure mode. The runtime
     // requires the post-unbond residue to be either zero (full unbond, which
-    // implicitly chills the nomination) or at least minNominatorBond. Anything
-    // in between gets rejected — and on some runtime versions the rejection
-    // surfaces as a WASM trap rather than a clean InvalidTransaction error,
-    // which looks scary to users. Catching it here gives them a one-sentence
-    // fix instead of a stack trace.
+    // works in our flow because the Max fast-path batches a chill() before
+    // unbond — see above) or at least minNominatorBond. Anything in between
+    // gets rejected — and on some runtime versions the rejection surfaces as
+    // a WASM trap rather than a clean InvalidTransaction error, which looks
+    // scary to users. Catching it here gives them a one-sentence fix instead
+    // of a stack trace.
     //
     // Use a small floating-point tolerance for the "full unbond" comparison
     // because parseFloat("165.1328") may round-trip to 165.13279999... etc.
@@ -7290,8 +7309,8 @@ async function submitUnstakeTx() {
     // When the network minimum isn't known (the backend couldn't fetch it, so
     // data.network.minStake is 0 or missing), we can't do the precise check
     // above. Warn the user so a partial unbond doesn't go to chain and trap.
-    // Allow Max (full unbond) because that always succeeds regardless of
-    // minNominatorBond.
+    // The Max button is still safe to use — the fast-path batches chill() +
+    // unbond() atomically, so it succeeds regardless of minNominatorBond.
     if (!(minBond > 0) && remaining > fullUnbondTolerance) {
         return fail(
             `The network minimum bond couldn't be read from the chain, so we can't ` +
@@ -7319,21 +7338,33 @@ async function submitUnstakeTx() {
 // Translate the scariest runtime errors into one-sentence user guidance.
 // The chain returns a WASM unreachable trap when staking.unbond is rejected
 // during validate_transaction (e.g., the residue would be below
-// minNominatorBond but our client-side check couldn't catch it because we
-// didn't have a fresh value). Surfacing the raw stack trace makes users
+// minNominatorBond, or post-unbond active=0 while the stash is still in
+// Nominators::contains_key). Surfacing the raw stack trace makes users
 // think the explorer is broken; this turns it into actionable advice.
 function decodeUnstakeError(rawErr, ctx) {
     const msg = (rawErr && (rawErr.message || String(rawErr))) || '';
     // WASM trap from TaggedTransactionQueue_validate_transaction:
-    if (/wasm.*unreachable|TaggedTransactionQueue|Verification Error.*1002/i.test(msg)) {
+    if (/wasm.*unreachable|TaggedTransactionQueue|Verification Error.*1002|InsufficientBond/i.test(msg)) {
+        if (ctx && ctx.isFullUnbond) {
+            // Max was already used and we already batched chill() + unbond().
+            // If this still trapped, the chain state moved under us (e.g., a
+            // slash, or the active bond changed between dashboard load and
+            // submit). Tell the user to refresh and try again.
+            return (
+                `The chain rejected this unbond even though the full active bond was ` +
+                `requested. Your on-chain stake may have changed since this page loaded — ` +
+                `please refresh and try Max again.`
+            );
+        }
         const lines = [
             `The chain rejected this unbond. The usual cause is that the post-unbond ` +
             `remainder would fall below the network's minNominatorBond.`
         ];
         if (ctx && ctx.active > 0) {
             lines.push(
-                `Try clicking Max to unbond everything (${stakingFormatPDEX(ctx.active)} PDEX). ` +
-                `Full unbond always succeeds regardless of minNominatorBond.`
+                `Click Max to unbond everything (${stakingFormatPDEX(ctx.active)} PDEX) — ` +
+                `the Max flow automatically chills your nomination first so the runtime ` +
+                `accepts a full unbond.`
             );
         }
         return lines.join(' ');
