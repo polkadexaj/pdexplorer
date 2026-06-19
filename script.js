@@ -7181,11 +7181,25 @@ async function submitPayoutTx() {
 }
 
 // --- Unstake modal ---
+// When the user clicks Max, we record their intent here AND store the exact
+// active-stake planck (a string, u128) from the backend. submitUnstakeTx
+// reads this and passes the EXACT planck to api.tx.staking.unbond() — bypassing
+// the float-roundtrip (parseFloat of toFixed(4)) that was tripping both the
+// "amount exceeds active" check and the "below minNominatorBond" residue
+// check. Any user keystroke in the input field clears the intent because
+// the user has chosen a custom amount.
+let unstakeFullUnbondIntent = false;
+let unstakeMaxPlanck = null;
+
 function openUnstakeModal() {
     const data = currentWalletData;
     if (!data) return alert('Wallet data is not loaded yet.');
     const errEl = document.getElementById('unstake-modal-error');
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    // Reset Max-intent state every time the modal is opened so a previous
+    // session's flag doesn't leak into a fresh partial-unbond.
+    unstakeFullUnbondIntent = false;
+    unstakeMaxPlanck = null;
     const amtInput = document.getElementById('unstake-amount-input');
     if (amtInput) amtInput.value = '';
     const s = data.staking || {};
@@ -7213,10 +7227,39 @@ async function submitUnstakeTx() {
     if (!isSameAddress(getStoredWallet(), data.address)) return fail('Connect this wallet to perform staking actions.');
     const amtStr = (document.getElementById('unstake-amount-input').value || '').trim();
     if (!isPositiveNumberInput(amtStr)) return fail('Enter an amount greater than zero.');
+
+    // Full-unbond fast path: user clicked Max and the backend supplied the
+    // exact planck u128. Skip the float-based checks entirely (they were
+    // never meaningful for the maximum case) and pass the precise string
+    // straight into the unbond call. Full unbond is always accepted by the
+    // chain — it bypasses minNominatorBond by implicitly chilling the
+    // nomination — so there's nothing else to validate client-side.
+    if (unstakeFullUnbondIntent && unstakeMaxPlanck && /^[0-9]+$/.test(String(unstakeMaxPlanck))) {
+        const planckStr = String(unstakeMaxPlanck);
+        await submitSignedTx({
+            buildTx: (api) => api.tx.staking.unbond(planckStr),
+            label: 'Unstake',
+            button: document.getElementById('submit-unstake-tx-btn'),
+            busyText: 'Signing…',
+            idleText: 'Sign & Unstake',
+            onError: (err) => fail(decodeUnstakeError(err, { active: Number(data.staking.activeStaked) || 0, amt: Number(data.staking.activeStaked) || 0, minBond: Number((data.network && data.network.minStake) || 0) })),
+            onSuccess: () => {
+                const modal = document.getElementById('unstake-modal');
+                if (modal) modal.style.display = 'none';
+                setTimeout(() => fetchWalletDashboard(data.address), 2500);
+            }
+        });
+        return;
+    }
+
     const amt = parseFloat(amtStr);
     const active = Number((data.staking && data.staking.activeStaked) || 0);
     if (active <= 0) return fail('You have no active bonded stake to unbond.');
-    if (amt > active) return fail(`Amount exceeds your active bonded stake (${stakingFormatPDEX(active)} PDEX).`);
+    // 1e-6 tolerance absorbs the parseFloat-of-toFixed precision drift so a
+    // value that visually matches the displayed active stake (e.g. someone
+    // typed it from the screen) doesn't get rejected as "exceeds active".
+    const exceedsTolerance = 1e-6;
+    if (amt > active + exceedsTolerance) return fail(`Amount exceeds your active bonded stake (${stakingFormatPDEX(active)} PDEX).`);
 
     // Guard against the "leave a sliver bonded" failure mode. The runtime
     // requires the post-unbond residue to be either zero (full unbond, which
@@ -7752,6 +7795,22 @@ async function submitSendTx() {
         const active = Number((data.staking && data.staking.activeStaked) || 0);
         const amtInput = document.getElementById('unstake-amount-input');
         if (amtInput) amtInput.value = active.toFixed(4);
+        // Record full-unbond intent + the precise u128 planck the backend
+        // returned. submitUnstakeTx will use these to build the unbond call
+        // directly from planck, bypassing the float round-trip that breaks
+        // both the "amount exceeds active" check and the minNominatorBond
+        // residue check when the active stake's planck doesn't divide
+        // cleanly into 4-decimal PDEX.
+        unstakeFullUnbondIntent = true;
+        unstakeMaxPlanck = (data.staking && data.staking.activeStakedPlanck) || null;
+    });
+    // Any keystroke in the amount field means the user has picked a custom
+    // amount — clear the full-unbond intent so submitUnstakeTx falls back to
+    // the partial-unbond code path (with its residue check).
+    const unstakeAmtInputEl = document.getElementById('unstake-amount-input');
+    if (unstakeAmtInputEl) unstakeAmtInputEl.addEventListener('input', () => {
+        unstakeFullUnbondIntent = false;
+        unstakeMaxPlanck = null;
     });
     const unstakeSubmit = document.getElementById('submit-unstake-tx-btn');
     if (unstakeSubmit) unstakeSubmit.addEventListener('click', submitUnstakeTx);

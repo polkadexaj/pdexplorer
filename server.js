@@ -3451,6 +3451,11 @@ app.get('/api/wallet/:address', async (req, res) => {
 
         // Bonded ledger (total staked).
         let totalStaked = 0, activeStaked = 0, unlocking = 0;
+        // BigInt-precision copy of the active stake's planck u128 — used by
+        // the Unstake modal's Max button to submit a full unbond without
+        // floating-point round-trip loss. See note next to activeStakedPlanck
+        // in the response payload below.
+        let activeStakedPlanck = null;
         const controller = (bondedOpt && bondedOpt.isSome) ? bondedOpt.unwrap().toString() : address;
         try {
             const ledgerOpt = await globalApi.query.staking.ledger(controller);
@@ -3458,6 +3463,10 @@ app.get('/api/wallet/:address', async (req, res) => {
                 const ledger = ledgerOpt.unwrap();
                 totalStaked = balanceToPDEX(ledger.total);
                 activeStaked = balanceToPDEX(ledger.active);
+                // Capture the raw u128 planck for precision-critical UI flows
+                // (Max-button unbond). toString() on a polkadot.js Codec gives
+                // a decimal string suitable for direct passing into a tx call.
+                try { activeStakedPlanck = ledger.active.toString(); } catch (_) {}
                 for (const u of (ledger.unlocking || [])) unlocking += balanceToPDEX(u.value);
             }
         } catch (e) { }
@@ -3508,6 +3517,17 @@ app.get('/api/wallet/:address', async (req, res) => {
                 isNominator: nominating.length > 0,
                 totalStaked,
                 activeStaked,
+                // Exact planck (u128 → string) for the active stake. The
+                // float-form `activeStaked` is what the UI displays, but
+                // float arithmetic loses precision below ~12 significant
+                // digits, so the Unstake modal's Max button cannot use it
+                // to construct an "unbond the full amount" tx — parseFloat
+                // round-trips the rounded display value to a number that
+                // may be ULP-greater than the original, tripping the
+                // client-side > check, or ULP-lesser, leaving a sub-PDEX
+                // residue that fails minNominatorBond. The frontend reads
+                // this string and passes it untouched into api.tx.staking.unbond().
+                activeStakedPlanck: activeStakedPlanck != null ? String(activeStakedPlanck) : '0',
                 unlocking,
                 nominating
             },
