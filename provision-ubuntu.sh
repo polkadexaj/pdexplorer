@@ -21,6 +21,11 @@
 #                                                # (run AFTER app so backup.sh exists)
 #   sudo bash provision-ubuntu.sh cloudflare     # Restrict 80/443 to Cloudflare ranges
 #                                                # (run AFTER harden so UFW exists)
+#   sudo bash provision-ubuntu.sh cf-origin-cert # Install a Cloudflare Origin Certificate
+#                                                # for the frontend nginx, so CF's
+#                                                # Full (strict) SSL mode validates the
+#                                                # explorer's origin cert. See docs in
+#                                                # setup_cf_origin_cert() for prerequisites.
 #
 # Configuration (override via env or edit at top):
 #   DOMAIN              = TLS domain to issue a cert for
@@ -745,6 +750,165 @@ EOF
 EOF
 }
 
+# ---- Phase 4.5 (optional): Cloudflare Origin Certificate -------------------
+# Install a Cloudflare Origin Certificate for the frontend nginx so CF's
+# `Full (strict)` SSL mode validates the connection from CF to origin.
+#
+# Background:
+#   Cloudflare's `Full` mode uses HTTPS to the origin but doesn't validate the
+#   cert. `Full (strict)` validates — and accepts EITHER a publicly-trusted
+#   cert (Let's Encrypt) OR a CF Origin Certificate (signed by Cloudflare's
+#   own CA, only valid for CF <-> origin traffic, 15-year lifetime, no
+#   renewal needed). For a CF-fronted explorer where direct hits to the
+#   origin are firewall-blocked anyway, CF Origin Cert is simpler than LE.
+#
+# Prerequisites (operator must do this BEFORE running the phase):
+#   1. In Cloudflare dashboard: SSL/TLS -> Origin Server -> Create Certificate.
+#      Defaults are fine (RSA, 15-year, hostnames: *.polkadex.ee, polkadex.ee).
+#   2. Copy the certificate body and private key into two files on the host:
+#        $DEPLOY_DIR/secrets/cloudflare-origin.pem    (certificate)
+#        $DEPLOY_DIR/secrets/cloudflare-origin.key    (private key)
+#      Both files should be `chmod 600` and owned by root.
+#   3. Run this phase. It validates, installs to the path nginx already
+#      expects (frontend container's /etc/letsencrypt/live/$DOMAIN/), and
+#      restarts the frontend.
+#
+# Idempotent: re-runs replace existing files with whatever is in
+# $DEPLOY_DIR/secrets/, so the operator can rotate certs the same way.
+setup_cf_origin_cert() {
+    log "Phase 4.5: Cloudflare Origin Certificate for frontend nginx"
+
+    local secrets_dir="$DEPLOY_DIR/secrets"
+    local src_cert="$secrets_dir/cloudflare-origin.pem"
+    local src_key="$secrets_dir/cloudflare-origin.key"
+    local dst_dir="$DEPLOY_DIR/certbot/conf/live/$DOMAIN"
+    local dst_cert="$dst_dir/fullchain.pem"
+    local dst_key="$dst_dir/privkey.pem"
+
+    # ---- Pre-flight: secrets files must exist ----
+    [ -r "$src_cert" ] || die "Missing $src_cert. See setup_cf_origin_cert() docs — put the CF Origin Certificate there before running this phase."
+    [ -r "$src_key"  ] || die "Missing $src_key. See setup_cf_origin_cert() docs — put the CF Origin private key there before running this phase."
+
+    # ---- Validate cert + key with openssl ----
+    log "Validating cert format"
+    command -v openssl >/dev/null 2>&1 || apt-get install -y -qq openssl >/dev/null
+    openssl x509 -in "$src_cert" -noout >/dev/null 2>&1 \
+        || die "$src_cert is not a valid PEM-encoded X.509 certificate."
+    openssl rsa  -in "$src_key" -check -noout >/dev/null 2>&1 \
+        || openssl pkey -in "$src_key" -noout >/dev/null 2>&1 \
+        || die "$src_key is not a valid PEM-encoded private key."
+
+    # Belt-and-braces: confirm cert and key are a matched pair (their public
+    # key fingerprints must agree). Catches the embarrassing case of pasting
+    # a cert from one host and a key from another.
+    local cert_pub key_pub
+    cert_pub=$(openssl x509 -in "$src_cert" -noout -pubkey 2>/dev/null | openssl md5)
+    key_pub=$(openssl pkey -in "$src_key" -pubout 2>/dev/null | openssl md5)
+    [ "$cert_pub" = "$key_pub" ] \
+        || die "Certificate and key do not match (different public keys). Re-paste both from the same CF Origin certificate."
+
+    # Confirm the cert covers $DOMAIN (so the operator catches a wildcard-mismatch
+    # error here rather than from CF's monitor an hour later).
+    local sans
+    sans=$(openssl x509 -in "$src_cert" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ')
+    case "$sans" in
+        *"DNS:$DOMAIN"*|*"DNS:*.${DOMAIN#*.}"*) ok "Cert covers $DOMAIN (or its parent wildcard)" ;;
+        *) warn "Cert SAN does not appear to cover $DOMAIN. SANs found: $sans. Continuing — verify manually if unsure." ;;
+    esac
+
+    # Cert expiry warning (CF Origin Certs are 15 years; an unusually short
+    # expiry is a sign of accidental LE-paste).
+    local not_after days_left
+    not_after=$(openssl x509 -in "$src_cert" -noout -enddate | cut -d= -f2)
+    days_left=$(( ( $(date -d "$not_after" +%s) - $(date +%s) ) / 86400 ))
+    log "Cert valid until $not_after ($days_left days from now)"
+    [ "$days_left" -gt 30 ] || warn "Cert expires in $days_left days — that's unusual for a CF Origin Cert (which default to 15 years). Double-check you pasted the right content."
+
+    # ---- Install into the path nginx already expects ----
+    # The frontend container's nginx.conf hard-codes the LE-style paths
+    # /etc/letsencrypt/live/$DOMAIN/{fullchain,privkey}.pem. The compose
+    # mount maps $DEPLOY_DIR/certbot/conf -> /etc/letsencrypt, so writing to
+    # $dst_cert/$dst_key on the host shows up at the LE paths in the container.
+    log "Installing certificate at $dst_cert"
+    install -d -m 0755 "$dst_dir"
+    install -m 0644 "$src_cert" "$dst_cert"
+    install -m 0600 "$src_key"  "$dst_key"
+    ok "Certificate + key installed for $DOMAIN"
+
+    # ---- Generate support files nginx.conf references ----
+    # The frontend nginx config does:
+    #     include /etc/letsencrypt/options-ssl-nginx.conf;
+    #     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    # These are normally provided by certbot. If we never ran certbot,
+    # generate sane equivalents so nginx starts.
+    local options_file="$DEPLOY_DIR/certbot/conf/options-ssl-nginx.conf"
+    local dhparams_file="$DEPLOY_DIR/certbot/conf/ssl-dhparams.pem"
+
+    if [ ! -s "$options_file" ]; then
+        log "Generating options-ssl-nginx.conf (modern TLS defaults)"
+        cat >"$options_file" <<'EOF'
+# Generated by provision-ubuntu.sh (cf-origin-cert phase).
+# Mirrors certbot's options-ssl-nginx.conf so nginx starts even when
+# certbot has not run on this host.
+ssl_session_cache shared:le_nginx_SSL:10m;
+ssl_session_timeout 1440m;
+ssl_session_tickets off;
+
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+
+ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
+EOF
+        chmod 0644 "$options_file"
+    else
+        ok "options-ssl-nginx.conf already present — leaving as-is"
+    fi
+
+    if [ ! -s "$dhparams_file" ]; then
+        log "Generating ssl-dhparams.pem (2048-bit; this takes ~10s)"
+        openssl dhparam -dsaparam -out "$dhparams_file" 2048 2>/dev/null
+        chmod 0644 "$dhparams_file"
+        ok "ssl-dhparams.pem generated"
+    else
+        ok "ssl-dhparams.pem already present — leaving as-is"
+    fi
+
+    # ---- Restart the frontend container so nginx reloads with new cert ----
+    log "Restarting frontend container to pick up new cert"
+    if [ -f "$DEPLOY_DIR/docker-compose.yml" ]; then
+        (cd "$DEPLOY_DIR" && docker compose restart frontend >/dev/null 2>&1) \
+            || warn "Could not restart frontend container — restart manually: cd $DEPLOY_DIR && docker compose restart frontend"
+
+        # Smoke test: is nginx in the container actually serving HTTPS now?
+        sleep 3
+        if docker compose -f "$DEPLOY_DIR/docker-compose.yml" exec -T frontend \
+            sh -c 'nginx -t' >/dev/null 2>&1; then
+            ok "nginx -t passed inside frontend container"
+        else
+            warn "nginx -t failed inside frontend container — inspect with: docker compose logs frontend"
+        fi
+    else
+        warn "$DEPLOY_DIR/docker-compose.yml not found — restart the frontend manually after running the app phase."
+    fi
+
+    cat <<EOF
+
+  Cloudflare Origin Certificate installed at:
+    $dst_cert
+    $dst_key
+
+  You can now switch Cloudflare SSL mode to Full (strict) safely:
+    Dashboard -> SSL/TLS -> Overview -> Full (strict)
+
+  Verify from any host:
+    curl -sI https://$DOMAIN/ | head -3
+
+  To rotate the cert later: replace the files in $secrets_dir/ and re-run
+  this phase. The frontend container will restart with the new cert.
+
+EOF
+}
+
 # ---- Phase 5: SQLite nightly backup ---------------------------------------
 # Installs sqlite3, copies backup.sh into $DEPLOY_DIR (the repo's working copy
 # is what runs — symlink would let a `git pull` silently change behavior),
@@ -886,14 +1050,15 @@ main() {
     require_root
     require_ubuntu
     case "${1:-all}" in
-        harden)     harden_system ;;
-        docker)     install_docker ;;
-        app)        deploy_app ;;
-        backup)     setup_backups ;;
-        cloudflare) setup_cloudflare_only ;;
-        all)        harden_system; install_docker; deploy_app; setup_backups ;;
-        all+cf)     harden_system; install_docker; deploy_app; setup_backups; setup_cloudflare_only ;;
-        *)          die "Usage: $0 [harden|docker|app|backup|cloudflare|all|all+cf]" ;;
+        harden)         harden_system ;;
+        docker)         install_docker ;;
+        app)            deploy_app ;;
+        backup)         setup_backups ;;
+        cloudflare)     setup_cloudflare_only ;;
+        cf-origin-cert) setup_cf_origin_cert ;;
+        all)            harden_system; install_docker; deploy_app; setup_backups ;;
+        all+cf)         harden_system; install_docker; deploy_app; setup_backups; setup_cloudflare_only ;;
+        *)              die "Usage: $0 [harden|docker|app|backup|cloudflare|cf-origin-cert|all|all+cf]" ;;
     esac
     summary
 }
