@@ -161,13 +161,20 @@ const RECENT_SYNC_INTERVAL = 12 * 1000;
 // at most ~5 minutes while the background refresh catches up.
 const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 10 * 60 * 1000);
 
-// Cache for staking.minNominatorBond. This value changes very rarely (only by
-// governance vote) but is critical for the unstake modal's pre-flight check
-// and the user-facing "Network minimum bond" display. Without a cache, a
-// transient RPC error during the wallet load silently returns 0, which the
-// frontend then treats as "no constraint" and skips the protective check —
-// users see WASM traps instead of friendly "leave at least N PDEX" messages.
-// Cache lasts an hour; refreshed lazily on /api/wallet hits.
+// Cache for the EFFECTIVE bond minimum enforced by the staking pallet on
+// partial unbonds. On Polkadex this is empirically max(minNominatorBond,
+// minValidatorBond) — the runtime rejects partial unbonds that would leave
+// the bonded balance below this floor, even for nominators (non-standard
+// Substrate behaviour, but consistent with Polkadex's custom staking pallet:
+// minNominatorBond returns 0 in storage but minValidatorBond=100 PDEX is the
+// real threshold that fires the validate_transaction WASM trap).
+//
+// We cache both values for an hour because they change only by governance,
+// and the unstake modal's pre-flight check + display depend on having a
+// fresh value at all times. A transient RPC error during /api/wallet would
+// otherwise silently zero this out, the frontend would skip the protective
+// check, and users would see raw WASM traps instead of friendly messages.
+// Cache returns a stale-but-good value through reconnect blips.
 const MIN_NOMINATOR_BOND_TTL_MS = readPositiveInteger(
     process.env.MIN_NOMINATOR_BOND_TTL_MS, 60 * 60 * 1000);
 let cachedMinNominatorBond = { value: 0, fetchedAt: 0 };
@@ -183,15 +190,25 @@ async function getMinNominatorBondCached() {
         return cachedMinNominatorBond.value;
     }
     try {
-        const v = balanceToPDEX(await globalApi.query.staking.minNominatorBond());
-        if (v > 0) {
-            cachedMinNominatorBond = { value: v, fetchedAt: now };
+        // Fetch both threshold-relevant storage values in parallel and take
+        // the max. Either may legitimately be 0 (Polkadex sets nominator=0,
+        // for example). What matters is the larger of the two — that's the
+        // runtime gate that produces WASM traps on partial unbond.
+        const [nominatorRaw, validatorRaw] = await Promise.all([
+            globalApi.query.staking.minNominatorBond().catch(() => null),
+            globalApi.query.staking.minValidatorBond().catch(() => null),
+        ]);
+        const nominator = nominatorRaw ? balanceToPDEX(nominatorRaw) : 0;
+        const validator = validatorRaw ? balanceToPDEX(validatorRaw) : 0;
+        const effective = Math.max(nominator, validator);
+        if (effective > 0) {
+            cachedMinNominatorBond = { value: effective, fetchedAt: now };
         }
         return cachedMinNominatorBond.value;
     } catch (err) {
         // Log the failure (vs the previous silent swallow) so we can spot
         // patterns in production. Keep returning the cached value if any.
-        console.warn('[wallet] minNominatorBond fetch failed:',
+        console.warn('[wallet] min-bond fetch failed:',
             err && err.message ? err.message : err);
         return cachedMinNominatorBond.value;
     }
