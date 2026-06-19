@@ -4533,8 +4533,9 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
         console.warn('[RPC] provider error:', err && err.message ? err.message : err);
     });
 
+    let newApi;
     try {
-        globalApi = await ApiPromise.create({ provider: wsProvider });
+        newApi = await ApiPromise.create({ provider: wsProvider });
     } catch (err) {
         // ApiPromise.create only rejects on hard errors (bad metadata, etc.);
         // transient connect failures are handled by WsProvider's retry loop.
@@ -4543,11 +4544,15 @@ async function connectRpc({ kickSyncsOnConnect = true } = {}) {
         return;
     }
     // If a newer connectRpc() ran while we were awaiting ApiPromise.create,
-    // discard this one rather than overwriting the newer globalApi.
+    // discard this one rather than overwriting the newer globalApi. Note the
+    // staleness check happens BEFORE we assign to globalApi — if we'd assigned
+    // first and then checked, we would have already corrupted the global with
+    // our stale value.
     if (isStale()) {
-        try { await globalApi.disconnect(); } catch (_) { /* best effort */ }
+        try { await newApi.disconnect(); } catch (_) { /* best effort */ }
         return;
     }
+    globalApi = newApi;
     // ApiPromise also emits these on top of WsProvider — useful when a single
     // request times out and the api lib decides to flag itself disconnected
     // before the underlying socket closes.
@@ -4648,22 +4653,13 @@ async function chainHeadWatchdog() {
         console.warn(`[CHAIN-WATCHDOG] chain head #${lastHeadValue} hasn't advanced in ${Math.round(sinceAdvance / 60000)} min — upstream node may have stalled`);
     }
 
-    // One-shot api rebuild attempt per stale episode.
+    // One-shot api rebuild attempt per stale episode. Delegate to
+    // rebuildApiOnce so the timeout protection applies (otherwise this
+    // shared the same hang-forever bug the rpcWatchdog had).
     if (!chainStaleRebuildAttempted) {
         chainStaleRebuildAttempted = true;
         console.warn(`[CHAIN-WATCHDOG] forcing api rebuild in case the api itself is stuck`);
-        rpcResetInFlight = true;
-        try {
-            if (globalApi) {
-                try { await globalApi.disconnect(); } catch (_) {}
-                globalApi = null;
-            }
-            await connectRpc({ kickSyncsOnConnect: false });
-        } catch (e) {
-            console.warn('[CHAIN-WATCHDOG] rebuild attempt failed:', e && e.message ? e.message : e);
-        } finally {
-            rpcResetInFlight = false;
-        }
+        await rebuildApiOnce(`chain-watchdog: head stale`);
     }
 }
 
@@ -4717,22 +4713,14 @@ async function rpcWatchdog() {
 
     if (outageMs >= RPC_RESET_AFTER_MS) {
         console.warn(`[RPC-WATCHDOG] disconnected for ${outageMin} min, exceeds RPC_RESET_AFTER_MS — rebuilding ApiPromise from scratch`);
-        rpcResetInFlight = true;
-        try {
-            if (globalApi) {
-                try { await globalApi.disconnect(); } catch (e) { /* best effort */ }
-                globalApi = null;
-            }
-            // kickSyncsOnConnect=false because this worker may be HTTP-only;
-            // the on-reconnect handlers inside connectRpc still log success.
-            // For the indexer worker, the sync loops' next regular ticks will
-            // catch the restored connection within at most one interval.
-            await connectRpc({ kickSyncsOnConnect: false });
-        } catch (e) {
-            console.warn('[RPC-WATCHDOG] rebuild attempt failed:', e && e.message ? e.message : e);
-        } finally {
-            rpcResetInFlight = false;
-        }
+        // Delegate to the shared rebuildApiOnce so the timeout protection
+        // (RPC_REBUILD_TIMEOUT_MS) applies here too. Without that, an
+        // ApiPromise.create() hang during a partial-LB-outage window would
+        // leave rpcResetInFlight=true forever and every subsequent watchdog
+        // tick would silently early-return at the guard. That was the bug
+        // causing "explorer doesn't recover after disconnect even though
+        // both origins are reachable".
+        await rebuildApiOnce(`watchdog: disconnected ${outageMin} min`);
     }
 }
 
