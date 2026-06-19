@@ -3702,6 +3702,18 @@ function bootSeoRouter() {
 function routeTo(target) {
     if (!target) target = 'home';
 
+    // Strip query string and hash fragment before doing the route lookup. The
+    // page sections are matched by `data-page="<route>"` (e.g. "treasury"),
+    // not by the full URL — leaving "?proposal=85" attached would make
+    // routeTo look for `data-page="treasury?proposal=85"` and find nothing,
+    // showing a blank page. The query string is preserved in window.location
+    // and parsed by destination pages via tryOpenFromQueryString(); the route
+    // here cares only about the path component.
+    const qIdx = target.indexOf('?');
+    if (qIdx >= 0) target = target.substring(0, qIdx);
+    const hIdx = target.indexOf('#');
+    if (hIdx >= 0) target = target.substring(0, hIdx);
+
     let mainTarget = target;
     let detailId = null;
     let detailId2 = null;
