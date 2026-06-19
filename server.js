@@ -4830,20 +4830,42 @@ function isPolkadotWsRequestTimeout(err) {
         || /Connection was closed before it was established/.test(err.message);
 }
 
+// Hard ceiling on how long any single rebuild attempt may take. Without this,
+// connectRpc()'s `await ApiPromise.create(...)` can hang indefinitely when the
+// upstream (CF LB) returns malformed responses during a misconfiguration
+// window. That leaves rpcResetInFlight=true forever, and every subsequent
+// watchdog tick / uncaughtException handler early-returns at the guard,
+// silently breaking auto-recovery for the lifetime of the process.
+const RPC_REBUILD_TIMEOUT_MS = readPositiveInteger(
+    process.env.RPC_REBUILD_TIMEOUT_MS, 30 * 1000);
+
 async function rebuildApiOnce(reason) {
     if (rpcResetInFlight) return;
     if (Date.now() - lastStuckWsRebuildAt < STUCK_WS_REBUILD_COOLDOWN_MS) return;
     lastStuckWsRebuildAt = Date.now();
     rpcResetInFlight = true;
     console.warn(`[RPC] forcing api rebuild (reason: ${reason})`);
-    try {
-        if (globalApi) {
-            try { await globalApi.disconnect(); } catch (_) { /* best effort */ }
-            globalApi = null;
+    // Wrap the whole rebuild in a timeout so the lock is released even when
+    // connectRpc() hangs. Promise.race here means whichever resolves first
+    // wins — if the timeout fires first, the dangling rebuild is left to its
+    // own devices and we move on so subsequent rebuild attempts can fire.
+    const rebuildWork = (async () => {
+        try {
+            if (globalApi) {
+                try { await globalApi.disconnect(); } catch (_) { /* best effort */ }
+                globalApi = null;
+            }
+            await connectRpc({ kickSyncsOnConnect: false });
+        } catch (e) {
+            console.warn('[RPC] rebuild attempt failed:', e && e.message ? e.message : e);
         }
-        await connectRpc({ kickSyncsOnConnect: false });
-    } catch (e) {
-        console.warn('[RPC] rebuild attempt failed:', e && e.message ? e.message : e);
+    })();
+    const timeout = new Promise((resolve) => setTimeout(() => {
+        console.warn(`[RPC] rebuild attempt timed out after ${RPC_REBUILD_TIMEOUT_MS}ms — releasing lock for next attempt`);
+        resolve();
+    }, RPC_REBUILD_TIMEOUT_MS));
+    try {
+        await Promise.race([rebuildWork, timeout]);
     } finally {
         rpcResetInFlight = false;
     }
