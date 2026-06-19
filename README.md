@@ -262,6 +262,31 @@ All knobs are env vars. None are required to start — every value has a sensibl
 | `POLKADEX_WS`                 | `wss://rpc.polkadex.ee` | Comma-separated WS endpoints (first = primary, rest = fallback). Default is the Cloudflare LB that fronts the origin pool — auto-fails over between origins. |
 | `POLKADEX_WS_RECONNECT_MS`    | `2500`                 | Reconnect interval after a dropped socket                     |
 
+### Email alerts (governance + network notifications)
+
+Optional. Set `EMAIL_PROVIDER=disabled` (the default) and the explorer runs without email — the subscribe form returns a polite error, dispatchers no-op. Production needs:
+
+| Env var                          | Default          | Notes                                                              |
+| -------------------------------- | ---------------- | ------------------------------------------------------------------ |
+| `EMAIL_PROVIDER`                 | `disabled`       | `postmark` \| `sendgrid` \| `ses` \| `disabled`                    |
+| `POSTMARK_TOKEN`                 | —                | Required when EMAIL_PROVIDER=postmark                              |
+| `SENDGRID_API_KEY`               | —                | Required when EMAIL_PROVIDER=sendgrid                              |
+| `EMAIL_FROM`                     | —                | Verified sender at the provider, e.g. `alerts@polkadex.ee`         |
+| `EMAIL_FROM_NAME`                | `Polkadex Explorer` | Display name in the `From:` header                              |
+| `EMAIL_REPLY_TO`                 | —                | Optional `Reply-To` for human replies                              |
+| `EMAIL_MIN_INTERVAL_MS`          | `10000`          | Per-recipient cooldown to prevent accidental hammering             |
+| `EMAIL_SIGNUP_RATE_LIMIT_PER_HOUR` | `30`           | Per-IP cap on /api/email/subscribe                                 |
+
+**Deliverability setup is mandatory.** Without DKIM + SPF + DMARC records pointing at your transactional provider, most major inbox providers (Gmail, Outlook) will silently route your sends to spam:
+
+1. Verify your sending domain (e.g. `polkadex.ee`) in the Postmark/SendGrid dashboard.
+2. Add the DKIM CNAME records they generate to your DNS (Cloudflare → DNS).
+3. Add an SPF record (or merge into your existing TXT): `v=spf1 include:spf.mtasv.net ~all` for Postmark, `include:sendgrid.net` for SendGrid.
+4. Add a DMARC record: `v=DMARC1; p=none; rua=mailto:dmarc@polkadex.ee` — start with `p=none` for monitoring, tighten later.
+5. Send yourself a test from the dashboard; check the resulting email's headers show DKIM=PASS, SPF=PASS.
+
+Schema: subscribers live in `email_subscribers`, dispatch idempotency in `email_dispatches`. Backups (see Operations) include both. Inspect with `sqlite3 data/explorer.db "SELECT email, confirmed_at, source FROM email_subscribers"`.
+
 ### Indexer
 
 | Env var                          | Default | Notes                                                              |

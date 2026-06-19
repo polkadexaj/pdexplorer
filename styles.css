@@ -3348,3 +3348,60 @@ h1, h2, h3 { font-weight: 600; }
     .calendar-cell-date { font-size: 0.78rem; }
     .calendar-dot { font-size: 0.66rem; padding: 1px 4px; }
 }
+
+/* ─── Email alerts CTA + subscribe modal ─────────────────────────────────── */
+.email-alerts-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: rgba(0, 196, 255, 0.10);
+    border: 1px solid rgba(0, 196, 255, 0.40);
+    color: #d6f3ff;
+    border-radius: 8px;
+    font-size: 0.86rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    text-decoration: none;
+}
+.email-alerts-cta:hover {
+    background: rgba(0, 196, 255, 0.18);
+    border-color: rgba(0, 196, 255, 0.55);
+    color: #ffffff;
+}
+.email-alerts-cta i { font-size: 16px; }
+
+/* Smaller variant for the homepage banner — fits next to "View". */
+.governance-banner-cta-secondary {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border-color: rgba(255, 255, 255, 0.16) !important;
+    color: rgba(255, 255, 255, 0.85) !important;
+    font-size: 0.82rem !important;
+    padding: 6px 10px !important;
+    cursor: pointer;
+}
+.governance-banner-cta-secondary:hover {
+    background: rgba(255, 255, 255, 0.10) !important;
+    color: #fff !important;
+}
+.governance-banner-cta-secondary i { font-size: 14px; vertical-align: middle; }
+
+/* Subscribe modal checkbox rows. */
+.email-pref {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 5px 0;
+    color: var(--text-primary, #fff);
+    font-size: 0.9rem;
+    cursor: pointer;
+    line-height: 1.4;
+}
+.email-pref input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--brand-primary, #E6007A);
+    cursor: pointer;
+    flex-shrink: 0;
+}

@@ -7,6 +7,7 @@ import { decodeAddress, encodeAddress, signatureVerify, randomAsHex } from '@pol
 import { u8aWrapBytes, stringToU8a, u8aConcat } from '@polkadot/util';
 import path from 'path';
 import * as db from './db.js';
+import { sendEmail, emailProviderStatus } from './email.js';
 
 // --- Timestamped logging ---------------------------------------------------
 // Prefix every console.* line with an ISO-8601 UTC timestamp so raw stdout
@@ -1356,6 +1357,7 @@ const SITEMAP_STATIC_ROUTES = [
     { path: '/help/brand-kit',                changefreq: 'monthly', priority: '0.4' },
     { path: '/help/governance-calendar',      changefreq: 'monthly', priority: '0.5' },
     { path: '/help/governance-notifications', changefreq: 'monthly', priority: '0.4' },
+    { path: '/help/email-alerts',             changefreq: 'monthly', priority: '0.5' },
     // Brand kit cheatsheet — designer-/dev-facing reference, indexable so
     // searches for "Polkadex brand colours" / "Polkadex logo download" land here.
     { path: '/brand',                         changefreq: 'monthly', priority: '0.5' },
@@ -2345,12 +2347,26 @@ app.get('/api/governance/latest', (req, res) => {
         const referenda = db.getDemocracyReferenda();
         const proposals = meta.publicProposals || [];
 
-        const latestReferendum = referenda.length > 0 ? {
-            refIndex: Number(referenda[0].refIndex) || 0,
-            status: referenda[0].status || null,
-            endBlock: referenda[0].endBlock || null,
-            proposal: referenda[0].proposal || null,
-            isActive: referenda[0].status === 'ongoing' || referenda[0].status === 'started'
+        // Only surface OPEN referenda in the notification stream. Closed ones
+        // (passed/cancelled/notpassed) shouldn't pop a banner — the user
+        // can't do anything actionable about them. We treat "ongoing" and
+        // "started" as open; everything else is closed.
+        const isReferendumOpen = (r) =>
+            r && (r.status === 'ongoing' || r.status === 'started');
+        const openReferenda = referenda.filter(isReferendumOpen);
+        // Of those, surface the highest-indexed one (most recently tabled).
+        let topOpenRef = null;
+        for (const r of openReferenda) {
+            if (!topOpenRef || (Number(r.refIndex) || 0) > (Number(topOpenRef.refIndex) || 0)) {
+                topOpenRef = r;
+            }
+        }
+        const latestReferendum = topOpenRef ? {
+            refIndex: Number(topOpenRef.refIndex) || 0,
+            status: topOpenRef.status || null,
+            endBlock: topOpenRef.endBlock || null,
+            proposal: topOpenRef.proposal || null,
+            isActive: true
         } : null;
 
         // Public proposals come from the chain in array form; element 0 is the
@@ -2568,6 +2584,324 @@ app.post('/api/auth/logout', (req, res) => {
     if (token) db.deleteSession(token);
     res.json({ ok: true });
 });
+
+// ─── Email alert subscriptions ───────────────────────────────────────────────
+// Defaults the subscribe modal can render against. Update DEFAULT_EMAIL_PREFS
+// alongside any new event type added in the dispatcher.
+//
+// Schema (all booleans default false unless noted):
+//
+//   {
+//     governance: {
+//       newReferendum: true,        // new open referendum tabled
+//       newProposal: true,          // new public proposal
+//       closingReminder: true,      // 24h before referendum voting closes
+//       referendumResult: false,    // passed / cancelled / notpassed
+//       treasuryProposal: false,    // new + resolved
+//       councilMotion: false        // new + resolved
+//     },
+//     network: {
+//       runtimeUpgrade: false,      // runtime spec version bumped
+//       eraBoundary: false,         // new era + summary (validators changed, etc.)
+//       chainStalled: false         // chain hasn't advanced for N min (ops-style)
+//     },
+//     account: {
+//       walletAddress: null,        // only set when wallet-signed subscription
+//       transferIncoming: { enabled: false, minPdex: 0 },
+//       transferOutgoing: { enabled: false, minPdex: 0 },
+//       stakingReward:    { enabled: false, minPdex: 0 }
+//     },
+//     cadence: 'immediate'          // 'immediate' | 'digest'
+//   }
+const DEFAULT_EMAIL_PREFS = {
+    governance: {
+        newReferendum: true,
+        newProposal: true,
+        closingReminder: true,
+        referendumResult: false,
+        treasuryProposal: false,
+        councilMotion: false
+    },
+    network: {
+        runtimeUpgrade: false,
+        eraBoundary: false,
+        chainStalled: false
+    },
+    account: {
+        walletAddress: null,
+        transferIncoming: { enabled: false, minPdex: 0 },
+        transferOutgoing: { enabled: false, minPdex: 0 },
+        stakingReward:    { enabled: false, minPdex: 0 }
+    },
+    cadence: 'immediate'
+};
+
+// Naive per-IP rate limiter for /api/email/subscribe to deter abuse. The
+// limit applies to fresh signups only; resends of the confirmation email
+// for an already-pending row are independently rate-limited inside email.js.
+const EMAIL_SIGNUP_RATE_LIMIT_PER_HOUR = readPositiveInteger(
+    process.env.EMAIL_SIGNUP_RATE_LIMIT_PER_HOUR, 30);
+const emailSignupAttempts = new Map(); // ip -> [{ts}, ...]
+
+function emailSignupRateOk(ip) {
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    const arr = (emailSignupAttempts.get(ip) || []).filter(t => t > cutoff);
+    if (arr.length >= EMAIL_SIGNUP_RATE_LIMIT_PER_HOUR) {
+        emailSignupAttempts.set(ip, arr);
+        return false;
+    }
+    arr.push(Date.now());
+    emailSignupAttempts.set(ip, arr);
+    return true;
+}
+
+// Deep-merge user-submitted partial prefs into DEFAULT_EMAIL_PREFS so unknown
+// keys are dropped and required structure stays intact. Defends against the
+// frontend ever sending a malformed payload.
+function normalizePrefs(input) {
+    const out = JSON.parse(JSON.stringify(DEFAULT_EMAIL_PREFS));
+    if (!input || typeof input !== 'object') return out;
+    for (const cat of ['governance', 'network']) {
+        if (input[cat] && typeof input[cat] === 'object') {
+            for (const k of Object.keys(out[cat])) {
+                if (typeof input[cat][k] === 'boolean') out[cat][k] = input[cat][k];
+            }
+        }
+    }
+    if (input.account && typeof input.account === 'object') {
+        if (typeof input.account.walletAddress === 'string') {
+            try { out.account.walletAddress = normalizeAddress(input.account.walletAddress); }
+            catch (_) { out.account.walletAddress = null; }
+        }
+        for (const k of ['transferIncoming', 'transferOutgoing', 'stakingReward']) {
+            if (input.account[k] && typeof input.account[k] === 'object') {
+                if (typeof input.account[k].enabled === 'boolean')
+                    out.account[k].enabled = input.account[k].enabled;
+                if (Number.isFinite(Number(input.account[k].minPdex)))
+                    out.account[k].minPdex = Math.max(0, Number(input.account[k].minPdex));
+            }
+        }
+    }
+    if (input.cadence === 'digest' || input.cadence === 'immediate') {
+        out.cadence = input.cadence;
+    }
+    return out;
+}
+
+// Build the user-facing site URL (origin only) — used in confirmation +
+// unsubscribe links. Honors SITE_URL env if set, otherwise falls back to
+// the request's host header so dev / staging deploys work out of the box.
+function siteOrigin(req) {
+    if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/+$/, '');
+    return `${req.protocol}://${req.get('host')}`.replace(/\/+$/, '');
+}
+
+// HTML-escape for token values that go into URLs and templates.
+function htmlEscape(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+// POST /api/email/subscribe
+//   { email, prefs, source, walletAddress (optional), walletAuth (optional Bearer) }
+//
+// Flow:
+//   1. Rate-limit by IP (signup attempts/hour cap).
+//   2. Validate email shape; reject obvious junk.
+//   3. Normalize prefs against the schema.
+//   4. Insert (if-missing) into email_subscribers with random confirmation
+//      and unsubscribe tokens. If an existing row is unconfirmed, resend
+//      the confirmation; if it's already confirmed, no-op + 200.
+//   5. Email the confirmation link.
+//   6. Respond JSON { status: 'pending'|'already-confirmed', email }.
+app.post('/api/email/subscribe', async (req, res) => {
+    const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').toString().split(',')[0].trim();
+    if (!emailSignupRateOk(ip)) {
+        return res.status(429).json({ error: 'Too many signup attempts. Please wait an hour.' });
+    }
+    const email = String((req.body && req.body.email) || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+    const prefs = normalizePrefs(req.body && req.body.prefs);
+    const source = (req.body && req.body.source) || null;
+
+    // Optional wallet-signature path. If the request includes a Bearer token
+    // from /api/auth/verify, look up the session and pin the subscription to
+    // that address so account-specific events can be wired later. Otherwise
+    // walletAddress stays null and the subscriber is email-only.
+    let walletAddress = null;
+    const header = req.headers['authorization'] || '';
+    const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (bearer) {
+        const sess = db.getSession(bearer);
+        if (sess && sess.address) walletAddress = sess.address;
+    }
+    if (walletAddress) prefs.account.walletAddress = walletAddress;
+
+    const confirmationToken = randomAsHex(24);
+    const unsubscribeToken  = randomAsHex(24);
+    const { created, subscriber } = db.createEmailSubscriberIfMissing({
+        email, confirmationToken, unsubscribeToken, eventPrefs: prefs, source, walletAddress
+    });
+
+    // Already-confirmed row: short-circuit, no email.
+    if (!created && subscriber && subscriber.confirmedAt) {
+        return res.json({ status: 'already-confirmed', email: subscriber.email });
+    }
+
+    // For existing-but-not-confirmed rows we reuse the original tokens (the
+    // confirmation link the user got earlier still works); we just resend
+    // the email so they get a fresh link in their inbox.
+    const effective = subscriber;
+    const origin = siteOrigin(req);
+    const confirmUrl     = `${origin}/api/email/confirm?token=${encodeURIComponent(effective.confirmationToken)}`;
+    const unsubscribeUrl = `${origin}/api/email/unsubscribe?token=${encodeURIComponent(effective.unsubscribeToken)}`;
+
+    try {
+        await sendEmail({
+            to: effective.email,
+            subject: 'Confirm your Polkadex Explorer alerts subscription',
+            tag: 'confirm',
+            text:
+`Welcome to Polkadex Explorer alerts.
+
+Click the link below to confirm your subscription:
+
+${confirmUrl}
+
+You'll receive an email when new governance events you've subscribed to happen on-chain.
+
+If you didn't sign up, you can ignore this email — without confirmation, no further emails will be sent.
+
+— Polkadex Explorer
+${origin}
+Unsubscribe at any time: ${unsubscribeUrl}
+`,
+            html:
+`<!doctype html><html><body style="font-family:Inter,-apple-system,Segoe UI,Arial,sans-serif;background:#0a0e1a;color:#e8eaed;margin:0;padding:24px;">
+<div style="max-width:560px;margin:0 auto;background:#141929;border-radius:12px;padding:32px;border:1px solid #2a3045;">
+  <h1 style="margin:0 0 16px;font-size:1.4rem;color:#fff;">Confirm your subscription</h1>
+  <p style="line-height:1.55;color:#cfd5e1;">Welcome to Polkadex Explorer alerts. Click the button below to confirm and start receiving notifications for the events you subscribed to.</p>
+  <p style="margin:28px 0;text-align:center;">
+    <a href="${htmlEscape(confirmUrl)}" style="display:inline-block;padding:12px 24px;background:#E6007A;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Confirm subscription</a>
+  </p>
+  <p style="font-size:0.82rem;color:#8a92a6;line-height:1.5;">Didn't sign up? Just ignore this email — we won't send anything else.</p>
+  <hr style="border:none;border-top:1px solid #2a3045;margin:28px 0;">
+  <p style="font-size:0.75rem;color:#6a7387;line-height:1.5;">
+    Polkadex Mainnet Explorer · <a href="${htmlEscape(origin)}" style="color:#8a92a6;">${htmlEscape(origin.replace(/^https?:\/\//, ''))}</a><br>
+    <a href="${htmlEscape(unsubscribeUrl)}" style="color:#6a7387;">Unsubscribe</a>
+  </p>
+</div>
+</body></html>`
+        });
+    } catch (err) {
+        console.error('[email] failed to send confirmation:', err && err.message ? err.message : err);
+        return res.status(502).json({ error: 'Could not send confirmation email. Please try again in a few minutes.' });
+    }
+
+    res.json({ status: 'pending', email: effective.email });
+});
+
+// GET /api/email/confirm?token=...
+// Renders a friendly HTML page (so the link works directly from email clients).
+app.get('/api/email/confirm', (req, res) => {
+    const token = String(req.query.token || '').trim();
+    const subscriber = db.confirmEmailSubscriber(token);
+    res.set('Cache-Control', 'no-store');
+    if (!subscriber) {
+        return res.status(404).type('html').send(confirmResultPage({
+            title: 'Confirmation link not recognised',
+            body: '<p>This confirmation link is invalid or has already been used. If you meant to subscribe, please request a new link from the explorer.</p>',
+            isError: true
+        }));
+    }
+    res.type('html').send(confirmResultPage({
+        title: 'You\'re subscribed!',
+        body: `<p>Your subscription is confirmed for <strong>${htmlEscape(subscriber.email)}</strong>. You'll start receiving alerts at the next matching on-chain event.</p>
+               <p>You can <a href="/email/preferences?token=${encodeURIComponent(subscriber.unsubscribeToken)}">manage your preferences</a> or <a href="/api/email/unsubscribe?token=${encodeURIComponent(subscriber.unsubscribeToken)}">unsubscribe</a> at any time.</p>`,
+        isError: false
+    }));
+});
+
+// GET /api/email/unsubscribe?token=...
+app.get('/api/email/unsubscribe', (req, res) => {
+    const token = String(req.query.token || '').trim();
+    const subscriber = db.unsubscribeEmailSubscriber(token);
+    res.set('Cache-Control', 'no-store');
+    if (!subscriber) {
+        return res.status(404).type('html').send(confirmResultPage({
+            title: 'Unsubscribe link not recognised',
+            body: '<p>This unsubscribe link is invalid. You may have already unsubscribed, or the link was corrupted in transit. If you continue to receive emails, please contact the explorer team.</p>',
+            isError: true
+        }));
+    }
+    res.type('html').send(confirmResultPage({
+        title: 'You\'ve been unsubscribed',
+        body: `<p>We've stopped sending alerts to <strong>${htmlEscape(subscriber.email)}</strong>. You can resubscribe any time from the explorer.</p>`,
+        isError: false
+    }));
+});
+
+// POST /api/email/preferences { token, prefs }
+// Token-authenticated preferences update. Uses the unsubscribeToken — the
+// user only needs that one URL to manage everything.
+app.post('/api/email/preferences', (req, res) => {
+    const token = String((req.body && req.body.token) || '').trim();
+    const prefs = normalizePrefs(req.body && req.body.prefs);
+    const subscriber = db.setEmailSubscriberPrefs(token, prefs);
+    if (!subscriber) return res.status(404).json({ error: 'Subscription not found.' });
+    res.json({ status: 'ok', prefs: subscriber.eventPrefs });
+});
+
+// GET /api/email/preferences?token=... — read current prefs for the modal.
+app.get('/api/email/preferences', (req, res) => {
+    const token = String(req.query.token || '').trim();
+    const subscriber = db.getEmailSubscriberByUnsubscribeToken(token);
+    if (!subscriber) return res.status(404).json({ error: 'Subscription not found.' });
+    res.json({
+        email: subscriber.email,
+        prefs: subscriber.eventPrefs,
+        confirmed: !!subscriber.confirmedAt,
+        unsubscribed: !!subscriber.unsubscribedAt
+    });
+});
+
+// Diag: how many confirmed subscribers + provider status.
+app.get('/api/diag/email', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({
+        provider: emailProviderStatus(),
+        confirmedSubscribers: db.countEmailSubscribers()
+    });
+});
+
+// Tiny shared template for the confirmation / unsubscribe result page.
+function confirmResultPage({ title, body, isError }) {
+    const color = isError ? '#ff8a8a' : '#5cf591';
+    return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${htmlEscape(title)} — Polkadex Explorer</title>
+<meta name="robots" content="noindex">
+<style>
+  body { background:#0a0e1a; color:#e8eaed; font-family:Inter,-apple-system,Segoe UI,Arial,sans-serif; margin:0; padding:40px 20px; }
+  .card { max-width:520px; margin:60px auto; background:#141929; border:1px solid #2a3045; border-radius:14px; padding:36px 32px; }
+  h1 { margin:0 0 16px; color:${color}; font-size:1.5rem; }
+  p { color:#cfd5e1; line-height:1.55; margin:0 0 14px; }
+  a { color:#00c4ff; }
+  .home-link { display:inline-block; margin-top:18px; color:#fff; padding:10px 18px; background:#E6007A; border-radius:8px; text-decoration:none; font-weight:600; }
+  .home-link:hover { opacity:0.92; }
+</style>
+</head><body>
+<div class="card">
+  <h1>${htmlEscape(title)}</h1>
+  ${body}
+  <a class="home-link" href="/">Back to the explorer</a>
+</div>
+</body></html>`;
+}
 
 // --- DISCUSSION BOARD: threads + posts ---
 // --- PROXY + MULTISIG LOOKUPS ---
@@ -3878,11 +4212,205 @@ async function syncDemocracy() {
         });
         db.setSyncState('democracy', { lastSync: Date.now(), status: 'Synced' });
         console.log(`Democracy indexer: ${referendumCount} referenda, ${publicProposals.length} active proposals.`);
+        // Email-alert dispatch hooks. Fire-and-forget; failures are logged
+        // inside dispatchGovernanceEmails and don't fail this indexer tick.
+        dispatchGovernanceEmails({
+            referenda: db.getDemocracyReferenda(),
+            publicProposals
+        }).catch(err => console.warn('[email] governance dispatch failed:', err && err.message ? err.message : err));
     } catch (err) {
         logSyncError('Democracy sync', err);
         db.setSyncState('democracy', { ...db.getSyncState('democracy'), status: 'Error', error: err.message });
     } finally {
         isSyncingDemocracy = false;
+    }
+}
+
+// ─── Email alert dispatcher ──────────────────────────────────────────────────
+// Two paths fire emails:
+//   1. Event-driven (called from syncDemocracy at the end of each tick):
+//      compare current chain state to "what we've already emailed about" and
+//      dispatch for anything new. Idempotency via email_dispatches table.
+//   2. Time-driven (closing-reminder timer, every 5 min): scan ongoing
+//      referenda; if any has 22–26 h remaining and we haven't sent its
+//      closing-soon reminder, do so.
+//
+// All dispatches go through `dispatchToSubscribers` which: reserves the
+// idempotency row first, then sends the email, then records the result. A
+// process crash mid-send leaves the row in 'pending' state — the dispatcher
+// won't retry it (the user gets one chance per event), but the dispatch log
+// makes it easy to spot. Better than the alternative of double-sending.
+
+async function dispatchToSubscribers({ eventKind, eventId, prefMatches, makeEmail }) {
+    const subs = db.getConfirmedEmailSubscribers();
+    if (subs.length === 0) return;
+    let sentCount = 0;
+    for (const s of subs) {
+        if (!prefMatches(s.eventPrefs || {})) continue;
+        const reserved = db.reserveEmailDispatch({
+            eventKind, eventId: String(eventId), subscriberId: s.id
+        });
+        if (!reserved) continue; // already dispatched
+        const tmpl = makeEmail({ subscriber: s });
+        try {
+            const r = await sendEmail({
+                to: s.email,
+                subject: tmpl.subject,
+                text: tmpl.text,
+                html: tmpl.html,
+                tag: eventKind,
+                headers: { 'List-Unsubscribe': `<${tmpl.unsubscribeUrl}>` }
+            });
+            db.recordEmailDispatchResult({
+                eventKind, eventId: String(eventId), subscriberId: s.id,
+                providerId: r && r.providerId || null,
+                result: r && r.disabled ? 'sent-disabled' : (r && r.rateLimited ? 'rate-limited' : 'sent')
+            });
+            sentCount++;
+        } catch (err) {
+            db.recordEmailDispatchResult({
+                eventKind, eventId: String(eventId), subscriberId: s.id,
+                providerId: null, result: 'failed'
+            });
+            console.warn(`[email] send to ${s.email} failed (${eventKind}/${eventId}):`, err && err.message ? err.message : err);
+        }
+    }
+    if (sentCount > 0) {
+        console.log(`[email] dispatched ${sentCount} ${eventKind} emails for ${eventId}`);
+    }
+}
+
+// Build a versioned canonical site URL for use in email links. SITE_URL env
+// is the authority; if missing we use the public domain since these mails
+// are user-facing and need stable absolute URLs.
+function emailSiteOrigin() {
+    return (process.env.SITE_URL || 'https://explorer.polkadex.ee').replace(/\/+$/, '');
+}
+
+// Common email layout — keeps brand consistent across event types.
+function emailLayout({ title, intro, ctaText, ctaHref, details, unsubscribeUrl }) {
+    const origin = emailSiteOrigin();
+    const text =
+`${title}
+
+${intro}
+
+${details ? details + '\n\n' : ''}${ctaText}: ${ctaHref}
+
+— Polkadex Mainnet Explorer
+${origin}
+
+Unsubscribe: ${unsubscribeUrl}
+`;
+    const html =
+`<!doctype html><html><body style="font-family:Inter,-apple-system,Segoe UI,Arial,sans-serif;background:#0a0e1a;color:#e8eaed;margin:0;padding:24px;">
+<div style="max-width:560px;margin:0 auto;background:#141929;border-radius:12px;padding:32px;border:1px solid #2a3045;">
+  <h1 style="margin:0 0 14px;font-size:1.35rem;color:#fff;">${htmlEscape(title)}</h1>
+  <p style="line-height:1.55;color:#cfd5e1;margin:0 0 16px;">${htmlEscape(intro)}</p>
+  ${details ? `<p style="line-height:1.55;color:#cfd5e1;margin:0 0 16px;">${htmlEscape(details)}</p>` : ''}
+  <p style="margin:24px 0;text-align:center;">
+    <a href="${htmlEscape(ctaHref)}" style="display:inline-block;padding:12px 24px;background:#E6007A;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">${htmlEscape(ctaText)}</a>
+  </p>
+  <hr style="border:none;border-top:1px solid #2a3045;margin:28px 0;">
+  <p style="font-size:0.75rem;color:#6a7387;line-height:1.5;">
+    Polkadex Mainnet Explorer · <a href="${htmlEscape(origin)}" style="color:#8a92a6;">${htmlEscape(origin.replace(/^https?:\/\//, ''))}</a><br>
+    <a href="${htmlEscape(unsubscribeUrl)}" style="color:#6a7387;">Unsubscribe</a>
+  </p>
+</div>
+</body></html>`;
+    return { text, html };
+}
+
+// Convenience: build the per-subscriber unsubscribe URL for any email.
+function unsubscribeUrlFor(subscriber) {
+    return `${emailSiteOrigin()}/api/email/unsubscribe?token=${encodeURIComponent(subscriber.unsubscribeToken)}`;
+}
+
+async function dispatchGovernanceEmails({ referenda, publicProposals }) {
+    // 1. New OPEN referenda — one email per ongoing referendum, idempotent
+    //    by (event_kind='gov.new-ref', event_id=refIndex).
+    for (const r of (referenda || [])) {
+        if (r.status !== 'ongoing' && r.status !== 'started') continue;
+        await dispatchToSubscribers({
+            eventKind: 'gov.new-ref',
+            eventId: r.refIndex,
+            prefMatches: (p) => p.governance && p.governance.newReferendum,
+            makeEmail: ({ subscriber }) => {
+                const unsub = unsubscribeUrlFor(subscriber);
+                const href  = `${emailSiteOrigin()}/democracy?ref=${r.refIndex}`;
+                const tmpl  = emailLayout({
+                    title:   `New referendum tabled — #${r.refIndex}`,
+                    intro:   `A new referendum (#${r.refIndex}) is now open for voting on Polkadex.`,
+                    details: `Voting closes at block ${r.endBlock != null ? Number(r.endBlock).toLocaleString('en-US') : 'unknown'}. Cast your vote before it does.`,
+                    ctaText: 'View and vote',
+                    ctaHref: href,
+                    unsubscribeUrl: unsub
+                });
+                return { subject: `[Polkadex] New referendum #${r.refIndex} is open for voting`, ...tmpl, unsubscribeUrl: unsub };
+            }
+        });
+    }
+
+    // 2. New public proposals — same pattern.
+    for (const p of (publicProposals || [])) {
+        await dispatchToSubscribers({
+            eventKind: 'gov.new-prop',
+            eventId: p.index,
+            prefMatches: (pp) => pp.governance && pp.governance.newProposal,
+            makeEmail: ({ subscriber }) => {
+                const unsub = unsubscribeUrlFor(subscriber);
+                const href  = `${emailSiteOrigin()}/democracy?proposal=${p.index}`;
+                const tmpl  = emailLayout({
+                    title:   `New public proposal — #${p.index}`,
+                    intro:   `A new public proposal (#${p.index}) has been tabled. Seconders can endorse it to move it toward a referendum.`,
+                    details: null,
+                    ctaText: 'View proposal',
+                    ctaHref: href,
+                    unsubscribeUrl: unsub
+                });
+                return { subject: `[Polkadex] New public proposal #${p.index}`, ...tmpl, unsubscribeUrl: unsub };
+            }
+        });
+    }
+
+    // 3. Closing-in-24h reminder — for each ongoing referendum whose endBlock
+    //    is within the window, dispatch once (idempotent).
+    if (typeof globalApi !== 'undefined' && globalApi && globalApi.rpc && globalApi.rpc.chain) {
+        let currentBlock = 0;
+        try {
+            const header = await globalApi.rpc.chain.getHeader();
+            currentBlock = header.number.toNumber();
+        } catch (_) { /* skip closing-reminder this tick */ }
+        const BLOCK_TIME_MS = 12_000;
+        for (const r of (referenda || [])) {
+            if (r.status !== 'ongoing' && r.status !== 'started') continue;
+            if (!r.endBlock || !currentBlock) continue;
+            const blocksLeft = Number(r.endBlock) - currentBlock;
+            if (blocksLeft <= 0) continue;
+            const msLeft = blocksLeft * BLOCK_TIME_MS;
+            // Send when between 22h and 26h remaining — a 4-hour window means
+            // a slow indexer tick still catches it; tighter ranges risk missing.
+            if (msLeft < 22 * 3600_000 || msLeft > 26 * 3600_000) continue;
+            await dispatchToSubscribers({
+                eventKind: 'gov.closing-24h',
+                eventId: r.refIndex,
+                prefMatches: (p) => p.governance && p.governance.closingReminder,
+                makeEmail: ({ subscriber }) => {
+                    const unsub = unsubscribeUrlFor(subscriber);
+                    const href  = `${emailSiteOrigin()}/democracy?ref=${r.refIndex}`;
+                    const hoursLeft = Math.round(msLeft / 3600_000);
+                    const tmpl  = emailLayout({
+                        title:   `Referendum #${r.refIndex} closes in ~${hoursLeft} hours`,
+                        intro:   `Voting on referendum #${r.refIndex} is ending soon. Cast or change your vote before block ${Number(r.endBlock).toLocaleString('en-US')}.`,
+                        details: null,
+                        ctaText: 'Vote now',
+                        ctaHref: href,
+                        unsubscribeUrl: unsub
+                    });
+                    return { subject: `[Polkadex] Referendum #${r.refIndex} closes in ~${hoursLeft}h`, ...tmpl, unsubscribeUrl: unsub };
+                }
+            });
+        }
     }
 }
 

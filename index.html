@@ -567,6 +567,18 @@
                  times, proposer, call hash) and links into block-detail pages
                  for the actual on-chain extrinsic. Closing the modal restores
                  the user to the same tab they clicked from. -->
+            <!-- Email-alerts subscribe modal — reusable across banner CTA,
+                 /democracy page header, /calendar page header, and account
+                 settings. Rendered by openEmailSubscribeModal() in script.js;
+                 form submit POSTs to /api/email/subscribe, then transitions
+                 to a "check your inbox" success state. -->
+            <div id="email-subscribe-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
+                <div class="glass" style="width: 100%; max-width: 520px; padding: 28px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1); max-height: 90vh; overflow-y: auto;">
+                    <button id="close-email-subscribe-modal" style="position: absolute; top: 18px; right: 18px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;" aria-label="Close"><i class='bx bx-x'></i></button>
+                    <div id="email-subscribe-content"></div>
+                </div>
+            </div>
+
             <div id="governance-detail-modal" class="modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(5px); padding: 20px;">
                 <div class="glass" style="width: 100%; max-width: 720px; padding: 30px; border-radius: var(--radius-lg); position: relative; border: 1px solid rgba(255,255,255,0.1); max-height: 90vh; overflow-y: auto;">
                     <button id="close-governance-detail-modal" style="position: absolute; top: 20px; right: 20px; background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer;" aria-label="Close"><i class='bx bx-x'></i></button>
@@ -1040,19 +1052,24 @@
                         <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">Cloudflare</strong> as a CDN and DDoS shield. Cloudflare sees your IP. Their privacy policy is at <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener" class="item-link">cloudflare.com/privacypolicy</a>.</p>
                         <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">Browser wallet extensions</strong> (Polkadot.js, Talisman, SubWallet, Nova Wallet) when you click Connect Wallet. The explorer doesn't share any data with them; they expose your account list to us with your explicit permission.</p>
                         <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">A PDEX price feed</strong> (CoinGecko/Coinpaprika public API) that runs server-side. Your browser does not contact these endpoints directly.</p>
+                        <p style="margin-left: 14px;">— <strong style="color: var(--text-primary);">A transactional email provider</strong> (Postmark by default; SendGrid as an alternative) that delivers your governance email alerts <em>if and only if you opt in</em> via the "Get email alerts" button. They see your email address and the alert content to send the message; they don't get your IP, your wallet, or anything else from us. We don't share your address with them for any purpose besides delivery.</p>
                         <p>We do not load Google Analytics, Mixpanel, Segment, advertising pixels, or any other analytics/tracking script. The explorer's JavaScript bundle is self-hosted; there are no third-party scripts loaded from external CDNs that could fingerprint you.</p>
 
-                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">5. Your rights (GDPR / UK GDPR / CCPA)</h2>
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">5. Email alerts (optional)</h2>
+                        <p>If you opt in to email alerts via the "Get email alerts" button, we store your email address, a randomly-generated confirmation token, an independent randomly-generated unsubscribe token, your selected event preferences, and timestamps. We use the email solely to deliver the alerts you subscribed to. There is no marketing.</p>
+                        <p>Subscriptions use <strong>double opt-in</strong>: we email a confirmation link first, and only confirmed subscribers ever receive alerts. Every alert email contains a one-click unsubscribe link that works without login. Unsubscribing immediately stops all future alerts. We retain your subscription row marked as unsubscribed (rather than deleting) so accidental re-signups can be re-confirmed by you — request full deletion via the contact channels below and we'll wipe the row.</p>
+
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">6. Your rights (GDPR / UK GDPR / CCPA)</h2>
                         <p>You have the right to (a) know what personal data we hold about you, (b) request a copy, (c) request correction or deletion, and (d) object to processing. For the explorer specifically:</p>
                         <p style="margin-left: 14px;">— <em>Local storage:</em> clear it any time via your browser settings, or click "Reset preferences" on the <a href="/cookies" class="item-link">Cookies page</a>.</p>
                         <p style="margin-left: 14px;">— <em>Community labels, votes, discussion messages:</em> message us with the wallet that signed them (we'll verify via a fresh signature) and we'll delete them.</p>
                         <p style="margin-left: 14px;">— <em>Server access logs:</em> we don't have a way to identify you within them unless you tell us your IP and time-window, but if you do, we'll delete matching entries on request.</p>
                         <p style="margin-left: 14px;">— <em>On-chain data:</em> we cannot delete this. It's on the blockchain, not on our server.</p>
 
-                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">6. Children</h2>
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">7. Children</h2>
                         <p>The explorer isn't directed at children under 16. We don't knowingly process data from anyone under 16. If you believe a child has used the explorer in a way that needs attention, contact us.</p>
 
-                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">7. Changes to this policy</h2>
+                        <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">8. Changes to this policy</h2>
                         <p>We'll update the "Last updated" date at the top of this page when this policy changes. Material changes will also be announced on our community channels.</p>
 
                         <h2 style="margin-top: 28px; color: var(--text-primary); font-size: 1.15rem;">8. Contact</h2>
@@ -1099,6 +1116,7 @@
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_proposal</code></td><td style="padding: 10px 12px;">The highest public-proposal index you've been notified of.</td><td style="padding: 10px 12px;">Same as above for democracy public proposals.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_banner_dismissed_ref</code></td><td style="padding: 10px 12px;">Index of the most recent referendum banner you closed.</td><td style="padding: 10px 12px;">So a banner you dismissed stays dismissed for that specific event; a newer event still triggers a fresh one.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_banner_dismissed_proposal</code></td><td style="padding: 10px 12px;">Index of the most recent proposal banner you closed.</td><td style="padding: 10px 12px;">Same as above for public proposals.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;" colspan="3" style="padding: 14px 12px; color: var(--text-secondary); font-size: 0.85rem; font-style: italic;">Email alerts (if you opted in) are NOT stored in your browser. Your email address and preferences live on our server only. See the <a href="/privacy" data-spa-link="true" class="item-link">privacy policy</a> section 5 for details.</td></tr>
                                 </tbody>
                             </table>
                         </div>

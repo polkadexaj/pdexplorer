@@ -759,6 +759,10 @@ function renderGovernanceBanner(kind, payload) {
                 <span class="governance-banner-subtitle">${subtitle} — click to view and vote.</span>
             </div>
             <a class="governance-banner-cta" href="${href}" data-spa-link="true">View</a>
+            <button type="button" class="governance-banner-cta governance-banner-cta-secondary"
+                data-email-subscribe="banner" title="Get email alerts for governance events">
+                <i class='bx bx-envelope'></i> Email alerts
+            </button>
             <button type="button" class="governance-banner-close" aria-label="Dismiss"
                 data-gov-banner-close="${kind}" data-gov-banner-idx="${idx}">
                 <i class='bx bx-x'></i>
@@ -819,6 +823,169 @@ document.addEventListener('click', (e) => {
         removeGovernanceBanner(kind);
         e.preventDefault();
         return;
+    }
+});
+
+// ─── Email-alerts subscribe modal ────────────────────────────────────────────
+// One reusable modal driven by openEmailSubscribeModal(source). source is
+// recorded on the backend so we can see which CTA is converting.
+//
+// Two view states:
+//   1. Form — email input + checkbox grid + Subscribe button.
+//   2. Success — "Check your inbox" message + Close button.
+
+function openEmailSubscribeModal(source = 'unknown') {
+    const modal = document.getElementById('email-subscribe-modal');
+    const content = document.getElementById('email-subscribe-content');
+    if (!modal || !content) return;
+    content.innerHTML = renderEmailSubscribeForm(source);
+    modal.style.display = 'flex';
+    // Focus the email field for quick entry.
+    const inp = content.querySelector('#email-subscribe-input');
+    if (inp) setTimeout(() => inp.focus(), 80);
+    wireEmailSubscribeForm(source);
+}
+
+function closeEmailSubscribeModal() {
+    const modal = document.getElementById('email-subscribe-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function renderEmailSubscribeForm(source) {
+    // Default prefs match DEFAULT_EMAIL_PREFS on the backend — all governance
+    // event types on by default since that's why people sign up. Network
+    // milestones default off because they're more operator-focused.
+    return `
+        <h2 style="margin:0 0 10px;color:var(--text-primary,#fff);font-size:1.3rem;display:flex;align-items:center;gap:8px;">
+            <i class='bx bx-envelope' style="color:var(--brand-secondary,#00c4ff)"></i>
+            Email me when&hellip;
+        </h2>
+        <p style="margin:0 0 18px;color:var(--text-secondary,rgba(255,255,255,0.65));font-size:0.9rem;line-height:1.45;">
+            Get a short email when on-chain governance events happen. Double opt-in, one-click unsubscribe.
+        </p>
+        <div id="email-subscribe-error" style="display:none;margin-bottom:14px;padding:10px 12px;background:rgba(255,82,82,0.12);border:1px solid rgba(255,82,82,0.4);border-radius:8px;color:#ffb4b4;font-size:0.86rem;"></div>
+        <form id="email-subscribe-form" novalidate>
+            <label for="email-subscribe-input" style="display:block;margin-bottom:6px;color:var(--text-secondary,rgba(255,255,255,0.7));font-size:0.85rem;">Email address</label>
+            <input type="email" id="email-subscribe-input" required autocomplete="email"
+                placeholder="you@example.com"
+                style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.15);color:#fff;font-size:0.95rem;margin-bottom:18px;">
+
+            <fieldset style="border:0;padding:0;margin:0 0 14px;">
+                <legend style="color:var(--text-secondary,rgba(255,255,255,0.7));font-size:0.85rem;padding:0;margin-bottom:8px;">Governance</legend>
+                <label class="email-pref"><input type="checkbox" data-pref-path="governance.newReferendum" checked> New referendum opens for voting</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="governance.newProposal" checked> New public proposal tabled</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="governance.closingReminder" checked> 24-hour reminder before a referendum closes</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="governance.referendumResult"> Referendum result (passed / failed)</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="governance.treasuryProposal"> Treasury proposal activity</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="governance.councilMotion"> Council motion activity</label>
+            </fieldset>
+            <fieldset style="border:0;padding:0;margin:0 0 18px;">
+                <legend style="color:var(--text-secondary,rgba(255,255,255,0.7));font-size:0.85rem;padding:0;margin-bottom:8px;">Network milestones</legend>
+                <label class="email-pref"><input type="checkbox" data-pref-path="network.runtimeUpgrade"> Runtime upgrade</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="network.eraBoundary"> Era boundary summary</label>
+                <label class="email-pref"><input type="checkbox" data-pref-path="network.chainStalled"> Chain stalled alert (ops)</label>
+            </fieldset>
+
+            <div style="display:flex;gap:10px;align-items:center;margin-top:10px;">
+                <button type="submit" id="email-subscribe-submit"
+                    style="flex:1;padding:12px;background:var(--brand-primary,#E6007A);color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:0.95rem;">
+                    Subscribe
+                </button>
+                <button type="button" id="email-subscribe-cancel"
+                    style="padding:12px 18px;background:transparent;color:var(--text-secondary,rgba(255,255,255,0.7));border:1px solid rgba(255,255,255,0.15);border-radius:8px;cursor:pointer;font-size:0.92rem;">
+                    Cancel
+                </button>
+            </div>
+            <p style="margin:14px 0 0;font-size:0.78rem;color:var(--text-muted,rgba(255,255,255,0.45));line-height:1.45;">
+                We only use your address to send the alerts you've selected. See <a href="/privacy" data-spa-link="true" style="color:var(--brand-secondary,#00c4ff);">privacy</a> for details. One-click unsubscribe is in every email.
+            </p>
+        </form>
+    `;
+}
+
+function wireEmailSubscribeForm(source) {
+    const form = document.getElementById('email-subscribe-form');
+    const cancel = document.getElementById('email-subscribe-cancel');
+    if (cancel) cancel.addEventListener('click', closeEmailSubscribeModal);
+    if (!form) return;
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const err = document.getElementById('email-subscribe-error');
+        const submitBtn = document.getElementById('email-subscribe-submit');
+        if (err) { err.style.display = 'none'; err.textContent = ''; }
+        const email = (document.getElementById('email-subscribe-input').value || '').trim();
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            if (err) { err.textContent = 'Please enter a valid email address.'; err.style.display = 'block'; }
+            return;
+        }
+        // Collect prefs from checkboxes; merge into the nested structure
+        // the backend expects.
+        const prefs = { governance: {}, network: {} };
+        form.querySelectorAll('input[type="checkbox"][data-pref-path]').forEach(cb => {
+            const path = cb.getAttribute('data-pref-path');
+            const [section, key] = path.split('.');
+            if (!prefs[section]) prefs[section] = {};
+            prefs[section][key] = !!cb.checked;
+        });
+
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting…'; }
+        try {
+            const res = await fetch('/api/email/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, prefs, source })
+            });
+            const data = await parseJsonResponse(res);
+            if (!res.ok || data.error) throw new Error(data.error || 'Could not subscribe');
+            renderEmailSubscribeSuccess(email, data.status);
+        } catch (e2) {
+            if (err) { err.textContent = e2.message || String(e2); err.style.display = 'block'; }
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Subscribe'; }
+        }
+    });
+}
+
+function renderEmailSubscribeSuccess(email, status) {
+    const content = document.getElementById('email-subscribe-content');
+    if (!content) return;
+    if (status === 'already-confirmed') {
+        content.innerHTML = `
+            <h2 style="margin:0 0 12px;color:var(--text-primary,#fff);font-size:1.3rem;">You're already subscribed</h2>
+            <p style="color:var(--text-secondary,rgba(255,255,255,0.7));line-height:1.5;">
+                We already have <strong>${stakingEscapeHtml(email)}</strong> on the list. You'll keep receiving the alerts you've signed up for.
+            </p>
+            <button type="button" id="email-subscribe-done" style="margin-top:18px;padding:11px 22px;background:var(--brand-primary,#E6007A);color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;">Done</button>
+        `;
+    } else {
+        content.innerHTML = `
+            <h2 style="margin:0 0 12px;color:var(--text-primary,#fff);font-size:1.3rem;display:flex;align-items:center;gap:8px;">
+                <i class='bx bx-mail-send' style="color:#5cf591"></i> Check your inbox
+            </h2>
+            <p style="color:var(--text-secondary,rgba(255,255,255,0.75));line-height:1.55;">
+                We sent a confirmation link to <strong>${stakingEscapeHtml(email)}</strong>. Click it to start receiving alerts. The link is valid for 24 hours; you can request a new one any time from this modal.
+            </p>
+            <button type="button" id="email-subscribe-done" style="margin-top:18px;padding:11px 22px;background:var(--brand-primary,#E6007A);color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;">Done</button>
+        `;
+    }
+    const done = document.getElementById('email-subscribe-done');
+    if (done) done.addEventListener('click', closeEmailSubscribeModal);
+}
+
+// Top-level close button + backdrop click handler.
+document.addEventListener('click', (e) => {
+    if (e.target && e.target.id === 'close-email-subscribe-modal') {
+        closeEmailSubscribeModal();
+        return;
+    }
+    if (e.target && e.target.id === 'email-subscribe-modal') {
+        closeEmailSubscribeModal();
+        return;
+    }
+    // Open from any data-attr trigger anywhere on the page.
+    const trigger = e.target.closest && e.target.closest('[data-email-subscribe]');
+    if (trigger) {
+        e.preventDefault();
+        openEmailSubscribeModal(trigger.getAttribute('data-email-subscribe') || 'unknown');
     }
 });
 
@@ -3032,6 +3199,30 @@ const HELP_TOPICS = [
         `
     },
     {
+        slug: 'email-alerts',
+        title: 'Email alerts',
+        category: 'gov',
+        keywords: 'email alerts subscription notification referendum proposal closing reminder unsubscribe',
+        body: `
+            <p class="lead">Get a short email when on-chain events happen on Polkadex — new referenda, public proposals, 24-hour voting reminders, and more. Double opt-in, one-click unsubscribe.</p>
+            <h3>How to subscribe</h3>
+            <p>Open the subscribe form from any of three places:</p>
+            <ul>
+                <li>The <strong>Email alerts</strong> button on the homepage banner when a new referendum is announced.</li>
+                <li>The button at the top of the <a href="/calendar" class="item-link">Governance Calendar</a>.</li>
+                <li>The button at the top of the <a href="/democracy" class="item-link">Democracy</a> page.</li>
+            </ul>
+            <p>Enter your email, pick which events you want, and submit. We'll send a one-time confirmation link — click it once and you're set.</p>
+            <h3>What you can subscribe to</h3>
+            <p><strong>Governance:</strong> new referendum opens for voting · new public proposal tabled · 24-hour reminder before a referendum closes · referendum result (passed/failed) · treasury proposal activity · council motion activity.</p>
+            <p><strong>Network milestones:</strong> runtime upgrade · era boundary summary · chain stalled alert. These are off by default — most people only want the governance events.</p>
+            <h3>Unsubscribe and preferences</h3>
+            <p>Every email includes a one-click <strong>Unsubscribe</strong> link at the bottom. Clicking it stops all future alerts immediately — no login or wallet needed. You can resubscribe any time from the explorer.</p>
+            <h3>Privacy and data handling</h3>
+            <p>Your email address is stored only to deliver the alerts you've selected. We don't sell it, hand it to other services, or use it for marketing. The <a href="/privacy" class="item-link">privacy policy</a> has the full details. We use a transactional email provider (Postmark) for delivery — they see the email content but only to send it.</p>
+        `
+    },
+    {
         slug: 'governance-notifications',
         title: 'New-event notifications',
         category: 'gov',
@@ -3871,11 +4062,18 @@ async function renderCalendarPage() {
 
     container.innerHTML = `
         <div class="calendar-header">
-            <h1>Governance calendar ${helpIcon('governance-calendar', 'About this page')}</h1>
-            <p class="calendar-tagline">
-                On-chain governance at a glance — referenda, treasury proposals, and council motions
-                with their lifecycle dates and current status.
-            </p>
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:0;">
+                    <h1>Governance calendar ${helpIcon('governance-calendar', 'About this page')}</h1>
+                    <p class="calendar-tagline">
+                        On-chain governance at a glance — referenda, treasury proposals, and council motions
+                        with their lifecycle dates and current status.
+                    </p>
+                </div>
+                <button type="button" class="email-alerts-cta" data-email-subscribe="calendar">
+                    <i class='bx bx-envelope'></i> Get email alerts ${helpIcon('email-alerts', 'About email alerts')}
+                </button>
+            </div>
         </div>
         <div class="calendar-controls">
             <div class="calendar-pills" role="tablist" aria-label="Filter by event type">
@@ -4080,7 +4278,7 @@ function tryOpenFromQueryString(page) {
             const referenda = Array.isArray(democracyData.referenda) ? democracyData.referenda : [];
             const row = referenda.find(r => String(r.refIndex) === String(refIdx));
             if (row) {
-                openGovernanceDetailModal({ kind: 'referendum', row, returnPage: 'calendar' });
+                openGovernanceDetailModal({ kind: 'referendum', row, returnPage: 'history-back' });
                 return;
             }
         }
@@ -4089,7 +4287,7 @@ function tryOpenFromQueryString(page) {
             const props = Array.isArray(democracyData.publicProposals) ? democracyData.publicProposals : [];
             const row = props.find(p => String(p.index) === String(propIdx));
             if (row) {
-                openGovernanceDetailModal({ kind: 'public-proposal', row, returnPage: 'calendar' });
+                openGovernanceDetailModal({ kind: 'public-proposal', row, returnPage: 'history-back' });
                 return;
             }
         }
@@ -4099,7 +4297,7 @@ function tryOpenFromQueryString(page) {
             const props = Array.isArray(treasuryData.allProposals) ? treasuryData.allProposals : [];
             const row = props.find(p => String(p.id) === String(propIdx));
             if (row) {
-                openGovernanceDetailModal({ kind: 'treasury', row, returnPage: 'calendar' });
+                openGovernanceDetailModal({ kind: 'treasury', row, returnPage: 'history-back' });
                 return;
             }
         }
@@ -4109,7 +4307,7 @@ function tryOpenFromQueryString(page) {
             const motions = Array.isArray(councilData.motions) ? councilData.motions : [];
             const row = motions.find(m => String(m.motionIndex) === String(motionIdx));
             if (row) {
-                openGovernanceDetailModal({ kind: 'motion', row, returnPage: 'calendar' });
+                openGovernanceDetailModal({ kind: 'motion', row, returnPage: 'history-back' });
                 return;
             }
         }
@@ -8040,9 +8238,14 @@ function renderDemocracy() {
 
     root.innerHTML = `
         <div class="list-container glass">
-            <div class="list-header">
-                <h2>Democracy</h2>
-                ${indexerStatusBadge(d.status, d.error)}
+            <div class="list-header" style="display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <h2 style="margin:0;">Democracy</h2>
+                    ${indexerStatusBadge(d.status, d.error)}
+                </div>
+                <button type="button" class="email-alerts-cta" data-email-subscribe="democracy">
+                    <i class='bx bx-envelope'></i> Get email alerts ${helpIcon('email-alerts', 'About email alerts')}
+                </button>
             </div>
             <div class="account-tabs" style="margin:0 24px;">
                 ${tabBtn('overview', 'Overview')}${tabBtn('referenda', 'Referenda')}${tabBtn('proposals', 'Public Proposals')}${tabBtn('statistics', 'Statistics')}
@@ -9357,10 +9560,17 @@ function closeGovernanceDetailModal({ restorePage = true } = {}) {
     } else if (state.returnPage === 'council' && state.returnTab) {
         const tabBtn = document.querySelector(`.council-page .account-tab[data-tab="${state.returnTab}"]`);
         if (tabBtn) tabBtn.click();
-    } else if (state.returnPage === 'calendar') {
-        // User came from /calendar — send them back. SPA navigates to /calendar
-        // and re-renders the month/list view from cached events.
-        navigateTo('calendar');
+    } else if (state.returnPage === 'history-back') {
+        // Deep-link open (banner CTA, calendar click, shared URL). We don't
+        // know where the user came from at registration time — but the
+        // browser does. history.back() returns them to whichever SPA route
+        // pushed /democracy?ref=N or /treasury?proposal=N onto the stack
+        // (e.g., /home for the banner, /calendar for the calendar). Falls
+        // back to /home for direct-paste of share links where there's no
+        // prior in-app history entry.
+        const sameOriginReferrer = document.referrer && document.referrer.startsWith(location.origin);
+        if (history.length > 1 || sameOriginReferrer) history.back();
+        else navigateTo('home');
     }
 }
 

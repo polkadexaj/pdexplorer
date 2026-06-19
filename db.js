@@ -256,6 +256,59 @@ CREATE TABLE IF NOT EXISTS scan_failures (
 -- Lookup index for the oldest-first retry order used by getScanFailures.
 CREATE INDEX IF NOT EXISTS idx_scan_failures_replay
     ON scan_failures(indexer, attempts, last_at);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Email alerts: subscriber list + per-event dispatch idempotency.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- One row per (email, source). source distinguishes home-banner vs democracy
+-- vs calendar vs settings signups so we can see where users are converting
+-- from. confirmed_at is the double-opt-in gate — only confirmed rows
+-- receive emails. unsubscribe_token is independent of confirmation_token so
+-- a leaked confirmation link can't also unsubscribe future signups.
+-- event_prefs is JSON (see PREF_SHAPE doc in server.js) describing which
+-- categories + thresholds the user opted into. wallet_address is non-null
+-- when the user authenticated via wallet-signature instead of email-only
+-- (or both — wallet auth proves address ownership for account-specific
+-- events; email-only signups are still allowed for broadcast events).
+CREATE TABLE IF NOT EXISTS email_subscribers (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  email                TEXT    NOT NULL,
+  email_lc             TEXT    NOT NULL,
+  confirmation_token   TEXT    NOT NULL UNIQUE,
+  unsubscribe_token    TEXT    NOT NULL UNIQUE,
+  confirmed_at         INTEGER DEFAULT NULL,
+  unsubscribed_at      INTEGER DEFAULT NULL,
+  event_prefs          TEXT    NOT NULL,        -- JSON
+  source               TEXT,                    -- 'banner'|'democracy'|'calendar'|'settings'
+  wallet_address       TEXT    DEFAULT NULL,    -- non-null = wallet-signed signup
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL
+);
+-- One unique row per email-address; case-insensitive via lowercased copy.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_email_subscribers_email
+    ON email_subscribers(email_lc);
+-- Fast lookup for the dispatcher's "send to all confirmed subscribers with
+-- governance.newReferendum enabled" path. The 0 = not unsubscribed condition
+-- can't go in the index; the dispatcher applies it as a WHERE.
+CREATE INDEX IF NOT EXISTS idx_email_subscribers_confirmed
+    ON email_subscribers(confirmed_at, unsubscribed_at);
+
+-- Idempotency log: every email send is recorded BEFORE the SMTP call so a
+-- crash mid-dispatch (or a duplicate watcher firing) doesn't double-send.
+-- PRIMARY KEY (event_kind, event_id, subscriber_id) is the join key the
+-- dispatcher checks via LEFT JOIN or INSERT OR IGNORE.
+CREATE TABLE IF NOT EXISTS email_dispatches (
+  event_kind     TEXT    NOT NULL, -- 'gov.new-ref' | 'gov.new-prop' | 'gov.closing-24h' | ...
+  event_id       TEXT    NOT NULL, -- referendum index, proposal index, etc. (string for flexibility)
+  subscriber_id  INTEGER NOT NULL,
+  dispatched_at  INTEGER NOT NULL,
+  provider_id    TEXT,             -- provider's message ID, for bounce tracking
+  result         TEXT,              -- 'sent' | 'failed' | 'skipped-prefs'
+  PRIMARY KEY (event_kind, event_id, subscriber_id),
+  FOREIGN KEY (subscriber_id) REFERENCES email_subscribers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_email_dispatches_subscriber
+    ON email_dispatches(subscriber_id, dispatched_at DESC);
 `;
 
 // Idempotent ALTER TABLE ADD COLUMN — checks PRAGMA table_info first so it
@@ -1169,4 +1222,141 @@ function migrateFromJson(dataDir) {
             });
         }
     }
+}
+
+// ─── Email alert helpers ─────────────────────────────────────────────────────
+// All times are epoch ms. event_prefs is stored as a JSON string and parsed
+// on read for the caller's convenience.
+
+function mapSubscriber(row) {
+    if (!row) return null;
+    let prefs = {};
+    try { prefs = JSON.parse(row.event_prefs || '{}'); } catch (_) { prefs = {}; }
+    return {
+        id:                  row.id,
+        email:               row.email,
+        emailLower:          row.email_lc,
+        confirmationToken:   row.confirmation_token,
+        unsubscribeToken:    row.unsubscribe_token,
+        confirmedAt:         row.confirmed_at,
+        unsubscribedAt:      row.unsubscribed_at,
+        eventPrefs:          prefs,
+        source:              row.source,
+        walletAddress:       row.wallet_address,
+        createdAt:           row.created_at,
+        updatedAt:           row.updated_at
+    };
+}
+
+export function getEmailSubscriberByEmail(email) {
+    const lc = String(email || '').trim().toLowerCase();
+    if (!lc) return null;
+    return mapSubscriber(db.prepare('SELECT * FROM email_subscribers WHERE email_lc = ?').get(lc));
+}
+export function getEmailSubscriberByConfirmationToken(token) {
+    if (!token) return null;
+    return mapSubscriber(db.prepare('SELECT * FROM email_subscribers WHERE confirmation_token = ?').get(token));
+}
+export function getEmailSubscriberByUnsubscribeToken(token) {
+    if (!token) return null;
+    return mapSubscriber(db.prepare('SELECT * FROM email_subscribers WHERE unsubscribe_token = ?').get(token));
+}
+export function getEmailSubscriberById(id) {
+    if (id == null) return null;
+    return mapSubscriber(db.prepare('SELECT * FROM email_subscribers WHERE id = ?').get(id));
+}
+
+// Insert a brand-new (unconfirmed) subscriber. If the email already exists
+// — whether confirmed or not — returns the existing row WITHOUT modifying
+// it; the caller decides whether to resend the confirmation email.
+export function createEmailSubscriberIfMissing({ email, confirmationToken, unsubscribeToken, eventPrefs, source, walletAddress }) {
+    const now = Date.now();
+    const lc = String(email || '').trim().toLowerCase();
+    const existing = getEmailSubscriberByEmail(lc);
+    if (existing) return { created: false, subscriber: existing };
+    db.prepare(`INSERT INTO email_subscribers
+        (email, email_lc, confirmation_token, unsubscribe_token, event_prefs, source, wallet_address, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(
+        email.trim(),
+        lc,
+        confirmationToken,
+        unsubscribeToken,
+        JSON.stringify(eventPrefs || {}),
+        source ?? null,
+        walletAddress ?? null,
+        now, now
+    );
+    return { created: true, subscriber: getEmailSubscriberByEmail(lc) };
+}
+
+// Mark a subscriber confirmed. Returns the (post-update) row, or null if no
+// such confirmation token exists. Idempotent — re-confirming is a no-op.
+export function confirmEmailSubscriber(token) {
+    const row = getEmailSubscriberByConfirmationToken(token);
+    if (!row) return null;
+    if (!row.confirmedAt) {
+        db.prepare('UPDATE email_subscribers SET confirmed_at = ?, unsubscribed_at = NULL, updated_at = ? WHERE id = ?')
+            .run(Date.now(), Date.now(), row.id);
+    }
+    return getEmailSubscriberById(row.id);
+}
+
+// Unsubscribe via token (no auth needed — the token IS the auth). Idempotent.
+export function unsubscribeEmailSubscriber(token) {
+    const row = getEmailSubscriberByUnsubscribeToken(token);
+    if (!row) return null;
+    if (!row.unsubscribedAt) {
+        db.prepare('UPDATE email_subscribers SET unsubscribed_at = ?, updated_at = ? WHERE id = ?')
+            .run(Date.now(), Date.now(), row.id);
+    }
+    return getEmailSubscriberById(row.id);
+}
+
+// Update event preferences. Caller passes a fully-merged prefs object; we
+// JSON.stringify and write it as-is. Used by the /api/email/preferences
+// endpoint (token-based, no wallet auth needed).
+export function setEmailSubscriberPrefs(token, eventPrefs) {
+    const row = getEmailSubscriberByUnsubscribeToken(token);
+    if (!row) return null;
+    db.prepare('UPDATE email_subscribers SET event_prefs = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(eventPrefs || {}), Date.now(), row.id);
+    return getEmailSubscriberById(row.id);
+}
+
+// All confirmed-and-not-unsubscribed subscribers. The dispatcher then
+// filters by event_prefs in JS — keeping the SQL simple and avoiding
+// JSON-path SQL gymnastics across SQLite versions.
+export function getConfirmedEmailSubscribers() {
+    const rows = db.prepare(
+        'SELECT * FROM email_subscribers WHERE confirmed_at IS NOT NULL AND unsubscribed_at IS NULL'
+    ).all();
+    return rows.map(mapSubscriber);
+}
+
+// Dispatch idempotency: record (eventKind, eventId, subscriberId) BEFORE the
+// SMTP call so a crash or duplicate watcher doesn't double-send. Returns
+// `true` if the row was newly inserted (caller should send), `false` if a
+// row already existed (already sent, skip).
+export function reserveEmailDispatch({ eventKind, eventId, subscriberId }) {
+    const r = db.prepare(`INSERT OR IGNORE INTO email_dispatches
+        (event_kind, event_id, subscriber_id, dispatched_at, result)
+        VALUES (?,?,?,?,?)`).run(
+        String(eventKind), String(eventId), subscriberId, Date.now(), 'pending'
+    );
+    return r.changes > 0;
+}
+
+// Update an in-flight dispatch row with the provider's result after the
+// SMTP call returns. Idempotent (won't re-update old rows).
+export function recordEmailDispatchResult({ eventKind, eventId, subscriberId, providerId, result }) {
+    db.prepare(`UPDATE email_dispatches
+        SET provider_id = ?, result = ?
+        WHERE event_kind = ? AND event_id = ? AND subscriber_id = ?`).run(
+        providerId ?? null, result ?? 'sent',
+        String(eventKind), String(eventId), subscriberId
+    );
+}
+
+export function countEmailSubscribers() {
+    return db.prepare('SELECT COUNT(*) AS c FROM email_subscribers WHERE confirmed_at IS NOT NULL AND unsubscribed_at IS NULL').get().c;
 }
