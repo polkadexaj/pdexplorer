@@ -1341,6 +1341,9 @@ const SITEMAP_STATIC_ROUTES = [
     // Network analytics dashboard — recently added, KPIs update hourly so a
     // higher changefreq is appropriate.
     { path: '/analytics',         changefreq: 'hourly',  priority: '0.7' },
+    // Full-screen PDEX price chart, reachable from the sidebar price ticker.
+    // High-traffic landing (any visitor scanning "PDEX price" intent).
+    { path: '/price',             changefreq: 'hourly',  priority: '0.8' },
     // Static legal pages — low changefreq but want them indexed so users
     // searching for "Polkadex explorer privacy" land on the right page.
     { path: '/privacy',           changefreq: 'yearly',  priority: '0.4' },
@@ -1385,6 +1388,7 @@ const SITEMAP_STATIC_ROUTES = [
     { path: '/help/governance-calendar',      changefreq: 'monthly', priority: '0.5' },
     { path: '/help/governance-notifications', changefreq: 'monthly', priority: '0.4' },
     { path: '/help/email-alerts',             changefreq: 'monthly', priority: '0.5' },
+    { path: '/help/price-chart',              changefreq: 'monthly', priority: '0.5' },
     // Brand kit cheatsheet — designer-/dev-facing reference, indexable so
     // searches for "Polkadex brand colours" / "Polkadex logo download" land here.
     { path: '/brand',                         changefreq: 'monthly', priority: '0.5' },
@@ -2314,7 +2318,11 @@ app.get('/api/price-latest', (req, res) => {
 });
 app.get('/api/price-history', (req, res) => {
     try {
-        const days = Math.min(Math.max(parseInt(req.query.days || '30', 10) || 30, 1), 365);
+        // Cap raised from 365 → 4000 days so the /price page's "All-time"
+        // view can serve the full backfilled history (PDEX has been trading
+        // since March 2022 ≈ 1500 days as of June 2026). 4000 days = ~11
+        // years, comfortably covers any conceivable PDEX history.
+        const days = Math.min(Math.max(parseInt(req.query.days || '30', 10) || 30, 1), 4000);
         const since = Date.now() - days * 24 * 60 * 60 * 1000;
         const configured = PRICE_PROVIDERS.some(p => isPriceProviderConfigured(p));
         cacheLong(res);

@@ -489,6 +489,10 @@ async function init() {
         // is detected since the user's last seen index. Safe no-op if the
         // endpoint isn't reachable.
         startGovernancePolling();
+        // Sidebar price ticker — polls /api/price-latest on a 60s cadence so
+        // the bottom-left "PDEX Price" cell stays current. The whole row is
+        // wrapped in an <a href="/price"> for click-through to the chart.
+        startPriceTickerPolling();
 
         // Fetch initial dashboard data so it isn't empty on load
         try {
@@ -2502,7 +2506,11 @@ const ROUTE_SEO = {
     // Governance calendar — unified timeline of referenda, treasury proposals,
     // and council motions with end-of-vote countdowns.
     'calendar':           { title: 'Governance calendar — Polkadex Mainnet Explorer',
-                            description: 'Calendar view of all active and recent Polkadex on-chain governance: democracy referenda, council motions, treasury proposals, with voting end times.' }
+                            description: 'Calendar view of all active and recent Polkadex on-chain governance: democracy referenda, council motions, treasury proposals, with voting end times.' },
+    // Full-screen PDEX price chart — landing for anyone scanning "PDEX price"
+    // intent. Surfaced from the sidebar price ticker.
+    'price':              { title: 'PDEX Price Chart — Polkadex Mainnet Explorer',
+                            description: 'Full PDEX price history with 24-hour, 7-day, 30-day, 90-day, 1-year, and all-time views. Data sourced from AscendEX (native PDEX/USDT) for accurate native-chain market reality.' }
 };
 
 // Update <title>, meta[description], canonical, and Open Graph / Twitter tags
@@ -3199,6 +3207,23 @@ const HELP_TOPICS = [
             <p>For events with a known wall-clock end timestamp (treasury, motions), we display that directly. For referenda that end at a future block, we estimate using the current chain head and Polkadex's ~12-second block time. Estimates drift by a few minutes over a 7-day voting period — close enough to plan around.</p>
             <h3>Related</h3>
             <p>For per-pallet detail, see the <a href="/democracy" class="item-link"><b>Democracy</b></a>, <a href="/council" class="item-link"><b>Council</b></a>, and <a href="/treasury" class="item-link"><b>Treasury</b></a> pages. The calendar is a roll-up of those.</p>
+        `
+    },
+    {
+        slug: 'price-chart',
+        title: 'PDEX price chart',
+        category: 'tools',
+        keywords: 'price chart pdex history graph ascendex usd usdt 7 day 30 day 90 day all-time',
+        body: `
+            <p class="lead">A full-screen view of the PDEX/USD price, reached by clicking the price in the bottom-left corner of the sidebar.</p>
+            <h3>What you see</h3>
+            <p>The current PDEX price and 24-hour percent change sit at the top of the page, with a line chart showing the selected period below and high/low/volume/period-change stats underneath.</p>
+            <h3>Choosing a time period</h3>
+            <p>Pick from <strong>7D · 30D · 90D · 1Y · ALL</strong> with the pills above the chart. Your choice is remembered between visits via a small <code>pdex_price_period</code> entry in your browser's local storage (no cookies, never sent to our server — see <a href="/cookies" class="item-link">/cookies</a>).</p>
+            <h3>Where the data comes from</h3>
+            <p>Live price polls come from <strong>AscendEX</strong>'s PDEX/USDT pair (currently the most liquid native-chain market for PDEX). Historical data going back to PDEX's first trading day (March 2022) is sourced from the same exchange's daily klines. We also poll CoinMarketCap if a key is configured — both feeds write to the same on-disk price history, so the chart is a single continuous series.</p>
+            <h3>Closing</h3>
+            <p>Click the <strong>×</strong> in the top-right of the chart page to return to wherever you were before opening it.</p>
         `
     },
     {
@@ -4039,6 +4064,11 @@ function routeTo(target) {
                 // events after this index.
                 markGovernanceSeen('referendum', getLsNumber('pdex_gov_seen_ref'));
                 markGovernanceSeen('proposal',   getLsNumber('pdex_gov_seen_proposal'));
+            } else if (mainTarget === 'price') {
+                // /price — full-screen PDEX price chart with period selector.
+                // Reached by clicking the sidebar price ticker. Returns to
+                // wherever the user came from via the close (X) button.
+                renderPricePage();
             }
         } else {
             page.style.display = 'none';
@@ -4256,6 +4286,248 @@ function paintCalendarMonth(body, events) {
             paintCalendarBody();
         });
     });
+}
+
+// ─── Sidebar price ticker (live polling) ─────────────────────────────────────
+// The sidebar's bottom-left "PDEX Price" cell is the most-visible piece of
+// data on every page, so it needs to stay fresh. Poll /api/price-latest on
+// page load and every 60s thereafter, with the ticker also acting as the
+// in-page CTA to the /price chart route (the whole row is wrapped in an
+// <a href="/price">).
+let priceTickerTimer = null;
+async function pollPriceTicker() {
+    const valEl = document.getElementById('sidebar-price-value');
+    const chgEl = document.getElementById('sidebar-price-change');
+    if (!valEl || !chgEl) return;
+    try {
+        const res = await fetch('/api/price-latest', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        const latest = json && json.price;
+        if (!latest || typeof latest.price !== 'number') {
+            valEl.textContent = '—';
+            chgEl.textContent = '';
+            chgEl.className = 'change';
+            return;
+        }
+        // Tiny fractions need more decimals; large prices need fewer. Pick
+        // a sensible precision band so $0.04 doesn't render as "$0".
+        const p = Number(latest.price);
+        const maxFD = p >= 1 ? 3 : p >= 0.01 ? 4 : 6;
+        valEl.textContent = '$' + p.toLocaleString('en-US', { maximumFractionDigits: maxFD });
+        const pct = (latest.pctChange24h != null) ? Number(latest.pctChange24h) : null;
+        if (pct == null || !Number.isFinite(pct)) {
+            chgEl.textContent = '';
+            chgEl.className = 'change';
+        } else {
+            const sign = pct >= 0 ? '+' : '';
+            chgEl.textContent = sign + pct.toFixed(2) + '%';
+            chgEl.className = 'change ' + (pct >= 0 ? 'positive' : 'negative');
+        }
+    } catch (e) {
+        // Don't blank a previously-good value on a transient blip; leave the
+        // last good reading on screen and try again next tick.
+        if (valEl.textContent === '—') chgEl.textContent = '';
+    }
+}
+function startPriceTickerPolling() {
+    if (priceTickerTimer) return;        // idempotent — safe to call from multiple places
+    pollPriceTicker();
+    priceTickerTimer = setInterval(pollPriceTicker, 60_000);
+}
+
+// ─── Full-screen /price page ─────────────────────────────────────────────────
+// Reached by clicking the sidebar price ticker. Shows the full PDEX/USD
+// chart with a period selector, summary stats, and a close button that uses
+// closeDetailView('home') — i.e., history.back() with a same-origin referrer
+// fallback to home — so the user lands wherever they were before.
+
+// Persisted period selection — survives reloads via /cookies key pdex_price_period.
+const PRICE_PERIODS = [
+    { label: '7D',  days: 7   },
+    { label: '30D', days: 30  },
+    { label: '90D', days: 90  },
+    { label: '1Y',  days: 365 },
+    { label: 'ALL', days: 4000 }, // ≥ full backfill window
+];
+let pricePagePeriodDays = 30;
+let pricePageChart = null;
+
+function getPricePeriodFromStorage() {
+    try {
+        const raw = localStorage.getItem('pdex_price_period');
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && PRICE_PERIODS.some(p => p.days === n)) return n;
+    } catch (_) {}
+    return 30;
+}
+function setPricePeriodInStorage(days) {
+    try { localStorage.setItem('pdex_price_period', String(days)); } catch (_) {}
+}
+
+async function renderPricePage() {
+    const root = document.getElementById('price-page-content');
+    if (!root) return;
+    pricePagePeriodDays = getPricePeriodFromStorage();
+
+    // Initial chrome — show the header + close button immediately so the
+    // page feels responsive even while the data fetch is in flight.
+    root.innerHTML = `
+        <div class="price-page-header">
+            <div class="price-page-title">
+                <h1>PDEX Price</h1>
+                <div id="price-page-summary" class="price-page-summary">Loading…</div>
+            </div>
+            <button type="button" class="price-page-close" id="price-page-close-btn" aria-label="Close">
+                <i class='bx bx-x'></i>
+            </button>
+        </div>
+        <div class="price-page-controls">
+            <div class="reward-filter" id="price-page-periods">
+                ${PRICE_PERIODS.map(p => `<button type="button" class="reward-filter-btn${p.days === pricePagePeriodDays ? ' active' : ''}" data-price-period="${p.days}">${p.label}</button>`).join('')}
+            </div>
+            <div class="price-page-source" id="price-page-source"></div>
+        </div>
+        <div class="list-container glass">
+            <div class="staking-chart-wrap" style="height:460px;">
+                <canvas id="price-page-chart"></canvas>
+            </div>
+        </div>
+        <div class="price-page-stats" id="price-page-stats"></div>
+    `;
+
+    // Close button — return to wherever the user came from.
+    const closeBtn = document.getElementById('price-page-close-btn');
+    if (closeBtn) closeBtn.addEventListener('click', () => closeDetailView('home'));
+
+    // Period selector — re-fetches and re-renders without leaving the route.
+    root.querySelectorAll('[data-price-period]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const days = parseInt(btn.getAttribute('data-price-period'), 10);
+            if (!Number.isFinite(days) || days === pricePagePeriodDays) return;
+            pricePagePeriodDays = days;
+            setPricePeriodInStorage(days);
+            root.querySelectorAll('[data-price-period]').forEach(b =>
+                b.classList.toggle('active', parseInt(b.getAttribute('data-price-period'), 10) === days));
+            loadPricePageData();
+        });
+    });
+
+    await loadPricePageData();
+}
+
+async function loadPricePageData() {
+    const summaryEl = document.getElementById('price-page-summary');
+    const statsEl   = document.getElementById('price-page-stats');
+    const sourceEl  = document.getElementById('price-page-source');
+    try {
+        const res = await fetch('/api/price-history?days=' + encodeURIComponent(pricePagePeriodDays), { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        const history = (json && json.history) || [];
+        const latest  = (json && json.latest)  || null;
+
+        // Summary line: current price + 24h change.
+        if (latest && typeof latest.price === 'number') {
+            const p = Number(latest.price);
+            const maxFD = p >= 1 ? 4 : p >= 0.01 ? 5 : 7;
+            const pct = latest.pctChange24h != null ? Number(latest.pctChange24h) : null;
+            const pctHtml = (pct != null && Number.isFinite(pct))
+                ? `<span class="price-change ${pct >= 0 ? 'positive' : 'negative'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% (24h)</span>`
+                : '';
+            summaryEl.innerHTML = `
+                <span class="price-big">$${p.toLocaleString('en-US', { maximumFractionDigits: maxFD })}</span>
+                ${pctHtml}`;
+        } else {
+            summaryEl.textContent = 'No price data yet.';
+        }
+
+        // Source attribution.
+        if (sourceEl) {
+            const providers = (json && json.bySource) || {};
+            const activeNames = Object.keys(providers).filter(k => providers[k] && providers[k].count > 0);
+            const labels = activeNames.map(n => (providers[n] && providers[n].label) || n);
+            sourceEl.textContent = labels.length ? `Sources: ${labels.join(' + ')}` : '';
+        }
+
+        // Chart.
+        renderPricePageChart(history);
+
+        // Stats grid for the current period.
+        if (statsEl) statsEl.innerHTML = buildPriceStatsHtml(history, pricePagePeriodDays);
+    } catch (e) {
+        if (summaryEl) summaryEl.textContent = 'Error loading price data: ' + (e.message || 'unknown');
+    }
+}
+
+function renderPricePageChart(history) {
+    const canvas = document.getElementById('price-page-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (pricePageChart) { pricePageChart.destroy(); pricePageChart = null; }
+    if (!history.length) return;
+    // Sparse x-axis labels for long ranges so they stay legible. With 1500+
+    // points on the all-time view we want ~12 ticks total.
+    const dateFmt = history.length > 120
+        ? { month: 'short', year: '2-digit' }
+        : { month: 'short', day: 'numeric' };
+    pricePageChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: history.map(p => new Date(p.timestamp).toLocaleDateString('en-US', dateFmt)),
+            datasets: [{
+                label: 'PDEX / USD',
+                data: history.map(p => p.price),
+                borderColor: '#00E676',
+                backgroundColor: 'rgba(0, 230, 118, 0.12)',
+                borderWidth: 2,
+                pointRadius: 0,
+                fill: true,
+                tension: 0.20,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: ctx => ' $' + Number(ctx.parsed.y).toLocaleString('en-US', { maximumFractionDigits: 6 }) } }
+            },
+            scales: {
+                x: { ticks: { maxTicksLimit: 12, color: '#888' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+                y: { ticks: { color: '#888', callback: v => '$' + v }, grid: { color: 'rgba(255,255,255,0.04)' } }
+            }
+        }
+    });
+}
+
+function buildPriceStatsHtml(history, days) {
+    if (!history.length) {
+        return `<div class="list-container glass" style="padding:24px;text-align:center;color:var(--text-muted);">No price data in the selected range.</div>`;
+    }
+    const prices  = history.map(p => Number(p.price)).filter(Number.isFinite);
+    const volumes = history.map(p => Number(p.volume24h)).filter(Number.isFinite);
+    if (!prices.length) return '';
+    const high = Math.max(...prices);
+    const low  = Math.min(...prices);
+    const first = prices[0];
+    const last  = prices[prices.length - 1];
+    const periodChange = first > 0 ? ((last - first) / first) * 100 : null;
+    const totalVol = volumes.reduce((a, b) => a + b, 0);
+    const periodLabel = (PRICE_PERIODS.find(p => p.days === days) || { label: days + 'D' }).label;
+    const fmt = v => '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: v < 1 ? 6 : 4 });
+    const fmtBig = v => '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const pctHtml = periodChange != null
+        ? `<span class="price-change ${periodChange >= 0 ? 'positive' : 'negative'}">${periodChange >= 0 ? '+' : ''}${periodChange.toFixed(2)}%</span>`
+        : '—';
+    return `
+        <div class="price-stats-grid">
+            <div class="staking-summary-card"><div class="label">${periodLabel} change</div><div class="value">${pctHtml}</div></div>
+            <div class="staking-summary-card"><div class="label">${periodLabel} high</div><div class="value">${fmt(high)}</div></div>
+            <div class="staking-summary-card"><div class="label">${periodLabel} low</div><div class="value">${fmt(low)}</div></div>
+            <div class="staking-summary-card"><div class="label">${periodLabel} volume</div><div class="value">${totalVol > 0 ? fmtBig(totalVol) : '—'}</div></div>
+        </div>
+    `;
 }
 
 // Open the relevant governance detail modal when arriving at /democracy,

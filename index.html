@@ -199,10 +199,16 @@
                 <a href="https://buypdex.com" target="_blank" rel="noopener" class="nav-item"><i class='bx bx-shopping-bag'></i> Buy PDEX</a>
             </nav>
             <div class="sidebar-footer">
-                <div class="price-ticker">
+                <!-- Sidebar price ticker. Polled by pollPriceTicker() in script.js
+                     every minute from /api/price-latest. Wrapped in an <a> so the
+                     whole row routes to the /price chart page on click. -->
+                <a href="/price" class="price-ticker" data-target="price" id="sidebar-price-ticker" aria-label="View full PDEX price chart">
                     <span class="label">PDEX Price</span>
-                    <span class="value">$1.24 <span class="change positive">+2.4%</span></span>
-                </div>
+                    <span class="value">
+                        <span id="sidebar-price-value">—</span>
+                        <span class="change" id="sidebar-price-change"></span>
+                    </span>
+                </a>
             </div>
         </aside>
 
@@ -1001,6 +1007,13 @@
                 <div id="calendar-page-content"></div>
             </div>
 
+            <!-- Full-screen PDEX price chart, reached by clicking the
+                 sidebar price ticker (and indexable as /price). Rendered
+                 by renderPricePage() in script.js. -->
+            <div class="price-page page-section" data-page="price" style="display: none;">
+                <div id="price-page-content"></div>
+            </div>
+
             <!-- Help Center -->
             <!-- Two-column layout: category sidebar on the left, article on the
                  right. Populated by script.js (HELP_TOPICS + renderHelp*). The
@@ -1115,6 +1128,7 @@
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_tour_seen_v1</code></td><td style="padding: 10px 12px;">A boolean flag once you've completed the onboarding tour.</td><td style="padding: 10px 12px;">So we don't pop the tour up again every visit.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_banner_dismissed</code></td><td style="padding: 10px 12px;">A flag set when you dismiss the storage notice banner.</td><td style="padding: 10px 12px;">So we don't show it again.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_apr_period</code></td><td style="padding: 10px 12px;">The APR-history window you last picked (7d / 30d / 90d / 6m / 1y / all-time).</td><td style="padding: 10px 12px;">So your selection persists on the My Account page.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_price_period</code></td><td style="padding: 10px 12px;">The time window you last picked on the full-screen <a href="/price" class="item-link">/price</a> chart (7 / 30 / 90 / 365 / 4000 days).</td><td style="padding: 10px 12px;">So your selection persists between visits.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_ref</code></td><td style="padding: 10px 12px;">The highest democracy referendum index you've been notified of.</td><td style="padding: 10px 12px;">So new-event banners and toasts only pop for referenda tabled after the last one you saw.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_proposal</code></td><td style="padding: 10px 12px;">The highest public-proposal index you've been notified of.</td><td style="padding: 10px 12px;">Same as above for democracy public proposals.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_banner_dismissed_ref</code></td><td style="padding: 10px 12px;">Index of the most recent referendum banner you closed.</td><td style="padding: 10px 12px;">So a banner you dismissed stays dismissed for that specific event; a newer event still triggers a fresh one.</td></tr>
