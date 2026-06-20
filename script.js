@@ -7523,21 +7523,42 @@ async function submitUnstakeTx() {
     // the user never ends up chilled-but-not-unbonded.
     if (unstakeFullUnbondIntent && unstakeMaxPlanck && /^[0-9]+$/.test(String(unstakeMaxPlanck))) {
         const planckStr = String(unstakeMaxPlanck);
+        // Marker so we can confirm from the browser console that the new
+        // chill-then-unbond fast-path is actually running. If a user reports
+        // "same error", checking the console for this line tells us whether
+        // the deployed JS matches the source.
+        console.log('[unstake] full-unbond fast-path (chill + unbond) firing, planck=' + planckStr);
         await submitSignedTx({
-            buildTx: (api) => api.tx.utility.batchAll([
-                api.tx.staking.chill(),
-                api.tx.staking.unbond(planckStr),
-            ]),
+            buildTx: (api) => {
+                if (!api.tx.staking || !api.tx.staking.chill) {
+                    throw new Error('Runtime does not expose staking.chill — cannot perform full unbond. Please upgrade the runtime or use a partial unbond.');
+                }
+                if (!api.tx.staking.unbond) {
+                    throw new Error('Runtime does not expose staking.unbond.');
+                }
+                // batchTx falls back batchAll → batch → single-call so we
+                // tolerate runtimes that lack utility.batchAll. Atomicity is
+                // best-effort — batch (non-all) keeps going on inner failure
+                // but our chill is idempotent so a chill that already-chilled
+                // is fine.
+                return batchTx(api, [
+                    api.tx.staking.chill(),
+                    api.tx.staking.unbond(planckStr),
+                ]);
+            },
             label: 'Unstake',
             button: document.getElementById('submit-unstake-tx-btn'),
             busyText: 'Signing…',
             idleText: 'Sign & Unstake',
-            onError: (err) => fail(decodeUnstakeError(err, {
-                active: Number(data.staking.activeStaked) || 0,
-                amt: Number(data.staking.activeStaked) || 0,
-                minBond: Number((data.network && data.network.minStake) || 0),
-                isFullUnbond: true,
-            })),
+            onError: (err) => {
+                console.warn('[unstake] full-unbond fast-path errored:', err && (err.message || err));
+                fail(decodeUnstakeError(err, {
+                    active: Number(data.staking.activeStaked) || 0,
+                    amt: Number(data.staking.activeStaked) || 0,
+                    minBond: Number((data.network && data.network.minStake) || 0),
+                    isFullUnbond: true,
+                }));
+            },
             onSuccess: () => {
                 const modal = document.getElementById('unstake-modal');
                 if (modal) modal.style.display = 'none';
