@@ -1,15 +1,24 @@
 #!/usr/bin/env node
 // Standalone one-shot historical price backfill for the Polkadex Explorer.
 //
-// Pulls the full daily PDEX/USD series from DefiLlama (free, no API key) and
-// writes it into the explorer's SQLite `price_history` table tagged with
-// source='defillama-backfill'. The forward-going price polling done by the
-// running indexer (CMC + AscendEX) is untouched — those continue to append
-// rows tagged with their own source. This script is purely additive.
+// Pulls the full daily PDEX/USDT klines from AscendEX (free, public, no API
+// key) and writes them into the explorer's SQLite `price_history` table
+// tagged with source='ascendex-backfill'. The forward-going price polling
+// done by the running indexer (CMC + AscendEX ticker) is untouched — those
+// continue to append rows tagged with their own source. This script is
+// purely additive.
+//
+// WHY ASCENDEX
+//   PDEX was migrated FROM Ethereum TO the Polkadex Mainnet, so the
+//   Ethereum-side ERC20 contract that aggregators like DefiLlama and
+//   CoinPaprika track only reflects the residual unmigrated tokens — a
+//   thin Uniswap pool that prints stale, manipulated prices. AscendEX
+//   trades the native Substrate PDEX (PDEX/USDT pair), so its candles
+//   reflect ACTUAL mainnet market reality from March 2022 onwards.
 //
 // USAGE
-//   # Inside the running backend container (recommended — script lives at /app
-//   # via the COPY line in Dockerfile.backend, and the DB is right there):
+//   # Inside the running backend container (recommended — script lives at
+//   # /app via the COPY line in Dockerfile.backend, and the DB is right there):
 //   docker compose exec backend node --experimental-sqlite \
 //       backfill-price-history.mjs
 //
@@ -17,9 +26,9 @@
 //   node --experimental-sqlite backfill-price-history.mjs \
 //       --db /opt/pdexplorer/data/explorer.db
 //
-//   # Override the start date or coin ID if needed:
+//   # Override symbol or page-size cap if needed:
 //   node --experimental-sqlite backfill-price-history.mjs \
-//       --start 2023-01-01 --coin ethereum:0x...
+//       --symbol PDEX/USDT --max-pages 20
 //
 // IDEMPOTENCY
 //   `price_history.timestamp` is a PRIMARY KEY and inserts use INSERT OR
@@ -28,7 +37,6 @@
 //   inserted vs. skipped on this run.
 
 import { DatabaseSync } from 'node:sqlite';
-import path from 'node:path';
 import fs from 'node:fs';
 import process from 'node:process';
 
@@ -40,14 +48,10 @@ function arg(name, fallback) {
 }
 
 const DB_PATH = arg('db', process.env.PRICE_BACKFILL_DB_PATH || '/app/data/explorer.db');
-const COIN_ID = arg('coin', process.env.DEFILLAMA_PDEX_COIN_ID || 'ethereum:0xf59ae934f6fe444afc309586cc60a84a0f89aaea');
-const START_STR = arg('start', process.env.DEFILLAMA_BACKFILL_START || '2022-12-21');
-
-const startSec = Math.floor(new Date(`${START_STR}T00:00:00Z`).getTime() / 1000);
-if (!Number.isFinite(startSec) || startSec <= 0) {
-    console.error(`Invalid --start: ${START_STR} (expected YYYY-MM-DD)`);
-    process.exit(2);
-}
+const SYMBOL = arg('symbol', process.env.ASCENDEX_SYMBOL || 'PDEX/USDT');
+const PAGE_SIZE = Number(arg('page-size', 500));        // AscendEX caps at 500 per request
+const MAX_PAGES = Number(arg('max-pages', 30));         // safety cap on pagination loops
+const INTER_REQUEST_DELAY_MS = Number(arg('delay-ms', 250));
 
 if (!fs.existsSync(DB_PATH)) {
     console.error(`DB not found at ${DB_PATH}`);
@@ -56,25 +60,75 @@ if (!fs.existsSync(DB_PATH)) {
     process.exit(2);
 }
 
-console.log(`[backfill] DB:    ${DB_PATH}`);
-console.log(`[backfill] Coin:  ${COIN_ID}`);
-console.log(`[backfill] Start: ${START_STR} (epoch ${startSec})`);
+console.log(`[backfill] DB:        ${DB_PATH}`);
+console.log(`[backfill] Symbol:    ${SYMBOL}`);
+console.log(`[backfill] Page size: ${PAGE_SIZE} bars/request, max ${MAX_PAGES} pages`);
 
-// ---- DefiLlama fetch ----
-async function fetchDefillamaChart(coinId, startSec) {
-    // Span = number of daily points to request, sized to cover from `start`
-    // through today, with a small buffer to absorb rounding.
-    const nowSec = Math.floor(Date.now() / 1000);
-    const span = Math.ceil((nowSec - startSec) / (24 * 3600)) + 10;
-    const url = `https://coins.llama.fi/chart/${encodeURIComponent(coinId)}?start=${startSec}&span=${span}&period=1d`;
-    console.log(`[backfill] GET ${url}`);
+// ---- AscendEX fetch + pagination ----
+//
+// AscendEX barhist response shape:
+//   { code: 0, data: [
+//       { m: 'bar', s: 'PDEX/USDT', data: {
+//           i: '1d',
+//           ts: <ms epoch — start of the bar>,
+//           o, c, h, l, v   (all strings — base-asset volume `v`)
+//       } },
+//       ...
+//   ] }
+//
+// Bars are returned NEWEST-FIRST per page when using `n=<count>&to=<ts>`.
+// We walk back via `to = earliestTs` until we get an empty page (= listing
+// inception). Total page count is capped by --max-pages so a bug here can't
+// hammer AscendEX in a loop.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function fetchOnePage(toMs) {
+    const params = new URLSearchParams({ symbol: SYMBOL, interval: '1d', n: String(PAGE_SIZE) });
+    if (toMs) params.set('to', String(toMs));
+    const url = `https://ascendex.com/api/pro/v1/barhist?${params.toString()}`;
     const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!resp.ok) throw new Error(`DefiLlama HTTP ${resp.status}`);
+    if (!resp.ok) throw new Error(`AscendEX HTTP ${resp.status}`);
     const json = await resp.json();
-    const entry = json && json.coins && json.coins[coinId];
-    const prices = entry && Array.isArray(entry.prices) ? entry.prices : [];
-    if (!prices.length) throw new Error('DefiLlama returned no price points');
-    return prices;
+    if (json.code !== 0) throw new Error(`AscendEX code=${json.code}`);
+    const bars = Array.isArray(json.data) ? json.data : [];
+    // Flatten the { m, s, data:{...} } wrapper.
+    return bars.map(b => b.data || {});
+}
+
+async function fetchAllBars() {
+    const all = [];
+    const seen = new Set();
+    let toMs = null;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+        console.log(`[backfill] page ${page}  to=${toMs ?? '(latest)'}`);
+        const bars = await fetchOnePage(toMs);
+        if (!bars.length) {
+            console.log(`[backfill] page ${page} returned 0 bars — reached listing inception`);
+            break;
+        }
+        // Track the earliest timestamp on this page; next page asks for bars
+        // ENDING at that ts (AscendEX includes the boundary bar — we dedup).
+        let earliest = Infinity;
+        let added = 0;
+        for (const b of bars) {
+            const ts = Number(b.ts);
+            if (!Number.isFinite(ts) || ts <= 0) continue;
+            if (seen.has(ts)) continue;
+            seen.add(ts);
+            all.push(b);
+            added++;
+            if (ts < earliest) earliest = ts;
+        }
+        console.log(`[backfill]   ${added} new bars, ${bars.length - added} dedup`);
+        if (added === 0) {
+            console.log(`[backfill] no new bars on page ${page} — stopping`);
+            break;
+        }
+        toMs = earliest;
+        await sleep(INTER_REQUEST_DELAY_MS);
+    }
+    all.sort((a, b) => Number(a.ts) - Number(b.ts));   // chronological ascending
+    return all;
 }
 
 // ---- DB write ----
@@ -93,32 +147,38 @@ function openDb(dbPath) {
     return db;
 }
 
-function insertRows(db, prices) {
+function insertBars(db, bars) {
     // INSERT OR IGNORE: if a row with the same timestamp already exists (e.g.
-    // re-running the script, or a forward-poll wrote at the same ms), keep
-    // what's there. Wrap the whole loop in one transaction for speed —
-    // ~1300 rows × individual fsyncs would take a while otherwise.
+    // re-running, or a forward-poll wrote at the same ms), keep what's there.
+    // Wrap the whole loop in one transaction so the write is fast.
     const stmt = db.prepare(
         'INSERT OR IGNORE INTO price_history(timestamp,price,market_cap,volume_24h,pct_change_24h,source) VALUES(?,?,?,?,?,?)'
     );
     const countBefore = db.prepare('SELECT COUNT(*) AS c FROM price_history').get().c;
     db.exec('BEGIN');
-    let processed = 0, validRows = 0, skipped = 0;
-    let prev = null;
+    let validRows = 0, skipped = 0;
     try {
-        for (const p of prices) {
-            processed++;
-            const ts = Number(p.timestamp);
-            const price = Number(p.price);
-            if (!Number.isFinite(ts) || ts <= 0 || !Number.isFinite(price) || price <= 0) {
+        for (const b of bars) {
+            const ts = Number(b.ts);
+            const close = parseFloat(b.c);
+            const open = parseFloat(b.o);
+            const volBase = parseFloat(b.v);
+            if (!Number.isFinite(ts) || ts <= 0 || !Number.isFinite(close) || close <= 0) {
                 skipped++;
                 continue;
             }
-            // pctChange24h derived from the previous valid day's close.
-            const pct = (prev != null && prev > 0) ? ((price - prev) / prev) * 100 : null;
-            stmt.run(ts * 1000, price, null, null, pct, 'defillama-backfill');
+            // Per-bar 24h % change = (close - open) / open.
+            const pct = Number.isFinite(open) && open > 0
+                ? ((close - open) / open) * 100
+                : null;
+            // AscendEX volume is in base asset (PDEX). Multiply by close
+            // for an approximate USD volume — exact only at flat-price days,
+            // but good enough for the volume column at daily granularity.
+            const volUsd = Number.isFinite(volBase) && volBase >= 0
+                ? volBase * close
+                : null;
+            stmt.run(ts, close, null, volUsd, pct, 'ascendex-backfill');
             validRows++;
-            prev = price;
         }
         db.exec('COMMIT');
     } catch (err) {
@@ -127,7 +187,7 @@ function insertRows(db, prices) {
     }
     const countAfter = db.prepare('SELECT COUNT(*) AS c FROM price_history').get().c;
     return {
-        processed, validRows, skipped,
+        validRows, skipped,
         inserted: countAfter - countBefore,
         alreadyPresent: validRows - (countAfter - countBefore),
         countBefore, countAfter,
@@ -136,27 +196,31 @@ function insertRows(db, prices) {
 
 // ---- main ----
 async function main() {
-    const prices = await fetchDefillamaChart(COIN_ID, startSec);
-    const firstTs = prices[0]?.timestamp;
-    const lastTs  = prices[prices.length - 1]?.timestamp;
-    console.log(`[backfill] DefiLlama returned ${prices.length} points`);
-    console.log(`[backfill] coverage: ${new Date(firstTs * 1000).toISOString().slice(0,10)} → ${new Date(lastTs * 1000).toISOString().slice(0,10)}`);
+    const bars = await fetchAllBars();
+    if (!bars.length) {
+        console.error('[backfill] FAILED: no bars returned at all — check symbol or network');
+        process.exit(1);
+    }
+    const firstTs = bars[0].ts;
+    const lastTs  = bars[bars.length - 1].ts;
+    console.log(`[backfill] fetched ${bars.length} unique bars`);
+    console.log(`[backfill] coverage: ${new Date(firstTs).toISOString().slice(0,10)} → ${new Date(lastTs).toISOString().slice(0,10)}`);
 
     const db = openDb(DB_PATH);
-    const stats = insertRows(db, prices);
+    const stats = insertBars(db, bars);
     db.close();
 
     console.log('');
     console.log('=== Backfill summary ===');
-    console.log(`Points received from DefiLlama: ${stats.processed}`);
-    console.log(`Valid (finite + positive):      ${stats.validRows}`);
-    console.log(`Malformed / skipped:            ${stats.skipped}`);
-    console.log(`Newly inserted into DB:         ${stats.inserted}`);
-    console.log(`Already present (no-op):        ${stats.alreadyPresent}`);
+    console.log(`Bars received from AscendEX:   ${bars.length}`);
+    console.log(`Valid (finite + positive):     ${stats.validRows}`);
+    console.log(`Malformed / skipped:           ${stats.skipped}`);
+    console.log(`Newly inserted into DB:        ${stats.inserted}`);
+    console.log(`Already present (no-op):       ${stats.alreadyPresent}`);
     console.log(`price_history row count: ${stats.countBefore} → ${stats.countAfter}`);
     console.log('');
-    console.log(`All inserted rows are tagged source='defillama-backfill'.`);
-    console.log(`The running indexer's forward-going CMC + AscendEX rows are untouched.`);
+    console.log(`Inserted rows are tagged source='ascendex-backfill'.`);
+    console.log(`The running indexer's forward-going CMC + AscendEX ticker rows are untouched.`);
 }
 
 main().catch(err => {
