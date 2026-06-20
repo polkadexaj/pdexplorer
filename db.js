@@ -117,8 +117,10 @@ CREATE TABLE IF NOT EXISTS price_history (
   price REAL,
   market_cap REAL,
   volume_24h REAL,
-  pct_change_24h REAL
+  pct_change_24h REAL,
+  source TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_price_source_ts ON price_history(source, timestamp DESC);
 CREATE TABLE IF NOT EXISTS democracy_referenda (
   ref_index INTEGER PRIMARY KEY,
   status TEXT,
@@ -369,6 +371,18 @@ export function initDb(dataDir) {
     // present. Keep this list append-only; never DROP a column here (data
     // loss). For a destructive change use a one-time migration function.
     ensureColumn('address_labels', 'vetoed_at', 'INTEGER DEFAULT NULL');
+    // Multi-provider price feed: tag each price_history row with the upstream
+    // that produced it ('cmc' | 'ascendex' | ...). Existing rows predate the
+    // column — backfill them as 'cmc' since CMC was the sole provider until
+    // June 2026. The companion index lets getLatestPriceBySource scan the
+    // most-recent-per-source row in O(log n).
+    ensureColumn('price_history', 'source', "TEXT DEFAULT NULL");
+    try {
+        db.exec("UPDATE price_history SET source = 'cmc' WHERE source IS NULL");
+        db.exec('CREATE INDEX IF NOT EXISTS idx_price_source_ts ON price_history(source, timestamp DESC)');
+    } catch (e) {
+        console.warn('price_history source backfill failed:', e.message);
+    }
 
     try { migrateFromJson(dataDir); }
     catch (e) { console.warn('JSON -> SQLite migration skipped:', e.message); }
@@ -680,18 +694,38 @@ export function getUnclaimedComputedAt(stash) {
 }
 
 // --- price history ---
+// Multi-provider: each row carries a `source` tag ('cmc' | 'ascendex' |
+// 'coingecko-backfill' | ...) so /api/price-latest can expose the most-recent
+// quote per provider and the chart can optionally filter. INSERT OR IGNORE
+// preserves whichever row landed first when two providers race to the same
+// millisecond (vanishingly rare in practice; the safety net is cheap).
 export function insertPrice(point) {
-    db.prepare('INSERT OR REPLACE INTO price_history(timestamp,price,market_cap,volume_24h,pct_change_24h) VALUES(?,?,?,?,?)')
-        .run(point.timestamp, point.price ?? null, point.marketCap ?? null, point.volume24h ?? null, point.pctChange24h ?? null);
+    db.prepare('INSERT OR IGNORE INTO price_history(timestamp,price,market_cap,volume_24h,pct_change_24h,source) VALUES(?,?,?,?,?,?)')
+        .run(
+            point.timestamp,
+            point.price ?? null,
+            point.marketCap ?? null,
+            point.volume24h ?? null,
+            point.pctChange24h ?? null,
+            point.source ?? null
+        );
 }
 export function getPriceHistory(sinceTs) {
-    return db.prepare('SELECT timestamp, price, market_cap AS marketCap, volume_24h AS volume24h, pct_change_24h AS pctChange24h FROM price_history WHERE timestamp >= ? ORDER BY timestamp ASC').all(sinceTs ?? 0);
+    return db.prepare('SELECT timestamp, price, market_cap AS marketCap, volume_24h AS volume24h, pct_change_24h AS pctChange24h, source FROM price_history WHERE timestamp >= ? ORDER BY timestamp ASC').all(sinceTs ?? 0);
 }
 export function getLatestPrice() {
-    return db.prepare('SELECT timestamp, price, market_cap AS marketCap, volume_24h AS volume24h, pct_change_24h AS pctChange24h FROM price_history ORDER BY timestamp DESC LIMIT 1').get() || null;
+    return db.prepare('SELECT timestamp, price, market_cap AS marketCap, volume_24h AS volume24h, pct_change_24h AS pctChange24h, source FROM price_history ORDER BY timestamp DESC LIMIT 1').get() || null;
+}
+// Most-recent row from a specific provider — used by the dashboard to show
+// CMC's and AscendEX's prices side-by-side once both are healthy.
+export function getLatestPriceBySource(source) {
+    return db.prepare('SELECT timestamp, price, market_cap AS marketCap, volume_24h AS volume24h, pct_change_24h AS pctChange24h, source FROM price_history WHERE source = ? ORDER BY timestamp DESC LIMIT 1').get(source) || null;
 }
 export function countPricePoints() {
     return db.prepare('SELECT COUNT(*) AS c FROM price_history').get().c;
+}
+export function countPricePointsBySource(source) {
+    return db.prepare('SELECT COUNT(*) AS c FROM price_history WHERE source = ?').get(source).c;
 }
 
 // --- democracy referenda ---

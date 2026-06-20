@@ -316,7 +316,34 @@ const GOV_MIN_BLOCK = readPositiveInteger(process.env.GOV_MIN_BLOCK, 1);
 // compromised; rotate it at CoinMarketCap if you haven't already).
 const CMC_API_KEY = process.env.CMC_API_KEY || '';
 const CMC_SYMBOL = process.env.CMC_SYMBOL || 'PDEX';
+// Multi-provider price feed. CMC was the original source; PDEX was delisted
+// from it in mid-2026 pending the post-mainnet re-listing, so CMC is currently
+// stale. AscendEX is the only live exchange right now. We run BOTH providers
+// concurrently — each writes its own tagged rows to price_history, so when
+// CMC is re-listed there's nothing to switch on. Comma-separated names in
+// PRICE_PROVIDERS pick which run; defaults turn both on.
+const PRICE_PROVIDERS = (process.env.PRICE_PROVIDERS || 'ascendex,cmc')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+const ASCENDEX_SYMBOL = process.env.ASCENDEX_SYMBOL || 'PDEX/USDT';
+// One-shot historical backfill lives in a separate script
+// (backfill-price-history.mjs at the repo root). It writes rows tagged
+// source='defillama-backfill' directly into the SQLite DB; the indexer here
+// is responsible only for forward-going CMC + AscendEX polling.
 const PRICE_SYNC_INTERVAL = readPositiveInteger(process.env.PRICE_SYNC_INTERVAL_MS, 10 * 60 * 1000);
+function isPriceProviderEnabled(name) {
+    return PRICE_PROVIDERS.includes(name);
+}
+function isPriceProviderConfigured(name) {
+    if (name === 'cmc') return !!CMC_API_KEY;
+    if (name === 'ascendex') return true; // public endpoint, no auth
+    return false;
+}
+const PRICE_PROVIDER_LABELS = { cmc: 'CoinMarketCap', ascendex: 'AscendEX', 'defillama-backfill': 'DefiLlama (historical)' };
+function priceProviderLabel(name) {
+    return PRICE_PROVIDER_LABELS[name] || name;
+}
 const UNCLAIMED_TTL = readPositiveInteger(process.env.UNCLAIMED_TTL_MS, 20 * 60 * 1000);
 const DISPLAY_NAME_OVERRIDES = new Map([
     ['esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew', 'Polkadex Treasury'],
@@ -2246,19 +2273,58 @@ app.get('/api/staking-rewards/:address', async (req, res) => {
 });
 
 // --- PRICE ENDPOINTS ---
+// Multi-provider: each row in price_history carries a `source` tag. The
+// dashboard treats the series as one (it doesn't matter who supplied a
+// given point), but the bySource map lets advanced consumers — and a future
+// "show CMC vs AscendEX" overlay — pick a specific feed.
+function buildProviderRollup() {
+    const rollup = {};
+    for (const name of PRICE_PROVIDERS) {
+        const state = db.getSyncState(`price:${name}`);
+        rollup[name] = {
+            label: priceProviderLabel(name),
+            configured: isPriceProviderConfigured(name),
+            lastSync: state.lastSync || 0,
+            status: state.status || 'Initializing',
+            error: state.error || null,
+            latest: db.getLatestPriceBySource(name),
+            count: db.countPricePointsBySource(name),
+        };
+    }
+    return rollup;
+}
 app.get('/api/price-latest', (req, res) => {
     try {
         const state = db.getSyncState('price');
         cacheMedium(res);
-        res.json({ price: db.getLatestPrice(), lastSync: state.lastSync || 0, status: state.status || 'Initializing', configured: !!CMC_API_KEY });
+        // "configured" is true if AT LEAST ONE provider is set up — historically
+        // the frontend used this to gate "Price feed not configured" copy. With
+        // AscendEX defaulted on (public endpoint), this is always true now, but
+        // keep the field for backwards compatibility.
+        const configured = PRICE_PROVIDERS.some(p => isPriceProviderConfigured(p));
+        res.json({
+            price: db.getLatestPrice(),
+            lastSync: state.lastSync || 0,
+            status: state.status || 'Initializing',
+            configured,
+            providers: PRICE_PROVIDERS,
+            bySource: buildProviderRollup(),
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.get('/api/price-history', (req, res) => {
     try {
         const days = Math.min(Math.max(parseInt(req.query.days || '30', 10) || 30, 1), 365);
         const since = Date.now() - days * 24 * 60 * 60 * 1000;
+        const configured = PRICE_PROVIDERS.some(p => isPriceProviderConfigured(p));
         cacheLong(res);
-        res.json({ history: db.getPriceHistory(since), latest: db.getLatestPrice(), configured: !!CMC_API_KEY });
+        res.json({
+            history: db.getPriceHistory(since),
+            latest: db.getLatestPrice(),
+            configured,
+            providers: PRICE_PROVIDERS,
+            bySource: buildProviderRollup(),
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -5070,36 +5136,118 @@ async function recomputeUnclaimed(stash) {
     }
 }
 
-// Poll CoinMarketCap for the live PDEX price and append it to the local price
-// history. CMC's free tier only exposes the current quote, so the chart builds
-// up from the moment polling begins.
+// --- Price sync providers --------------------------------------------------
+// Every provider returns the same shape so the rest of the codebase doesn't
+// need to know which upstream produced a given row: { price, marketCap,
+// volume24h, pctChange24h }. price_history rows store exactly these fields
+// plus the source tag. The chart builds up from a one-time CoinGecko backfill
+// (everything before today) plus forward-going AscendEX + CMC polls (today
+// onwards). When CMC re-lists PDEX post-mainnet, its rows will start flowing
+// in alongside AscendEX without any code change.
+async function fetchCmcQuote() {
+    const url = `https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=${encodeURIComponent(CMC_SYMBOL)}&convert=USD`;
+    const resp = await fetch(url, { headers: { 'X-CMC_PRO_API_KEY': CMC_API_KEY, 'Accept': 'application/json' } });
+    if (!resp.ok) throw new Error(`CoinMarketCap HTTP ${resp.status}`);
+    const json = await resp.json();
+    const entry = json && json.data && json.data[CMC_SYMBOL];
+    const quote = entry ? (Array.isArray(entry) ? entry[0] : entry) : null;
+    const usd = quote && quote.quote && quote.quote.USD;
+    if (!usd || typeof usd.price !== 'number') throw new Error('CoinMarketCap response missing price');
+    return {
+        price: usd.price,
+        marketCap: usd.market_cap ?? null,
+        volume24h: usd.volume_24h ?? null,
+        pctChange24h: usd.percent_change_24h ?? null,
+    };
+}
+
+// AscendEX ticker — public, no auth required. Returns a rolling 24h snapshot:
+// open = price 24h ago, close = current, plus high/low and base-asset volume.
+// Treats USDT as ≈ USD (industry standard at this scale; no fiat oracle
+// dependency). marketCap is null because AscendEX doesn't supply circulating
+// supply — the chart UI already tolerates null.
+async function fetchAscendexQuote() {
+    const url = `https://ascendex.com/api/pro/v1/ticker?symbol=${encodeURIComponent(ASCENDEX_SYMBOL)}`;
+    const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!resp.ok) throw new Error(`AscendEX HTTP ${resp.status}`);
+    const json = await resp.json();
+    if (!json || json.code !== 0 || !json.data) {
+        throw new Error('AscendEX response missing data (code=' + (json && json.code) + ')');
+    }
+    const d = json.data;
+    const price = parseFloat(d.close);
+    const open = parseFloat(d.open);
+    const volume = parseFloat(d.volume);
+    if (!Number.isFinite(price) || price <= 0) throw new Error('AscendEX response missing valid close price');
+    // 24h % change derived from the bar's open/close so the chart's pct badge
+    // matches what users see on AscendEX.
+    const pctChange24h = Number.isFinite(open) && open > 0
+        ? ((price - open) / open) * 100
+        : null;
+    // AscendEX volume is denominated in the base asset (PDEX). Multiply by
+    // current price for USD-equivalent 24h volume so the dashboard's
+    // volume display stays consistent with the previous CMC values.
+    const volume24h = Number.isFinite(volume) && volume >= 0
+        ? volume * price
+        : null;
+    return { price, marketCap: null, volume24h, pctChange24h };
+}
+
+// Per-provider deterministic offset (in ms) so when two providers' fetchers
+// race to the same wall-clock millisecond, their rows don't collide on the
+// price_history(timestamp) primary key. The offset is below visual resolution
+// on any chart and avoids a destructive schema migration to a composite PK.
+// Treat backfill rows as authoritative (offset 0) so daily-granularity
+// CoinGecko timestamps sit cleanly at midnight UTC.
+const PRICE_PROVIDER_TS_OFFSET = { 'defillama-backfill': 0, 'ascendex': 1, 'cmc': 2 };
+
+// Poll one provider and append one row to price_history tagged with its
+// source. Records per-provider sync state under `price:<provider>` so the
+// UI can show "AscendEX healthy / CMC degraded" rather than collapsing both
+// into a single status.
+async function syncPriceProvider(name, fetchFn) {
+    if (!isPriceProviderConfigured(name)) return;
+    try {
+        const quote = await fetchFn();
+        db.insertPrice({
+            timestamp: Date.now() + (PRICE_PROVIDER_TS_OFFSET[name] || 0),
+            price: quote.price,
+            marketCap: quote.marketCap,
+            volume24h: quote.volume24h,
+            pctChange24h: quote.pctChange24h,
+            source: name,
+        });
+        db.setSyncState(`price:${name}`, { lastSync: Date.now(), status: 'Synced' });
+    } catch (err) {
+        console.warn(`Price sync error (${name}):`, err.message);
+        db.setSyncState(`price:${name}`, { ...db.getSyncState(`price:${name}`), lastSync: Date.now(), status: 'Error', error: err.message });
+    }
+}
+
+// Fans out to every configured provider in parallel. The single `isSyncingPrice`
+// reentrancy guard still applies — if a previous tick is mid-flight, skip.
 async function syncPrice() {
-    if (isSyncingPrice || !CMC_API_KEY) return;
+    if (isSyncingPrice) return;
     isSyncingPrice = true;
     try {
-        const url = `https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=${encodeURIComponent(CMC_SYMBOL)}&convert=USD`;
-        const resp = await fetch(url, { headers: { 'X-CMC_PRO_API_KEY': CMC_API_KEY, 'Accept': 'application/json' } });
-        if (!resp.ok) throw new Error(`CoinMarketCap HTTP ${resp.status}`);
-        const json = await resp.json();
-        const entry = json && json.data && json.data[CMC_SYMBOL];
-        const quote = entry ? (Array.isArray(entry) ? entry[0] : entry) : null;
-        const usd = quote && quote.quote && quote.quote.USD;
-        if (!usd || typeof usd.price !== 'number') throw new Error('CoinMarketCap response missing price');
-        db.insertPrice({
-            timestamp: Date.now(),
-            price: usd.price,
-            marketCap: usd.market_cap ?? null,
-            volume24h: usd.volume_24h ?? null,
-            pctChange24h: usd.percent_change_24h ?? null
-        });
-        db.setSyncState('price', { lastSync: Date.now(), status: 'Synced' });
-    } catch (err) {
-        console.warn('Price sync error:', err.message);
-        db.setSyncState('price', { ...db.getSyncState('price'), lastSync: Date.now(), status: 'Error', error: err.message });
+        const jobs = [];
+        if (isPriceProviderEnabled('ascendex')) jobs.push(syncPriceProvider('ascendex', fetchAscendexQuote));
+        if (isPriceProviderEnabled('cmc'))      jobs.push(syncPriceProvider('cmc', fetchCmcQuote));
+        await Promise.allSettled(jobs);
+        // Roll-up state for the legacy /api/price-latest "status" string:
+        // success if ANY provider succeeded this tick, error if ALL failed.
+        const anyOk = ['ascendex','cmc'].some(p => db.getSyncState(`price:${p}`).status === 'Synced');
+        db.setSyncState('price', { lastSync: Date.now(), status: anyOk ? 'Synced' : 'Error' });
     } finally {
         isSyncingPrice = false;
     }
 }
+
+// Historical backfill lives in the standalone script
+// `backfill-price-history.mjs` at the repo root — run it once against the
+// SQLite DB to populate price_history with daily DefiLlama data going back
+// to PDEX's first trading day (Dec 21, 2022). The indexer process itself
+// only handles forward-going polling.
 
 // One crawl pass: index new blocks (forward) and walk a resumable chunk of
 // older history (backfill). Runs once per interval and appends every time.
