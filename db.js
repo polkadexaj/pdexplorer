@@ -120,7 +120,12 @@ CREATE TABLE IF NOT EXISTS price_history (
   pct_change_24h REAL,
   source TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_price_source_ts ON price_history(source, timestamp DESC);
+-- NOTE: the idx_price_source_ts index on (source, timestamp DESC) is
+-- created in the migration block in initDb(), NOT here. Existing
+-- deployments predate the source column, so creating an index that
+-- references it during the SCHEMA-exec step blows up before the
+-- ensureColumn migration has a chance to add the column. The migration
+-- block adds the column FIRST, then creates the index.
 CREATE TABLE IF NOT EXISTS democracy_referenda (
   ref_index INTEGER PRIMARY KEY,
   status TEXT,
