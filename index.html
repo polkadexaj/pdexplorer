@@ -197,6 +197,9 @@
 
                 <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Community Projects</div>
                 <a href="https://buypdex.com" target="_blank" rel="noopener" class="nav-item"><i class='bx bx-shopping-bag'></i> Buy PDEX</a>
+
+                <div style="margin-top: 20px; margin-bottom: 10px; padding-left: 20px; font-size: 11px; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; letter-spacing: 0.5px;">Build</div>
+                <a href="/developers" class="nav-item" data-target="developers"><i class='bx bx-code-alt'></i> Developers</a>
             </nav>
             <div class="sidebar-footer">
                 <!-- Sidebar price ticker. Polled by pollPriceTicker() in script.js
@@ -1014,6 +1017,14 @@
                 <div id="price-page-content"></div>
             </div>
 
+            <!-- /developers — API reference for external apps + mobile
+                 developers. Content rendered by renderDevelopersPage() in
+                 script.js; structure stays in source so it's diffable + SEO-
+                 indexable rather than fetched at runtime. -->
+            <div class="developers-page page-section" data-page="developers" style="display: none;">
+                <div id="developers-page-content"></div>
+            </div>
+
             <!-- Help Center -->
             <!-- Two-column layout: category sidebar on the left, article on the
                  right. Populated by script.js (HELP_TOPICS + renderHelp*). The
@@ -1217,13 +1228,13 @@
                         <h3>Products</h3>
                         <a href="https://polkadex.ee/orderbook" target="_blank" rel="noopener">Orderbook</a>
                         <a href="https://polkadex.ee/polkapool" target="_blank" rel="noopener">Polkapool AMM</a>
-                        <a href="https://polkadex.medium.com/thea-bridge" target="_blank" rel="noopener">THEA Bridge</a>
                     </div>
                     <div>
                         <h3>Resources</h3>
                         <a href="https://docs.polkadex.ee" target="_blank" rel="noopener">Docs</a>
                         <a href="https://github.com/Polkadex-Substrate" target="_blank" rel="noopener">Github Repository</a>
                         <a href="https://www.youtube.com/c/Polkadex" target="_blank" rel="noopener">Tutorials</a>
+                        <a href="/developers">Explorer API</a>
                         <a href="#" id="footer-replay-tour"><i class='bx bx-help-circle' style="vertical-align: middle;"></i> Take the tour</a>
                     </div>
                     <div>

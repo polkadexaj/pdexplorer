@@ -365,11 +365,33 @@ pdexplorer/
 
 ## API reference
 
-All endpoints are read-only JSON unless noted. CORS is restricted to `ALLOWED_ORIGINS`.
+All endpoints under `/api/*` return JSON. Most are read-only and public; a small subset requires a wallet-signed session token (see "Authenticated" below). The full developer-facing version of this reference is also served at [`/developers`](https://explorer.polkadex.ee/developers).
+
+### CORS — who can call the API
+
+The CORS policy in `server.js` allows three caller categories:
+
+| Caller | Why it works |
+|---|---|
+| **Native mobile apps** (iOS, Android, React Native — anything not running inside a browser) | CORS is a browser-only mechanism; native HTTP clients don't send an `Origin` header, so the server's `if (!origin) allow` branch fires. |
+| **Server-side proxies** (your backend calling ours) | Same — no `Origin` header. |
+| **Web apps** at origins listed in `ALLOWED_ORIGINS` env var (defaults to `explorer.polkadex.ee` + `localhost:3000`) | Explicitly allowed. |
+
+A web app at a different origin will be blocked by the browser's CORS check until its origin is added to `ALLOWED_ORIGINS`. Native mobile apps need no configuration.
+
+### Caching tiers
+
+Hot endpoints carry `Cache-Control` headers in three tiers — clients (mobile, web, server-side) should respect these and not poll faster than `max-age`:
+
+| Tier | Used by | Header |
+|---|---|---|
+| **Short** | High-velocity feeds (`/api/blocks`, `/api/transactions`, `/api/events`) | `public, max-age=5, s-maxage=10, stale-while-revalidate=30` |
+| **Medium** | Wallet dashboard, validators, network info, price-latest | `public, max-age=30, s-maxage=60, stale-while-revalidate=300` |
+| **Long** | Historical (`/api/price-history`, `/api/staking-rewards/:addr`, holders, sitemap) | `public, max-age=300, s-maxage=600, stale-while-revalidate=3600` |
 
 ### Chain data (read-only, public)
 
-- `GET /api/blocks` — most recent blocks (cached)
+- `GET /api/blocks` — most recent blocks
 - `GET /api/block/:number` — single-block detail with extrinsics + events
 - `GET /api/events` — most recent on-chain events
 - `GET /api/transactions` — most recent transactions
@@ -379,26 +401,65 @@ All endpoints are read-only JSON unless noted. CORS is restricted to `ALLOWED_OR
 - `GET /api/validator/:address` — per-validator era history
 - `GET /api/holders` — top-balance accounts
 - `GET /api/account/:address` — account-level summary
-- `GET /api/network-info` — home-page network metrics (5-min stale-while-revalidate)
+- `GET /api/network-info` — home-page network metrics
 - `GET /api/search/:query` — block / extrinsic / account lookup
 - `GET /api/staking-rewards/:address` — per-address reward history
 - `GET /api/staking-rewards-status` — backfill progress
-- `GET /api/wallet/:address` — wallet dashboard payload (balances, staking, unpaid rewards, recent activity)
-- `GET /api/price-latest`, `GET /api/price-history?days=30` — CMC-sourced price feed
-- `GET /api/council`, `/api/treasury`, `/api/democracy` — governance views
-- `GET /api/discussions`, `/api/discussions/:id` — community discussion threads
+- `GET /api/wallet/:address` — wallet dashboard payload (balances, staking incl. **`activeStakedPlanck`** — the u128 active-stake value as a string for precision-safe full-unbonds — unpaid rewards, recent activity)
 
-### Authenticated (wallet sign-in)
+### Price feed (multi-provider)
+
+- `GET /api/price-latest` — current price, last-sync, plus a **`bySource`** map with one entry per active provider (`ascendex`, `cmc`, plus `ascendex-backfill` and `defillama-backfill` after the one-shot history import). Each entry: `{ label, configured, lastSync, status, error, latest, count }`.
+- `GET /api/price-history?days=N` — daily series for the last N days (capped at 4000). Each row carries a `source` tag identifying which provider supplied it. Response also includes the same `bySource` rollup.
+
+Providers are pluggable via `PRICE_PROVIDERS` env (csv; default `ascendex,cmc`). CMC requires `CMC_API_KEY`; AscendEX is keyless. The one-shot historical backfill lives in `backfill-price-history.mjs` and pulls daily klines from AscendEX going back to PDEX's first trading day (March 2022).
+
+### Governance
+
+- `GET /api/council` — council members, motions, runners-up
+- `GET /api/treasury` — treasury balance, proposals (open + historical)
+- `GET /api/democracy` — referenda + public proposals
+- `GET /api/governance/latest` — most-recent OPEN referendum / proposal (drives homepage banner; only ongoing events)
+- `GET /api/governance/calendar` — unified timeline across referenda + motions + treasury for `/calendar`
+
+### Email alerts (governance + network events)
+
+- `POST /api/email/subscribe` — double opt-in signup (rate-limited per IP)
+- `GET /api/email/confirm?token=<t>` — confirm subscription via emailed link
+- `GET /api/email/unsubscribe?token=<t>` — one-click unsubscribe
+- `GET /api/email/preferences?token=<t>` — fetch current event preferences
+- `POST /api/email/preferences` — update preferences (token in body)
+
+### Discussions
+
+- `GET /api/discussions` — discussion threads attached to governance items
+- `GET /api/discussions/:id` — single thread with posts
+
+### Authenticated (wallet sign-in for discussion posts)
+
+Wallet-signed nonce login. Sessions are 192-bit random tokens with a TTL.
 
 - `POST /api/auth/challenge` — request a sign-in nonce
-- `POST /api/auth/verify` — submit a signed nonce, receive a session token
+- `POST /api/auth/verify` — submit `{ address, signature, nonce }`, receive a session token
 - `POST /api/auth/logout`
-- `POST /api/discussions/:id/posts` — post to a discussion (rate-limited)
+- `POST /api/discussions/:id/posts` — post to a discussion (rate-limited, requires session)
+
+### Diagnostics (operator-facing)
+
+- `GET /api/diag/email` — email transport status
 
 ### Static / SEO
 
 - `GET /sitemap.xml` — dynamically generated, 5-min cache
 - `GET /robots.txt`
+
+### Error envelope
+
+Most failures return a 4xx/5xx with `{ "error": "<message>" }`. RPC-dependent endpoints surface **503** with `{ "error": "rpc not connected" }` during chain RPC outages — treat 503 as "retry with backoff," not a permanent failure.
+
+### Address format
+
+All paths that take an `:address` expect Polkadex-format SS58 (prefix 88, addresses start with `e…`). The server normalizes via `toPolkadexAddress()` so wallet-native prefixes (42, 0) usually also resolve, but consistency is recommended.
 
 The full API is served behind `/api/*` and proxied by nginx. The frontend is a single-page app at `/` with clean-URL routes (`/blocks`, `/validator/<address>`, `/wallet/<address>`, etc.) — nginx's `try_files $uri $uri/ /index.html;` makes deep links work.
 

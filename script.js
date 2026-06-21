@@ -2510,7 +2510,11 @@ const ROUTE_SEO = {
     // Full-screen PDEX price chart — landing for anyone scanning "PDEX price"
     // intent. Surfaced from the sidebar price ticker.
     'price':              { title: 'PDEX Price Chart — Polkadex Mainnet Explorer',
-                            description: 'Full PDEX price history with 24-hour, 7-day, 30-day, 90-day, 1-year, and all-time views. Data sourced from AscendEX (native PDEX/USDT) for accurate native-chain market reality.' }
+                            description: 'Full PDEX price history with 24-hour, 7-day, 30-day, 90-day, 1-year, and all-time views. Data sourced from AscendEX (native PDEX/USDT) for accurate native-chain market reality.' },
+    // Developer-facing API reference. Targets searches like "Polkadex API",
+    // "Polkadex mobile app integration", "Polkadex JSON endpoints".
+    'developers':         { title: 'Developers — Polkadex Explorer API Reference',
+                            description: 'JSON API reference for the Polkadex Mainnet Explorer: blocks, transactions, validators, accounts, wallets, governance, price, and email alerts. CORS rules for mobile and web. Caching tiers, error envelopes, address format.' }
 };
 
 // Update <title>, meta[description], canonical, and Open Graph / Twitter tags
@@ -4069,6 +4073,11 @@ function routeTo(target) {
                 // Reached by clicking the sidebar price ticker. Returns to
                 // wherever the user came from via the close (X) button.
                 renderPricePage();
+            } else if (mainTarget === 'developers') {
+                // /developers — API reference for external apps (mobile,
+                // server-side proxies, third-party web apps). Static content,
+                // SEO-indexable, no data fetch.
+                renderDevelopersPage();
             }
         } else {
             page.style.display = 'none';
@@ -4389,7 +4398,7 @@ async function renderPricePage() {
             <div class="price-page-source" id="price-page-source"></div>
         </div>
         <div class="list-container glass">
-            <div class="staking-chart-wrap" style="height:460px;">
+            <div class="price-chart-wrap">
                 <canvas id="price-page-chart"></canvas>
             </div>
         </div>
@@ -4527,6 +4536,171 @@ function buildPriceStatsHtml(history, days) {
             <div class="staking-summary-card"><div class="label">${periodLabel} low</div><div class="value">${fmt(low)}</div></div>
             <div class="staking-summary-card"><div class="label">${periodLabel} volume</div><div class="value">${totalVol > 0 ? fmtBig(totalVol) : '—'}</div></div>
         </div>
+    `;
+}
+
+// ─── /developers ─────────────────────────────────────────────────────────────
+// Developer-facing API reference. Designed to mirror the README's "API
+// reference" section so we have a single source of truth in the codebase
+// for what the API exposes. SEO-indexable for "Polkadex API" / "Polkadex
+// mobile app" searches.
+//
+// Kept as static markup in this function (rather than fetched at runtime
+// from a docs API) so the content streams immediately, ships in the bundle,
+// and stays diffable in code review.
+function renderDevelopersPage() {
+    const root = document.getElementById('developers-page-content');
+    if (!root) return;
+    root.innerHTML = `
+        <div class="developers-hero">
+            <h1>Developers</h1>
+            <p class="developers-tagline">JSON API for the Polkadex Mainnet — used by this explorer and freely consumable by external apps, especially native mobile clients.</p>
+        </div>
+
+        <nav class="developers-toc" aria-label="API sections">
+            <a href="#cors">CORS</a>
+            <a href="#caching">Caching</a>
+            <a href="#chain">Chain data</a>
+            <a href="#price">Price feed</a>
+            <a href="#governance">Governance</a>
+            <a href="#email">Email alerts</a>
+            <a href="#discussions">Discussions</a>
+            <a href="#auth">Authenticated</a>
+            <a href="#errors">Errors</a>
+            <a href="#addresses">Addresses</a>
+            <a href="#examples">Examples</a>
+        </nav>
+
+        <section class="developers-section" id="cors">
+            <h2>CORS — who can call the API</h2>
+            <p>The CORS policy in <code>server.js</code> allows three caller categories:</p>
+            <div class="developers-table-wrap">
+                <table class="developers-table">
+                    <thead><tr><th>Caller</th><th>Why it works</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Native mobile apps</strong> (iOS, Android, React Native — anything not running inside a browser)</td><td>CORS is a browser-only mechanism; native HTTP clients don't send an <code>Origin</code> header, so the server's <em>"if no Origin, allow"</em> branch fires.</td></tr>
+                        <tr><td><strong>Server-side proxies</strong> (your backend calling ours)</td><td>Same — no <code>Origin</code> header.</td></tr>
+                        <tr><td><strong>Web apps</strong> at origins listed in the <code>ALLOWED_ORIGINS</code> env var (defaults to <code>explorer.polkadex.ee</code> + <code>localhost:3000</code>)</td><td>Explicitly allowed.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>A web app at a different origin will be blocked by the browser's CORS check until its origin is added to <code>ALLOWED_ORIGINS</code> (operator change, requires a backend restart). Native mobile apps need no configuration at all.</p>
+        </section>
+
+        <section class="developers-section" id="caching">
+            <h2>Caching tiers</h2>
+            <p>Hot endpoints carry <code>Cache-Control</code> headers in three tiers — clients should respect these and not poll faster than <code>max-age</code>:</p>
+            <div class="developers-table-wrap">
+                <table class="developers-table">
+                    <thead><tr><th>Tier</th><th>Used by</th><th>Header</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Short</strong></td><td>High-velocity feeds (<code>/api/blocks</code>, <code>/api/transactions</code>, <code>/api/events</code>)</td><td><code>public, max-age=5, s-maxage=10, stale-while-revalidate=30</code></td></tr>
+                        <tr><td><strong>Medium</strong></td><td>Wallet dashboard, validators, network info, <code>/api/price-latest</code></td><td><code>public, max-age=30, s-maxage=60, stale-while-revalidate=300</code></td></tr>
+                        <tr><td><strong>Long</strong></td><td>Historical (<code>/api/price-history</code>, <code>/api/staking-rewards/:addr</code>, holders, sitemap)</td><td><code>public, max-age=300, s-maxage=600, stale-while-revalidate=3600</code></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="developers-section" id="chain">
+            <h2>Chain data (read-only, public)</h2>
+            <ul class="developers-endpoints">
+                <li><code>GET /api/blocks</code> — most recent blocks</li>
+                <li><code>GET /api/block/:number</code> — single-block detail with extrinsics + events</li>
+                <li><code>GET /api/events</code> — most recent on-chain events</li>
+                <li><code>GET /api/transactions</code> — most recent transactions</li>
+                <li><code>GET /api/transactions/older?before=&lt;n&gt;</code> — pagination further back</li>
+                <li><code>GET /api/extrinsic/:block/:txHash</code> — single-extrinsic detail</li>
+                <li><code>GET /api/validators</code> — full validator set with stake + commission</li>
+                <li><code>GET /api/validator/:address</code> — per-validator era history</li>
+                <li><code>GET /api/holders</code> — top-balance accounts</li>
+                <li><code>GET /api/account/:address</code> — account-level summary</li>
+                <li><code>GET /api/network-info</code> — home-page network metrics</li>
+                <li><code>GET /api/search/:query</code> — block / extrinsic / account lookup</li>
+                <li><code>GET /api/staking-rewards/:address</code> — per-address reward history</li>
+                <li><code>GET /api/staking-rewards-status</code> — backfill progress</li>
+                <li><code>GET /api/wallet/:address</code> — wallet dashboard payload (balances, staking incl. <strong>activeStakedPlanck</strong> — the u128 active-stake value as a string for precision-safe full-unbonds — unpaid rewards, recent activity)</li>
+            </ul>
+        </section>
+
+        <section class="developers-section" id="price">
+            <h2>Price feed (multi-provider)</h2>
+            <ul class="developers-endpoints">
+                <li><code>GET /api/price-latest</code> — current price, last-sync, plus a <strong>bySource</strong> map with one entry per active provider (<code>ascendex</code>, <code>cmc</code>, plus <code>ascendex-backfill</code> and <code>defillama-backfill</code> after the one-shot history import). Each entry: <code>{ label, configured, lastSync, status, error, latest, count }</code>.</li>
+                <li><code>GET /api/price-history?days=N</code> — daily series for the last N days (capped at 4000). Each row carries a <code>source</code> tag identifying which provider supplied it. Response also includes the same <code>bySource</code> rollup.</li>
+            </ul>
+            <p>Providers are pluggable via the <code>PRICE_PROVIDERS</code> env var (csv; default <code>ascendex,cmc</code>). CMC requires <code>CMC_API_KEY</code>; AscendEX is keyless. Historical backfill lives in <code>backfill-price-history.mjs</code> at the repo root.</p>
+        </section>
+
+        <section class="developers-section" id="governance">
+            <h2>Governance</h2>
+            <ul class="developers-endpoints">
+                <li><code>GET /api/council</code> — council members, motions, runners-up</li>
+                <li><code>GET /api/treasury</code> — treasury balance, proposals (open + historical)</li>
+                <li><code>GET /api/democracy</code> — referenda + public proposals</li>
+                <li><code>GET /api/governance/latest</code> — most-recent OPEN referendum / proposal (drives the homepage banner; only ongoing events)</li>
+                <li><code>GET /api/governance/calendar</code> — unified timeline across referenda + motions + treasury</li>
+            </ul>
+        </section>
+
+        <section class="developers-section" id="email">
+            <h2>Email alerts</h2>
+            <ul class="developers-endpoints">
+                <li><code>POST /api/email/subscribe</code> — double opt-in signup (rate-limited per IP)</li>
+                <li><code>GET /api/email/confirm?token=&lt;t&gt;</code> — confirm subscription via emailed link</li>
+                <li><code>GET /api/email/unsubscribe?token=&lt;t&gt;</code> — one-click unsubscribe</li>
+                <li><code>GET /api/email/preferences?token=&lt;t&gt;</code> — fetch current event preferences</li>
+                <li><code>POST /api/email/preferences</code> — update preferences (token in body)</li>
+            </ul>
+        </section>
+
+        <section class="developers-section" id="discussions">
+            <h2>Discussions</h2>
+            <ul class="developers-endpoints">
+                <li><code>GET /api/discussions</code> — discussion threads attached to governance items</li>
+                <li><code>GET /api/discussions/:id</code> — single thread with posts</li>
+            </ul>
+        </section>
+
+        <section class="developers-section" id="auth">
+            <h2>Authenticated (wallet sign-in for discussion posts)</h2>
+            <p>Wallet-signed nonce login. Sessions are 192-bit random tokens with a TTL.</p>
+            <ul class="developers-endpoints">
+                <li><code>POST /api/auth/challenge</code> — request a sign-in nonce</li>
+                <li><code>POST /api/auth/verify</code> — submit <code>{ address, signature, nonce }</code>, receive a session token</li>
+                <li><code>POST /api/auth/logout</code></li>
+                <li><code>POST /api/discussions/:id/posts</code> — post to a discussion (rate-limited, requires session)</li>
+            </ul>
+        </section>
+
+        <section class="developers-section" id="errors">
+            <h2>Error envelope</h2>
+            <p>Most failures return a 4xx/5xx status with <code>{ "error": "&lt;message&gt;" }</code>. RPC-dependent endpoints surface <strong>503</strong> with <code>{ "error": "rpc not connected" }</code> during chain RPC outages — treat 503 as <em>"retry with backoff"</em>, not a permanent failure.</p>
+        </section>
+
+        <section class="developers-section" id="addresses">
+            <h2>Address format</h2>
+            <p>All paths that take an <code>:address</code> expect Polkadex-format SS58 (prefix 88, addresses start with <code>e…</code>). The server normalizes via <code>toPolkadexAddress()</code> so wallet-native prefixes (42, 0) usually also resolve, but consistency is recommended.</p>
+        </section>
+
+        <section class="developers-section" id="examples">
+            <h2>Quick examples</h2>
+            <p>Network info (home-page summary):</p>
+            <pre><code>curl https://explorer.polkadex.ee/api/network-info</code></pre>
+            <p>Latest PDEX price:</p>
+            <pre><code>curl https://explorer.polkadex.ee/api/price-latest</code></pre>
+            <p>30-day price history (each row tagged with its data source):</p>
+            <pre><code>curl 'https://explorer.polkadex.ee/api/price-history?days=30'</code></pre>
+            <p>Wallet summary for a Polkadex address (replace with a real <code>e…</code> address):</p>
+            <pre><code>curl https://explorer.polkadex.ee/api/wallet/esoEt6uZ9vs23yW8aqTACLf1tViGpSLZKnhPXt5Nq7vQwHGew</code></pre>
+            <p>Search (returns block / extrinsic / account hits):</p>
+            <pre><code>curl https://explorer.polkadex.ee/api/search/12000000</code></pre>
+        </section>
+
+        <section class="developers-section" id="contact">
+            <h2>Found a bug or missing endpoint?</h2>
+            <p>Open an issue at <a href="https://github.com/Polkadex-Substrate" target="_blank" rel="noopener" class="item-link">github.com/Polkadex-Substrate</a>, or reach the team via the channels listed at <a href="https://polkadex.ee" target="_blank" rel="noopener" class="item-link">polkadex.ee</a>.</p>
+        </section>
     `;
 }
 

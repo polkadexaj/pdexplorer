@@ -1344,6 +1344,9 @@ const SITEMAP_STATIC_ROUTES = [
     // Full-screen PDEX price chart, reachable from the sidebar price ticker.
     // High-traffic landing (any visitor scanning "PDEX price" intent).
     { path: '/price',             changefreq: 'hourly',  priority: '0.8' },
+    // Developer-facing API reference — targets searches like "Polkadex API"
+    // or "Polkadex mobile app integration".
+    { path: '/developers',        changefreq: 'monthly', priority: '0.6' },
     // Static legal pages — low changefreq but want them indexed so users
     // searching for "Polkadex explorer privacy" land on the right page.
     { path: '/privacy',           changefreq: 'yearly',  priority: '0.4' },
