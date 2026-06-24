@@ -484,6 +484,11 @@ async function init() {
 
         fetchNetworkStats(globalApi);
         fetchNetworkInformation();
+        // Paint the home-page stat cards from localStorage cache BEFORE any
+        // network fetches resolve. Returning visitors see populated cells
+        // immediately; cells stay at their HTML "—" placeholder for first-
+        // ever visitors (no cache yet) until the live fetches below land.
+        paintHomeFromCache();
         // Start the governance notification poller — runs every minute,
         // surfaces homepage banner + toast when a new referendum or proposal
         // is detected since the user's last seen index. Safe no-op if the
@@ -541,25 +546,148 @@ async function init() {
     routeTo(readRouteFromLocation());
 }
 
+// Last known total-issuance value (in whole PDEX, not planck). Set by
+// fetchNetworkStats; read by updateMarketCapCell so the next price poll
+// can recompute marketCap = issuance × price without re-querying chain.
+let lastKnownTotalIssuancePdex = 0;
+
+// ─── Home-page cache (instant first paint) ───────────────────────────────────
+// The home stat cards and network-info bar previously flashed dashes on
+// cold load for the second or two until /api/network-info + chain queries
+// returned. Cache the most recent values in localStorage so a returning
+// visitor sees populated cells immediately, then overwrite with live data
+// as it arrives. Bundled into ONE JSON blob so the writes are atomic and
+// a future field addition doesn't blow out the key namespace.
+//
+// TTL exists so we never paint truly ancient data — if a user comes back
+// after a week away, the cells fall back to dashes rather than misleading
+// stale numbers. For typical day-to-day visits the cache is always fresh
+// enough to be useful.
+const HOME_CACHE_KEY = 'pdex_home_snapshot';
+const HOME_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+function readHomeCache() {
+    try {
+        const raw = localStorage.getItem(HOME_CACHE_KEY);
+        if (!raw) return null;
+        const data = JSON.parse(raw);
+        if (!data || typeof data !== 'object') return null;
+        if (Date.now() - (Number(data.savedAt) || 0) > HOME_CACHE_MAX_AGE_MS) return null;
+        return data;
+    } catch (_) { return null; }
+}
+function writeHomeCache(patch) {
+    try {
+        const current = readHomeCache() || {};
+        const merged = { ...current, ...patch, savedAt: Date.now() };
+        localStorage.setItem(HOME_CACHE_KEY, JSON.stringify(merged));
+    } catch (_) {}
+}
+// Hydrate every home-page cell from cache (if any). Safe to call early in
+// startup — no-op when no cache exists, no-op for cells that aren't in the
+// DOM yet. Each field is guarded so a partial cache (e.g. only price was
+// ever written) still paints what it can without throwing.
+function paintHomeFromCache() {
+    const cached = readHomeCache();
+    if (!cached) return;
+    if (cached.totalIssuancePdex > 0) {
+        lastKnownTotalIssuancePdex = cached.totalIssuancePdex;
+        const el = document.querySelector('.stat-card:nth-child(2) .stat-value');
+        if (el) el.innerHTML = `${formatNetworkNumber(cached.totalIssuancePdex, 0)} <span class="unit">PDEX</span>`;
+    }
+    if (cached.inStakePdex > 0) {
+        const el = document.querySelector('.stat-card:nth-child(3) .stat-value');
+        if (el) el.innerHTML = `${formatNetworkNumber(cached.inStakePdex, 0)} <span class="unit">PDEX</span> <span class="badge small">Cached</span>`;
+    }
+    if (Number.isFinite(cached.avgApyPercent) && cached.avgApyPercent >= 0) {
+        const el = document.getElementById('home-avg-apy');
+        if (el) el.textContent = cached.avgApyPercent.toFixed(2) + '%';
+    }
+    if (cached.priceUsd > 0) {
+        lastKnownPriceUsd = cached.priceUsd;
+    }
+    // Market cap derives from the two values above; safe to call here.
+    updateMarketCapCell();
+    if (cached.currentEra) setText('network-current-era', cached.currentEra);
+    if (cached.validatorsActive != null && cached.validatorsTotal != null) {
+        setText('network-validators', `${cached.validatorsActive} / ${cached.validatorsTotal}`);
+    }
+    if (cached.nominatorsActive != null && cached.nominatorsTotal != null) {
+        setText('network-nominators', `${cached.nominatorsActive} / ${cached.nominatorsTotal}`);
+    }
+    if (cached.maxActiveStakePdex > 0) {
+        setHtml('network-max-active-stake', `${formatNetworkNumber(cached.maxActiveStakePdex, 0)} <span class="unit">PDEX</span>`);
+    }
+}
+
 async function fetchNetworkStats(api) {
     try {
         // Total Issuance
         const totalIssuance = await api.query.balances.totalIssuance();
         issuanceEl.innerHTML = `${formatPDEX(totalIssuance)} <span class="unit">PDEX</span>`;
+        // Stash the parsed whole-PDEX value for the market cap calculation.
+        // formatPDEX returns a string; reuse the raw chain figure for math.
+        let issuancePdex = 0;
+        try { issuancePdex = Number(totalIssuance.toString()) / 1e12; } catch (_) {}
+        if (issuancePdex > 0) {
+            lastKnownTotalIssuancePdex = issuancePdex;
+            writeHomeCache({ totalIssuancePdex: issuancePdex });
+        }
+        updateMarketCapCell();
 
         // Active Era
         const activeEraOption = await api.query.staking.activeEra();
         if (activeEraOption.isSome) {
             const activeEra = activeEraOption.unwrap().index.toNumber();
             currentEraEl.innerText = activeEra;
+            writeHomeCache({ currentEra: activeEra });
 
             // Total Stake
             const totalStake = await api.query.staking.erasTotalStake(activeEra);
             stakeEl.innerHTML = `${formatPDEX(totalStake)} <span class="unit">PDEX</span> <span class="badge small">Live</span>`;
+            let stakePdex = 0;
+            try { stakePdex = Number(totalStake.toString()) / 1e12; } catch (_) {}
+            if (stakePdex > 0) writeHomeCache({ inStakePdex: stakePdex });
         }
     } catch (err) {
         console.error("Error fetching stats:", err);
     }
+}
+
+// Home page Market Cap is computed live as totalIssuance (in whole PDEX)
+// × the latest USD price from /api/price-latest. Hard-coding the value in
+// the HTML caused it to read wildly wrong once CMC's PDEX listing went
+// stale (showed $28.7M when the real native-chain market cap was ~$950k).
+// Called from pollPriceTicker (after each price refresh) and from
+// fetchNetworkStats (after each issuance fetch). Either input changing is
+// enough to refresh the cell.
+let lastKnownPriceUsd = 0;
+function updateMarketCapCell() {
+    const cell = document.getElementById('home-market-cap');
+    if (!cell) return;
+    if (!(lastKnownTotalIssuancePdex > 0) || !(lastKnownPriceUsd > 0)) {
+        cell.textContent = '—';
+        return;
+    }
+    const mcap = lastKnownTotalIssuancePdex * lastKnownPriceUsd;
+    cell.textContent = '$' + Math.round(mcap).toLocaleString('en-US');
+}
+
+// Home page AVG APY. The chain's nominal max APY (before per-validator
+// commission) is a constant produced by Polkadex's inflation curve at the
+// current ~50% staking ratio target — captured here as MAX_APY_BASE.
+// "Average" APY = MAX_APY_BASE × (1 − avgCommission/100). When commission
+// data hasn't loaded yet, the cell stays as the dash placeholder.
+const MAX_APY_BASE = 23.09;
+function updateAvgApyCell(avgCommissionPercent) {
+    const cell = document.getElementById('home-avg-apy');
+    if (!cell) return;
+    const c = Number(avgCommissionPercent);
+    if (!Number.isFinite(c) || c < 0 || c > 100) {
+        cell.textContent = '—';
+        return;
+    }
+    const apy = MAX_APY_BASE * (1 - c / 100);
+    cell.textContent = apy.toFixed(2) + '%';
 }
 
 async function fetchNetworkInformation() {
@@ -580,6 +708,24 @@ async function fetchNetworkInformation() {
         setText('network-nominators', `${info.nominators.active} / ${info.nominators.total}`);
         setHtml('network-max-active-stake', `${formatNetworkNumber(info.maxActiveStake, 0)} <span class="unit">PDEX</span>`);
         setText('network-avg-commission', `${formatNetworkNumber(info.avgValidatorCommission, 3)}%`);
+        // AVG APY card (top stats strip). Same avg-commission figure drives
+        // it via updateAvgApyCell — keeps the two cells consistent without
+        // a second fetch.
+        updateAvgApyCell(info.avgValidatorCommission);
+        // Snapshot to localStorage so the next page load can paint these
+        // cells instantly (before the live fetch returns).
+        const apyForCache = (Number.isFinite(Number(info.avgValidatorCommission)) && info.avgValidatorCommission >= 0 && info.avgValidatorCommission <= 100)
+            ? MAX_APY_BASE * (1 - Number(info.avgValidatorCommission) / 100)
+            : null;
+        writeHomeCache({
+            currentEra:           info.activeEra ?? null,
+            validatorsActive:     info.validators && info.validators.active != null ? info.validators.active : null,
+            validatorsTotal:      info.validators && info.validators.total  != null ? info.validators.total  : null,
+            nominatorsActive:     info.nominators && info.nominators.active != null ? info.nominators.active : null,
+            nominatorsTotal:      info.nominators && info.nominators.total  != null ? info.nominators.total  : null,
+            maxActiveStakePdex:   Number(info.maxActiveStake) || 0,
+            avgApyPercent:        apyForCache,
+        });
         setText('network-min-stake', `${formatNetworkNumber(info.minStake, 0)} PDEX`);
         setText('network-average-stake', `${formatNetworkNumber(info.averageStake, 1)} PDEX`);
         setText('network-avg-stake-account', `${formatNetworkNumber(info.avgStakePerAccount, 1)} PDEX`);
@@ -4324,6 +4470,12 @@ async function pollPriceTicker() {
         const p = Number(latest.price);
         const maxFD = p >= 1 ? 3 : p >= 0.01 ? 4 : 6;
         valEl.textContent = '$' + p.toLocaleString('en-US', { maximumFractionDigits: maxFD });
+        // Cache for the home-page market-cap recompute (which needs price ×
+        // total issuance). pollPriceTicker fires every 60s, so the cell
+        // stays in sync with whatever price the sidebar ticker shows.
+        lastKnownPriceUsd = p;
+        writeHomeCache({ priceUsd: p });
+        updateMarketCapCell();
         const pct = (latest.pctChange24h != null) ? Number(latest.pctChange24h) : null;
         if (pct == null || !Number.isFinite(pct)) {
             chgEl.textContent = '';

@@ -271,49 +271,63 @@
                         <div class="stat-icon"><i class='bx bx-dollar-circle'></i></div>
                         <div class="stat-info">
                             <h3>Market Cap</h3>
-                            <p class="stat-value">$28,729,029</p>
+                            <!-- Computed live by updateMarketCapCell() as
+                                 totalIssuance × latest /api/price-latest.
+                                 Don't hard-code a value here. -->
+                            <p class="stat-value" id="home-market-cap">—</p>
                         </div>
                     </div>
                     <div class="stat-card glass">
                         <div class="stat-icon"><i class='bx bx-coin-stack'></i></div>
                         <div class="stat-info">
                             <h3>Total Issuance</h3>
-                            <p class="stat-value">23,168,572 <span class="unit">PDEX</span></p>
+                            <!-- Overwritten by fetchNetworkStats() after the
+                                 chain RPC connects. Placeholder is shown for
+                                 the second or two of cold load. -->
+                            <p class="stat-value">— <span class="unit">PDEX</span></p>
                         </div>
                     </div>
                     <div class="stat-card glass">
                         <div class="stat-icon"><i class='bx bx-lock-alt'></i></div>
                         <div class="stat-info">
                             <h3>In Stake</h3>
-                            <p class="stat-value">7,177,107 <span class="unit">PDEX</span> <span class="badge small">30%</span></p>
+                            <!-- Overwritten by fetchNetworkStats() to
+                                 "<X> PDEX Live". Placeholder is shown on
+                                 cold load. -->
+                            <p class="stat-value">— <span class="unit">PDEX</span></p>
                         </div>
                     </div>
                     <div class="stat-card glass">
                         <div class="stat-icon"><i class='bx bx-trending-up'></i></div>
                         <div class="stat-info">
                             <h3>AVG APY</h3>
-                            <p class="stat-value highlight">23.09%</p>
+                            <!-- Computed live by updateAvgApyCell() as
+                                 MAX_APY_BASE × (1 - avgCommission/100) once
+                                 /api/network-info returns. Don't hard-code. -->
+                            <p class="stat-value highlight" id="home-avg-apy">—</p>
                         </div>
                     </div>
                 </section>
 
-                <!-- Additional Network Info -->
+                <!-- Additional Network Info. Each value is overwritten by
+                     fetchNetworkInformation() once /api/network-info returns;
+                     the dashes shown here are the cold-load placeholder. -->
                 <section class="network-info-bar glass">
                     <div class="info-item">
                         <span class="label">Current Era</span>
-                        <span class="value" id="network-current-era">1679</span>
+                        <span class="value" id="network-current-era">—</span>
                     </div>
                     <div class="info-item">
                         <span class="label">Validators</span>
-                        <span class="value" id="network-validators">200 / 237</span>
+                        <span class="value" id="network-validators">— / —</span>
                     </div>
                     <div class="info-item">
                         <span class="label">Nominators</span>
-                        <span class="value" id="network-nominators">1728 / 2442</span>
+                        <span class="value" id="network-nominators">— / —</span>
                     </div>
                     <div class="info-item">
                         <span class="label">Max Active Stake</span>
-                        <span class="value" id="network-max-active-stake">271,211 <span class="unit">PDEX</span></span>
+                        <span class="value" id="network-max-active-stake">— <span class="unit">PDEX</span></span>
                     </div>
                 </section>
 
@@ -1140,6 +1154,7 @@
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_banner_dismissed</code></td><td style="padding: 10px 12px;">A flag set when you dismiss the storage notice banner.</td><td style="padding: 10px 12px;">So we don't show it again.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_apr_period</code></td><td style="padding: 10px 12px;">The APR-history window you last picked (7d / 30d / 90d / 6m / 1y / all-time).</td><td style="padding: 10px 12px;">So your selection persists on the My Account page.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_price_period</code></td><td style="padding: 10px 12px;">The time window you last picked on the full-screen <a href="/price" class="item-link">/price</a> chart (7 / 30 / 90 / 365 / 4000 days).</td><td style="padding: 10px 12px;">So your selection persists between visits.</td></tr>
+                                    <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_home_snapshot</code></td><td style="padding: 10px 12px;">A small JSON cache of the home-page stat values (price, market cap, total issuance, in-stake, AVG APY, era, validators, nominators, max active stake) plus a save timestamp.</td><td style="padding: 10px 12px;">So returning visitors see populated home-page cells instantly while live data loads in the background. Expires after 7 days.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_ref</code></td><td style="padding: 10px 12px;">The highest democracy referendum index you've been notified of.</td><td style="padding: 10px 12px;">So new-event banners and toasts only pop for referenda tabled after the last one you saw.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_seen_proposal</code></td><td style="padding: 10px 12px;">The highest public-proposal index you've been notified of.</td><td style="padding: 10px 12px;">Same as above for democracy public proposals.</td></tr>
                                     <tr style="border-bottom: 1px solid var(--border-color);"><td style="padding: 10px 12px;"><code style="color: var(--brand-secondary);">pdex_gov_banner_dismissed_ref</code></td><td style="padding: 10px 12px;">Index of the most recent referendum banner you closed.</td><td style="padding: 10px 12px;">So a banner you dismissed stays dismissed for that specific event; a newer event still triggers a fresh one.</td></tr>
