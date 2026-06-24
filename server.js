@@ -161,6 +161,12 @@ const RECENT_SYNC_INTERVAL = 12 * 1000;
 // getNetworkInfo() is still 5 minutes, so the endpoint serves stale data for
 // at most ~5 minutes while the background refresh catches up.
 const NETWORK_INFO_REFRESH_MS = readPositiveInteger(process.env.NETWORK_INFO_REFRESH_MS, 10 * 60 * 1000);
+// /api/analytics/snapshot relies on COUNT(*) over blocks/events/transactions
+// — full table scans in SQLite. On a chain with tens of millions of indexed
+// rows this can take 30-60s and blow past nginx's proxy_read_timeout. We
+// pre-compute those counts on the indexer worker every N ms and store them
+// in KV; the HTTP endpoint then just reads the cached object.
+const ANALYTICS_COUNTS_REFRESH_MS = readPositiveInteger(process.env.ANALYTICS_COUNTS_REFRESH_MS, 5 * 60 * 1000);
 
 // Cache for the EFFECTIVE bond minimum enforced by the staking pallet on
 // partial unbonds. On Polkadex this is empirically max(minNominatorBond,
@@ -712,6 +718,40 @@ async function getNetworkInfo() {
 function refreshNetworkInfoInBackground() {
     if (!isRpcReady()) return;
     computeNetworkInfo().catch(err => console.warn('[network-info] background refresh failed:', err && err.message ? err.message : err));
+}
+
+// Pre-warm the heavy row counts that drive /api/analytics/snapshot. Each
+// SELECT COUNT(*) in this set is a full table scan in SQLite, and on the
+// `events` table (~50M rows after backfill) that scan alone takes 30-60s.
+// Running it inside the request blew past nginx's default proxy_read_timeout
+// (60s) — see the upstream-timeout log lines from /api/analytics/snapshot.
+// Pre-computing on a timer in the indexer worker only and storing in KV
+// turns the HTTP endpoint into a single fast key-value read.
+let isRefreshingAnalyticsCounts = false;
+function refreshAnalyticsCountsInBackground() {
+    if (isRefreshingAnalyticsCounts) return;
+    isRefreshingAnalyticsCounts = true;
+    const t0 = Date.now();
+    try {
+        const counts = {
+            indexedBlocks:       db.countBlocks(),
+            indexedEvents:       db.countEvents(),
+            indexedTransactions: db.countTransactions(),
+            indexedReferenda:    db.countDemocracyReferenda(),
+            indexedThreads:      db.countThreads(),
+            computedAt:          Date.now(),
+            computeMs:           0,
+        };
+        counts.computeMs = Date.now() - t0;
+        db.setKv('analytics_counts', counts);
+        if (counts.computeMs > 5000) {
+            console.log(`[analytics] counts refreshed in ${counts.computeMs}ms (blocks=${counts.indexedBlocks} events=${counts.indexedEvents} tx=${counts.indexedTransactions})`);
+        }
+    } catch (err) {
+        console.warn('[analytics] counts refresh failed:', err && err.message ? err.message : err);
+    } finally {
+        isRefreshingAnalyticsCounts = false;
+    }
 }
 
 // Separate, slow refresher for `totalUnlocking`. Reads every staking ledger
@@ -3417,14 +3457,23 @@ app.get('/api/analytics/snapshot', (req, res) => {
         const nominators = network.nominators || {};
         const totalIssuance = Number(network.totalIssuance) || 0;
         const totalStaked = Number(network.totalBonding) || 0;
+        // Counts of things in the indexer's database — pre-computed by
+        // refreshAnalyticsCountsInBackground() on the indexer worker every
+        // ANALYTICS_COUNTS_REFRESH_MS (default 5 min) and stored in KV.
+        // This used to run SELECT COUNT(*) inline, which on a multi-million-
+        // row events table took 30-60s and timed out nginx (110 errors from
+        // upstream timed out / response header). The first ~20s of process
+        // life has empty counts (refresh hasn't fired yet) — zeros are an
+        // acceptable transient state for an analytics dashboard.
+        const counts = db.getKv('analytics_counts') || {};
         cacheMedium(res);
         res.json({
-            // Counts of things in the indexer's database.
-            indexedBlocks: db.countBlocks(),
-            indexedEvents: db.countEvents(),
-            indexedTransactions: db.countTransactions(),
-            indexedReferenda: db.countDemocracyReferenda(),
-            indexedThreads: db.countThreads(),
+            indexedBlocks:       counts.indexedBlocks ?? 0,
+            indexedEvents:       counts.indexedEvents ?? 0,
+            indexedTransactions: counts.indexedTransactions ?? 0,
+            indexedReferenda:    counts.indexedReferenda ?? 0,
+            indexedThreads:      counts.indexedThreads ?? 0,
+            countsAt:            counts.computedAt ?? 0,
             // Chain-state network info (populated by refreshNetworkInfoInBackground).
             totalIssuance,
             totalStaked,
@@ -5710,6 +5759,12 @@ function startIndexerLoops() {
     // Pre-warm the network-info cache well inside its 5-minute TTL so the
     // home page panel is always a cache hit (never a cold recompute).
     setInterval(refreshNetworkInfoInBackground, NETWORK_INFO_REFRESH_MS);
+    // Pre-warm analytics counts (blocks / events / transactions). Same
+    // pattern as network_info — pure DB scans on the indexer worker, store
+    // in KV, HTTP workers read cheaply. First run on a short delay so the
+    // cache is warm by the time anyone hits /analytics for the first time.
+    setTimeout(refreshAnalyticsCountsInBackground, 20_000);
+    setInterval(refreshAnalyticsCountsInBackground, ANALYTICS_COUNTS_REFRESH_MS);
     // Refresh the totalUnlocking figure on its own slower cadence — it's the
     // expensive `staking.ledger.entries()` scan that the network-info compute
     // used to do every time.
