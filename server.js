@@ -2245,20 +2245,30 @@ app.get('/api/staking-rewards/:address', async (req, res) => {
         // Current bonded (active) stake — the denominator for the realized
         // APR calculation. Resolved by the standard two-hop pattern: the
         // address's stash holds the controller via staking.bonded, and the
-        // controller holds the ledger via staking.ledger. Wrapped in
-        // try/catch so RPC unavailability doesn't break the endpoint —
-        // we still return the reward history, just with apr.bondedAmount
-        // null and the realized rates null.
+        // controller holds the ledger via staking.ledger.
+        //
+        // IMPORTANT: modern Substrate unified stash and controller, so an
+        // account that bonded after that change has staking.bonded(stash)
+        // returning NONE — the controller is the stash itself. The
+        // previous version of this code only queried ledger(controller)
+        // when bondedOpt.isSome, which meant post-unification accounts
+        // always got bondedAmount = null, which surfaced as the misleading
+        // "No bonded stake on this account" message on the My Account APR
+        // card even when the wallet was fully staked.
+        //
+        // Mirror the /api/wallet/:address logic by falling back to the
+        // address itself as the controller candidate when staking.bonded
+        // returns None. Both ledger and bonded lookups are wrapped in
+        // try/catch so an RPC disconnect mid-fetch leaves bondedAmount
+        // null cleanly rather than throwing.
         let bondedAmount = null;
         try {
             if (globalApi && globalApi.query && globalApi.query.staking && globalApi.query.staking.bonded) {
                 const bondedOpt = await globalApi.query.staking.bonded(address);
-                if (bondedOpt && bondedOpt.isSome) {
-                    const controller = bondedOpt.unwrap().toString();
-                    const ledgerOpt = await globalApi.query.staking.ledger(controller);
-                    if (ledgerOpt && ledgerOpt.isSome) {
-                        bondedAmount = balanceToPDEX(ledgerOpt.unwrap().active);
-                    }
+                const controller = (bondedOpt && bondedOpt.isSome) ? bondedOpt.unwrap().toString() : address;
+                const ledgerOpt = await globalApi.query.staking.ledger(controller);
+                if (ledgerOpt && ledgerOpt.isSome) {
+                    bondedAmount = balanceToPDEX(ledgerOpt.unwrap().active);
                 }
             }
         } catch (_e) { /* keep bondedAmount null */ }

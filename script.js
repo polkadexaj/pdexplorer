@@ -582,6 +582,33 @@ function writeHomeCache(patch) {
         localStorage.setItem(HOME_CACHE_KEY, JSON.stringify(merged));
     } catch (_) {}
 }
+// Per-address cache of the last successful Wallet dashboard render. Keyed
+// by SS58 address so multiple wallets can be cached independently. Used by
+// fetchWalletDashboard to paint the dashboard instantly on returning
+// visits while the live fetches run in the background. 30-min TTL —
+// staking balances change slowly enough that a half-hour-old snapshot is
+// a good first-paint approximation; live data overwrites within a couple
+// of seconds anyway.
+const WALLET_CACHE_KEY_PREFIX = 'pdex_wallet_dashboard:';
+const WALLET_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+function readWalletCache(address) {
+    try {
+        const raw = localStorage.getItem(WALLET_CACHE_KEY_PREFIX + address);
+        if (!raw) return null;
+        const cached = JSON.parse(raw);
+        if (!cached || typeof cached !== 'object') return null;
+        if (Date.now() - (Number(cached.savedAt) || 0) > WALLET_CACHE_MAX_AGE_MS) return null;
+        return cached;
+    } catch (_) { return null; }
+}
+function writeWalletCache(address, patch) {
+    try {
+        const current = readWalletCache(address) || {};
+        const merged = { ...current, ...patch, savedAt: Date.now() };
+        localStorage.setItem(WALLET_CACHE_KEY_PREFIX + address, JSON.stringify(merged));
+    } catch (_) {}
+}
+
 // Hydrate every home-page cell from cache (if any). Safe to call early in
 // startup — no-op when no cache exists, no-op for cells that aren't in the
 // DOM yet. Each field is guarded so a partial cache (e.g. only price was
@@ -670,6 +697,30 @@ function updateMarketCapCell() {
     }
     const mcap = lastKnownTotalIssuancePdex * lastKnownPriceUsd;
     cell.textContent = '$' + Math.round(mcap).toLocaleString('en-US');
+}
+
+// USD-subscript helpers. Any element with a `data-pdex-amount="<n>"`
+// attribute is treated as a PDEX figure whose USD-equivalent we want to
+// show alongside; refreshUsdSubscripts() reads `lastKnownPriceUsd` and
+// rewrites the element's textContent on each price-ticker poll so the
+// subscript never drifts stale while a user is on the page.
+function renderUsdSubscript(pdexAmount, priceOverride) {
+    const pdex = Number(pdexAmount);
+    const price = Number(priceOverride != null ? priceOverride : lastKnownPriceUsd);
+    if (!Number.isFinite(pdex) || pdex <= 0 || !Number.isFinite(price) || price <= 0) {
+        return '';
+    }
+    const usd = pdex * price;
+    const maxFD = usd >= 100 ? 2 : usd >= 1 ? 3 : 4;
+    return '≈ $' + usd.toLocaleString('en-US', { maximumFractionDigits: maxFD });
+}
+function refreshUsdSubscripts() {
+    const nodes = document.querySelectorAll('[data-pdex-amount]');
+    if (!nodes.length) return;
+    nodes.forEach(n => {
+        const amount = Number(n.getAttribute('data-pdex-amount'));
+        n.textContent = renderUsdSubscript(amount);
+    });
 }
 
 // Home page AVG APY. The chain's nominal max APY (before per-validator
@@ -4476,6 +4527,10 @@ async function pollPriceTicker() {
         lastKnownPriceUsd = p;
         writeHomeCache({ priceUsd: p });
         updateMarketCapCell();
+        // Repaint any USD subscripts currently in the DOM (Total Balance on
+        // /wallet, plus any future PDEX-value cards that opt in with the
+        // `data-pdex-amount` attribute).
+        refreshUsdSubscripts();
         const pct = (latest.pctChange24h != null) ? Number(latest.pctChange24h) : null;
         if (pct == null || !Number.isFinite(pct)) {
             chgEl.textContent = '';
@@ -7050,31 +7105,110 @@ function renderWalletLoading(root, address) {
 async function fetchWalletDashboard(address) {
     const root = document.getElementById('wallet-dashboard');
     if (!root) return;
-    const stopLoading = renderWalletLoading(root, address);
-    try {
-        // Fan out three reads in parallel. The wallet endpoint covers
-        // balance + nominations + recent rows; the price feed paints the
-        // chart; staking-rewards carries the full claimed array AND the
-        // freshly-computed bonded amount that drive the APR period
-        // selector card. The third fetch is wrapped in catch() so a stale
-        // / unreachable rewards endpoint doesn't break the dashboard —
-        // the APR card just shows an unavailable state in that case.
-        const [walletRes, priceRes, rewardsRes] = await Promise.all([
-            fetch('/api/wallet/' + encodeURIComponent(address)),
-            fetch('/api/price-history?days=30').catch(() => null),
-            fetch('/api/staking-rewards/' + encodeURIComponent(address)).catch(() => null)
-        ]);
-        const data = await walletRes.json();
-        if (!walletRes.ok || data.error) throw new Error(data.error || ('Request failed (' + walletRes.status + ')'));
-        let price = { history: [], configured: false };
-        if (priceRes) { try { price = await priceRes.json(); } catch (e) { } }
-        let rewards = null;
-        if (rewardsRes) { try { rewards = await rewardsRes.json(); } catch (e) { } }
+
+    // ─── Cache-first paint ──────────────────────────────────────────────
+    // If we have a recent snapshot for THIS address, render it immediately.
+    // The user sees their dashboard at first paint instead of staring at a
+    // skeleton + animated "Building dashboard" message for the duration of
+    // the slowest of three RPC-bound HTTP calls.
+    const cached = readWalletCache(address);
+    let didPaintFromCache = false;
+    if (cached && cached.wallet) {
+        try {
+            renderWalletDashboard(cached.wallet, cached.price || { history: [], configured: false }, cached.rewards || null);
+            didPaintFromCache = true;
+        } catch (_) { /* cache shape drift — fall back to loading skeleton */ }
+    }
+    const stopLoading = didPaintFromCache ? () => {} : renderWalletLoading(root, address);
+
+    // ─── Three fetches in parallel, each settles independently ─────────
+    // Previously `Promise.all([wallet, price, rewards])` blocked the entire
+    // dashboard render on the slowest of the three. On a cold first load
+    // with chain RPC contention, that could be 30-60s. Now each promise
+    // updates its part of the dashboard as it lands; the user sees the
+    // balance + nominations as soon as /api/wallet returns (typically
+    // 1-3s), and the chart + APR card fill in moments later.
+    let latestWallet = null;
+    let latestPrice  = { history: [], configured: false };
+    let latestRewards = null;
+
+    const walletPromise = fetch('/api/wallet/' + encodeURIComponent(address))
+        .then(async r => ({ ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) }));
+    const pricePromise = fetch('/api/price-history?days=30')
+        .then(r => r.json())
+        .catch(() => ({ history: [], configured: false }));
+    const rewardsPromise = fetch('/api/staking-rewards/' + encodeURIComponent(address))
+        .then(r => r.json())
+        .catch(() => null);
+
+    // Wallet payload — main render path.
+    walletPromise.then(result => {
+        if (!result.ok || (result.data && result.data.error)) {
+            stopLoading();
+            if (!didPaintFromCache) {
+                const msg = (result.data && result.data.error) || ('Request failed (' + result.status + ')');
+                root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(msg)}</div>`;
+            }
+            return;
+        }
+        latestWallet = result.data;
         stopLoading();
-        renderWalletDashboard(data, price, rewards);
-    } catch (e) {
+        // Re-render with the live wallet payload and whichever of price/
+        // rewards has already landed. Anything still in-flight will paint
+        // into the rendered DOM via the targeted handlers below.
+        renderWalletDashboard(latestWallet, latestPrice, latestRewards);
+        writeWalletCache(address, { wallet: latestWallet, price: latestPrice, rewards: latestRewards });
+    }).catch(err => {
         stopLoading();
-        root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(e.message)}</div>`;
+        if (!didPaintFromCache) {
+            root.innerHTML = `<div class="list-container glass" style="padding:40px;text-align:center;color:var(--error);">Error: ${stakingEscapeHtml(err.message || String(err))}</div>`;
+        }
+    });
+
+    // Price-history payload — repaint just the price chart slot.
+    pricePromise.then(price => {
+        latestPrice = price || { history: [], configured: false };
+        // Only do the targeted repaint if the wallet payload has already
+        // rendered the dashboard (otherwise the chart slot doesn't exist
+        // yet — the upcoming wallet render will pick up latestPrice).
+        if (latestWallet) {
+            repaintWalletPriceCard(latestPrice);
+            writeWalletCache(address, { wallet: latestWallet, price: latestPrice, rewards: latestRewards });
+        }
+    });
+
+    // Staking-rewards payload — repaint just the APR card.
+    rewardsPromise.then(rewards => {
+        latestRewards = rewards;
+        walletAprData = rewards || null;
+        if (latestWallet) {
+            renderWalletAprCard();
+            writeWalletCache(address, { wallet: latestWallet, price: latestPrice, rewards: latestRewards });
+        }
+    });
+}
+
+// Targeted repaint for just the PDEX price chart slot inside the wallet
+// dashboard. Lets us render the rest of the dashboard immediately (while
+// /api/price-history is still in flight) and slot the chart in later.
+function repaintWalletPriceCard(price) {
+    const wrap = document.getElementById('wallet-price-chart-wrap');
+    if (!wrap) return;
+    const history = (price && price.history) || [];
+    const configured = !!(price && price.configured);
+    if (history.length) {
+        wrap.innerHTML = '<canvas id="wallet-price-chart"></canvas>';
+        renderWalletPriceChart(history);
+    } else {
+        wrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.85rem;text-align:center;padding:0 20px;">${configured ? 'Collecting price history — the chart fills in as data is polled.' : 'Price feed not configured.'}</div>`;
+    }
+    // Refresh the headline price badge in the list-header too.
+    const headerPrice = document.getElementById('wallet-price-header-price');
+    const latest = price && price.latest;
+    if (headerPrice && latest && typeof latest.price === 'number') {
+        headerPrice.textContent = '$' + Number(latest.price).toLocaleString('en-US', { maximumFractionDigits: 4 });
+    } else if (headerPrice) {
+        headerPrice.textContent = '';
     }
 }
 
@@ -7134,7 +7268,17 @@ function renderWalletDashboard(data, price, rewardsPayload) {
                 <a href="/account/${encodeURIComponent(data.address)}" class="item-link" style="color:var(--text-secondary);font-size:0.78rem;">${stakingEscapeHtml(data.address)}</a>
             </div>
             <div class="staking-summary-grid">
-                <div class="staking-summary-card"><div class="label">Total Balance</div><div class="value accent">${stakingFormatPDEX(balance.total)} PDEX</div></div>
+                <div class="staking-summary-card">
+                    <div class="label">Total Balance</div>
+                    <div class="value accent">${stakingFormatPDEX(balance.total)} PDEX</div>
+                    <!-- USD subscript. data-pdex-amount lets pollPriceTicker
+                         refresh the figure live as the sidebar ticker polls,
+                         so it doesn't drift stale while the user is on the
+                         page. Initial value uses the price embedded in the
+                         wallet payload (or whatever pollPriceTicker has
+                         already cached). -->
+                    <div class="value-usd" data-pdex-amount="${balance.total}">${renderUsdSubscript(balance.total, latestPrice && latestPrice.price)}</div>
+                </div>
                 <div class="staking-summary-card"><div class="label">Total Staked</div><div class="value">${stakingFormatPDEX(staking.totalStaked)} PDEX</div></div>
                 <div class="staking-summary-card"><div class="label">Claimed Rewards</div><div class="value">${stakingFormatPDEX(rewards.claimedTotal)} PDEX</div></div>
                 <div class="staking-summary-card"><div class="label">Unpaid Rewards</div><div class="value" style="color:var(--brand-primary);">${stakingFormatPDEX(rewards.unpaidTotal)} PDEX${rewards.unclaimedFresh ? '' : ' <span style="font-size:0.6rem;color:var(--text-muted);">computing…</span>'}</div></div>
@@ -7170,9 +7314,9 @@ function renderWalletDashboard(data, price, rewardsPayload) {
 
         <div class="wallet-grid">
             <div class="list-container glass">
-                <div class="list-header"><h2>PDEX Price (30d)</h2>${latestPrice ? `<span style="color:var(--brand-secondary);font-size:0.85rem;">$${Number(latestPrice.price).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>` : ''}</div>
-                <div class="staking-chart-wrap" style="height:220px;">
-                    ${priceHistory.length ? '<canvas id="wallet-price-chart"></canvas>' : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.85rem;text-align:center;padding:0 20px;">${priceConfigured ? 'Collecting price history — the chart fills in as data is polled.' : 'Price feed not configured (set CMC_API_KEY on the backend).'}</div>`}
+                <div class="list-header"><h2>PDEX Price (30d)</h2><span id="wallet-price-header-price" style="color:var(--brand-secondary);font-size:0.85rem;">${latestPrice ? `$${Number(latestPrice.price).toLocaleString('en-US', { maximumFractionDigits: 4 })}` : ''}</span></div>
+                <div class="staking-chart-wrap" id="wallet-price-chart-wrap" style="height:220px;">
+                    ${priceHistory.length ? '<canvas id="wallet-price-chart"></canvas>' : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.85rem;text-align:center;padding:0 20px;">${priceConfigured ? 'Collecting price history — the chart fills in as data is polled.' : 'Price feed not configured.'}</div>`}
                 </div>
             </div>
             <div class="list-container glass">

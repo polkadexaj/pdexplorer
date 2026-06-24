@@ -1206,6 +1206,15 @@ h1, h2, h3 { font-weight: 600; }
 .staking-summary-card .value.accent {
     color: var(--brand-secondary);
 }
+/* USD-equivalent subscript under a PDEX value (Total Balance on /wallet,
+   any other element with data-pdex-amount). Quiet enough to read as
+   secondary info; refreshed live by refreshUsdSubscripts(). */
+.staking-summary-card .value-usd {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    min-height: 1em;
+}
 
 .staking-rewards-table {
     width: 100%;
