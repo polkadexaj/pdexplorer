@@ -6750,6 +6750,22 @@ function selectWallet(address) {
     navigateTo('wallet/' + pdex);
 }
 
+// Build the "Please connect your wallet" prompt with an actionable link
+// back to /wallet?returnTo=<currentPath>. Used by every governance modal
+// (council candidacy, council vote, democracy referendum vote, treasury
+// submit proposal) so the user isn't left with a dead-end "please connect"
+// message — clicking the link routes them to the wallet picker, and
+// selectWallet brings them back to this exact URL once they've picked
+// an account.
+//
+// Returns an HTML string ready to inject into a warning <div>.
+function buildWalletConnectPrompt() {
+    // Capture the current path INCLUDING query string so a deep-linked
+    // modal-opening URL (e.g. /democracy?ref=42) round-trips intact.
+    const here = (window.location.pathname || '/') + (window.location.search || '');
+    return `Please connect your wallet first. <a href="/wallet?returnTo=${encodeURIComponent(here)}" style="color:var(--brand-secondary);font-weight:600;text-decoration:underline;">Connect a wallet</a> and you'll be returned to this page.`;
+}
+
 // Pull ?returnTo from the current URL and validate it's a same-origin
 // path (must start with "/", no scheme, no host). Returns the cleaned
 // path or null. Used by selectWallet + tryAutoSelectFirstWallet to honour
@@ -9858,14 +9874,38 @@ async function openCouncilVoteModal() {
     councilVoteSearchTerm = '';
     const searchEl = document.getElementById('council-vote-search');
     if (searchEl) searchEl.value = '';
+    const stakeInputEl = document.getElementById('vote-stake-input');
+    if (stakeInputEl) stakeInputEl.value = '';
+    const votableEl = document.getElementById('council-vote-votable');
+    if (votableEl) votableEl.innerHTML = 'Available: <strong style="color: var(--text-secondary);">—</strong> PDEX';
     renderCouncilVoteSelected();
 
     const availList = document.getElementById('council-vote-available-list');
     if (availList) availList.innerHTML = '<div class="council-vote-empty">Loading candidates…</div>';
+
+    const connectedAddress = getStoredWallet();
+
     try {
-        const res = await fetch('/api/council', { cache: 'no-store' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        // Fan out three reads in parallel:
+        //   - /api/council            → candidate pool + pallet name
+        //   - electionsPallet.voting  → user's existing vote (if connected)
+        //   - system.account          → user's free balance (if connected)
+        // Each chain query is optional and is wrapped in a catch so the
+        // picker still works if the user isn't connected or chain RPC has
+        // a blip on this particular query.
+        const councilPromise = fetch('/api/council', { cache: 'no-store' }).then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        });
+        const votingPromise = (connectedAddress && globalApi && globalApi.query && globalApi.query[councilPalletName] && globalApi.query[councilPalletName].voting)
+            ? globalApi.query[councilPalletName].voting(connectedAddress).then(v => v).catch(() => null)
+            : Promise.resolve(null);
+        const accountPromise = (connectedAddress && globalApi && globalApi.query && globalApi.query.system && globalApi.query.system.account)
+            ? globalApi.query.system.account(connectedAddress).then(a => a).catch(() => null)
+            : Promise.resolve(null);
+
+        const [data, voting, accountInfo] = await Promise.all([councilPromise, votingPromise, accountPromise]);
+
         // Combine all three pools with role tags. A voter can vote for any
         // current member (to re-elect), runner-up, or new candidate — chain
         // doesn't care which bucket the target is in, only that it's a
@@ -9884,7 +9924,58 @@ async function openCouncilVoteModal() {
                 seen.add(a);
                 return true;
             });
+
+        // ─── Pre-populate the right panel from the user's existing vote ──
+        // electionsPallet.voting returns a Voter struct: { votes: Vec<AccountId>,
+        // stake: Balance, deposit: Balance }. Empty (votes.length == 0) means
+        // the user hasn't voted in this election round.
+        if (voting) {
+            try {
+                const existingVotes = voting.votes ? voting.votes.toArray().map(a => a.toString()) : [];
+                const existingStake = voting.stake ? voting.stake.toString() : '0';
+                for (const addr of existingVotes) {
+                    // Try to resolve role + name from the live candidate pool.
+                    // If the user previously voted for someone who has since
+                    // withdrawn, we keep them in the picker as 'ex-candidate'
+                    // so the user can see + remove them — voting again
+                    // without removing means the chain silently ignores those
+                    // votes, which is unfriendly. Better to surface it.
+                    const pooled = councilVoteCandidates.find(c => c.address === addr);
+                    if (pooled) {
+                        councilVoteSelected.set(addr, pooled);
+                    } else {
+                        councilVoteSelected.set(addr, { address: addr, name: 'Unknown', stake: 0, role: 'ex-candidate' });
+                    }
+                }
+                // Pre-fill the backing stake with what's currently locked so
+                // the user sees what they previously chose. Convert planck
+                // (u128 string) → whole PDEX via 1e12 divisor (PDEX = 12 decimals).
+                if (existingStake !== '0' && stakeInputEl) {
+                    try {
+                        const stakePdex = Number(BigInt(existingStake)) / 1e12;
+                        if (stakePdex > 0) stakeInputEl.value = String(stakePdex);
+                    } catch (_) {}
+                }
+            } catch (_e) { /* shape drift — silently skip pre-population */ }
+        }
+
+        // ─── Votable balance ─────────────────────────────────────────────
+        // Show the free balance — that's the cap the elections pallet will
+        // accept for the vote. Substrate's LockableCurrency uses the LARGER
+        // of overlapping locks (staking + voting), so we don't need to
+        // subtract the existing staking lock from this figure.
+        if (accountInfo && votableEl) {
+            try {
+                const freePlanck = accountInfo.data && accountInfo.data.free ? accountInfo.data.free.toString() : '0';
+                const freePdex = Number(BigInt(freePlanck)) / 1e12;
+                votableEl.innerHTML = `Available: <strong style="color: var(--text-secondary);">${stakingFormatPDEX(freePdex)}</strong> PDEX`;
+            } catch (_e) { /* leave dash */ }
+        } else if (!connectedAddress && votableEl) {
+            votableEl.innerHTML = '<span style="color: var(--text-muted);">Connect a wallet to see your votable balance.</span>';
+        }
+
         renderCouncilVoteAvailable();
+        renderCouncilVoteSelected();
     } catch (err) {
         if (availList) availList.innerHTML = `<div class="council-vote-empty" style="color:var(--error);">Could not load candidates: ${stakingEscapeHtml(err.message)}</div>`;
     }
@@ -9915,6 +10006,7 @@ function renderCouncilVoteAvailable() {
         const displayName = c.name && c.name !== 'Unknown' ? c.name : stakingShortAddress(c.address);
         const roleClass = c.role === 'member' ? 'role-member'
             : c.role === 'runner-up' ? 'role-runner-up'
+            : c.role === 'ex-candidate' ? 'role-ex-candidate'
             : 'role-candidate';
         return `
         <button type="button" class="council-vote-row ${selected ? 'is-selected' : ''}" data-council-add="${stakingEscapeHtml(c.address)}" ${selected ? 'disabled aria-label="Already selected"' : 'aria-label="Add to votes"'}>
@@ -9959,6 +10051,7 @@ function renderCouncilVoteSelected() {
         const displayName = c.name && c.name !== 'Unknown' ? c.name : stakingShortAddress(c.address);
         const roleClass = c.role === 'member' ? 'role-member'
             : c.role === 'runner-up' ? 'role-runner-up'
+            : c.role === 'ex-candidate' ? 'role-ex-candidate'
             : 'role-candidate';
         return `
         <div class="council-vote-row is-picked">
@@ -10006,14 +10099,21 @@ function checkWalletForCouncil(modalType) {
     const address = getStoredWallet();
     const activeDivId = modalType === 'candidacy' ? 'candidacy-active-wallet' : '';
     const warningId = modalType === 'candidacy' ? 'candidacy-modal-wallet-warning' : 'vote-modal-wallet-warning';
-    
+    const warnEl = document.getElementById(warningId);
+
     if (!address) {
-        document.getElementById(warningId).style.display = 'block';
+        // Replace the static "Please connect" text with an actionable link
+        // that carries ?returnTo=<currentPath> so the user lands back on
+        // /council after picking an account in the wallet flow.
+        if (warnEl) {
+            warnEl.innerHTML = buildWalletConnectPrompt();
+            warnEl.style.display = 'block';
+        }
         if (activeDivId) document.getElementById(activeDivId).innerText = '--';
         return;
     }
-    
-    document.getElementById(warningId).style.display = 'none';
+
+    if (warnEl) warnEl.style.display = 'none';
     if (activeDivId) document.getElementById(activeDivId).innerText = address;
 }
 
@@ -10408,7 +10508,16 @@ function openTreasurySubmitModal() {
     const activeEl = document.getElementById('treasury-active-wallet');
     const errEl = document.getElementById('treasury-modal-error');
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-    if (warn) warn.style.display = stored ? 'none' : 'block';
+    if (warn) {
+        if (stored) {
+            warn.style.display = 'none';
+        } else {
+            // Inject the actionable connect-wallet link with returnTo so
+            // the user lands back on /treasury after connecting.
+            warn.innerHTML = buildWalletConnectPrompt();
+            warn.style.display = 'block';
+        }
+    }
     if (activeEl) activeEl.textContent = stored || '--';
     modal.style.display = 'flex';
 }
@@ -10670,7 +10779,17 @@ function openReferendumVoteModal(refIndex, side) {
     const warn = document.getElementById('referendum-vote-modal-wallet-warning');
     const active = document.getElementById('referendum-vote-active-wallet');
     const errEl = document.getElementById('referendum-vote-error');
-    if (warn) warn.style.display = stored ? 'none' : 'block';
+    if (warn) {
+        if (stored) {
+            warn.style.display = 'none';
+        } else {
+            // Actionable connect prompt with returnTo so the user comes
+            // back to /democracy (with the ?ref=N query string preserved
+            // when they arrived via a deep link) after picking an account.
+            warn.innerHTML = buildWalletConnectPrompt();
+            warn.style.display = 'block';
+        }
+    }
     if (active) active.textContent = stored || '--';
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
 
