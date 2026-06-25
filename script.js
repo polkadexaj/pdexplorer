@@ -6736,7 +6736,36 @@ function selectWallet(address) {
     // default. See `tryAutoSelectFirstWallet()`.
     setLastUsedAddress(pdex);
     refreshConnectWalletButton();
+    // Honour ?returnTo=<path> if the user arrived at /wallet from a
+    // "Connect a wallet to <do thing>" link elsewhere in the app — e.g.
+    // the account-labels "suggest or vote" prompt on /account/<addr>.
+    // Without this, the user is silently teleported to the dashboard
+    // after connecting and has to navigate back manually. Sanitised to
+    // same-origin path-only to prevent open-redirect.
+    const returnTo = readSafeReturnTo();
+    if (returnTo) {
+        navigateTo(returnTo.replace(/^\/+/, ''));
+        return;
+    }
     navigateTo('wallet/' + pdex);
+}
+
+// Pull ?returnTo from the current URL and validate it's a same-origin
+// path (must start with "/", no scheme, no host). Returns the cleaned
+// path or null. Used by selectWallet + tryAutoSelectFirstWallet to honour
+// the "send me back to where I clicked Connect" intent.
+function readSafeReturnTo() {
+    try {
+        const sp = new URLSearchParams(window.location.search || '');
+        const raw = sp.get('returnTo');
+        if (!raw) return null;
+        // Only allow path-only same-origin destinations. Reject anything
+        // that looks like a scheme (http:, javascript:) or a protocol-
+        // relative URL (//evil.example.com).
+        if (!raw.startsWith('/') || raw.startsWith('//')) return null;
+        if (/[\r\n]/.test(raw)) return null;
+        return raw;
+    } catch (_) { return null; }
 }
 // One-shot session flag that suppresses the auto-pick in tryAutoSelectFirstWallet
 // for the next /wallet visit. Set by disconnectWallet so an explicit "Switch
@@ -9802,8 +9831,7 @@ if (document.getElementById('close-candidacy-modal')) {
 
 if (document.getElementById('council-vote-btn')) {
     document.getElementById('council-vote-btn').addEventListener('click', () => {
-        voteModal.style.display = 'flex';
-        checkWalletForCouncil('vote');
+        openCouncilVoteModal();
     });
 }
 if (document.getElementById('close-vote-modal')) {
@@ -9811,6 +9839,168 @@ if (document.getElementById('close-vote-modal')) {
         voteModal.style.display = 'none';
     });
 }
+
+// ─── Council vote: dual-list candidate picker ──────────────────────────────
+// State for the picker. Keyed by Polkadex SS58 so the lookup matches what
+// /api/council returns. Cleared on each modal open so a previous session's
+// selection doesn't leak into a new vote.
+let councilVoteCandidates = [];                 // full pool: members + runners-up + candidates
+const councilVoteSelected = new Map();          // address -> { address, name, stake, role }
+let councilVoteSearchTerm = '';
+
+async function openCouncilVoteModal() {
+    voteModal.style.display = 'flex';
+    checkWalletForCouncil('vote');
+    // Reset state. We intentionally do NOT preserve the previous selection
+    // because the candidate pool may have changed since the last open
+    // (election round rolled over, new candidates joined).
+    councilVoteSelected.clear();
+    councilVoteSearchTerm = '';
+    const searchEl = document.getElementById('council-vote-search');
+    if (searchEl) searchEl.value = '';
+    renderCouncilVoteSelected();
+
+    const availList = document.getElementById('council-vote-available-list');
+    if (availList) availList.innerHTML = '<div class="council-vote-empty">Loading candidates…</div>';
+    try {
+        const res = await fetch('/api/council', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        // Combine all three pools with role tags. A voter can vote for any
+        // current member (to re-elect), runner-up, or new candidate — chain
+        // doesn't care which bucket the target is in, only that it's a
+        // registered candidate for the current election round.
+        const taggedMembers   = (data.members   || []).map(c => ({ ...c, role: 'member' }));
+        const taggedRunnersUp = (data.runnersUp || []).map(c => ({ ...c, role: 'runner-up' }));
+        const taggedCandidates= (data.candidates|| []).map(c => ({ ...c, role: 'candidate' }));
+        // De-dupe by address — an address can only appear in one bucket at
+        // a time on chain, but guard against an edge case where the API
+        // briefly reports overlap during a round transition.
+        const seen = new Set();
+        councilVoteCandidates = [...taggedMembers, ...taggedRunnersUp, ...taggedCandidates]
+            .filter(c => {
+                const a = String(c.address || '');
+                if (!a || seen.has(a)) return false;
+                seen.add(a);
+                return true;
+            });
+        renderCouncilVoteAvailable();
+    } catch (err) {
+        if (availList) availList.innerHTML = `<div class="council-vote-empty" style="color:var(--error);">Could not load candidates: ${stakingEscapeHtml(err.message)}</div>`;
+    }
+}
+
+function councilVoteFilteredPool() {
+    const q = (councilVoteSearchTerm || '').trim().toLowerCase();
+    if (!q) return councilVoteCandidates;
+    return councilVoteCandidates.filter(c => {
+        const addr = String(c.address || '').toLowerCase();
+        const name = String(c.name || '').toLowerCase();
+        return addr.includes(q) || name.includes(q);
+    });
+}
+
+function renderCouncilVoteAvailable() {
+    const list = document.getElementById('council-vote-available-list');
+    const counter = document.getElementById('council-vote-available-count');
+    if (!list) return;
+    const filtered = councilVoteFilteredPool();
+    if (counter) counter.textContent = String(filtered.length);
+    if (!filtered.length) {
+        list.innerHTML = `<div class="council-vote-empty">${councilVoteSearchTerm ? 'No candidates match your search.' : 'No candidates available right now.'}</div>`;
+        return;
+    }
+    list.innerHTML = filtered.map(c => {
+        const selected = councilVoteSelected.has(c.address);
+        const displayName = c.name && c.name !== 'Unknown' ? c.name : stakingShortAddress(c.address);
+        const roleClass = c.role === 'member' ? 'role-member'
+            : c.role === 'runner-up' ? 'role-runner-up'
+            : 'role-candidate';
+        return `
+        <button type="button" class="council-vote-row ${selected ? 'is-selected' : ''}" data-council-add="${stakingEscapeHtml(c.address)}" ${selected ? 'disabled aria-label="Already selected"' : 'aria-label="Add to votes"'}>
+            <div class="council-vote-row-main">
+                <div class="council-vote-row-name">${stakingEscapeHtml(displayName)}</div>
+                <div class="council-vote-row-meta">
+                    <span class="council-vote-role ${roleClass}">${c.role}</span>
+                    ${Number(c.stake) > 0 ? `<span>${stakingFormatPDEX(c.stake)} PDEX backing</span>` : ''}
+                </div>
+            </div>
+            <span class="council-vote-add-icon" aria-hidden="true">${selected ? '✓' : '+'}</span>
+        </button>`;
+    }).join('');
+    list.querySelectorAll('[data-council-add]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const addr = btn.getAttribute('data-council-add');
+            const cand = councilVoteCandidates.find(c => c.address === addr);
+            if (!cand) return;
+            if (councilVoteSelected.size >= 16) {
+                alert('You can vote for at most 16 candidates.');
+                return;
+            }
+            councilVoteSelected.set(addr, cand);
+            renderCouncilVoteSelected();
+            renderCouncilVoteAvailable();
+        });
+    });
+}
+
+function renderCouncilVoteSelected() {
+    const list = document.getElementById('council-vote-selected-list');
+    const count = document.getElementById('council-vote-selected-count');
+    const clearBtn = document.getElementById('council-vote-clear');
+    if (!list) return;
+    if (count) count.textContent = String(councilVoteSelected.size);
+    if (clearBtn) clearBtn.style.display = councilVoteSelected.size > 0 ? 'inline-block' : 'none';
+    if (!councilVoteSelected.size) {
+        list.innerHTML = '<div class="council-vote-empty">No candidates selected yet — click rows on the left to add them.</div>';
+        return;
+    }
+    list.innerHTML = Array.from(councilVoteSelected.values()).map(c => {
+        const displayName = c.name && c.name !== 'Unknown' ? c.name : stakingShortAddress(c.address);
+        const roleClass = c.role === 'member' ? 'role-member'
+            : c.role === 'runner-up' ? 'role-runner-up'
+            : 'role-candidate';
+        return `
+        <div class="council-vote-row is-picked">
+            <div class="council-vote-row-main">
+                <div class="council-vote-row-name">${stakingEscapeHtml(displayName)}</div>
+                <div class="council-vote-row-meta">
+                    <span class="council-vote-role ${roleClass}">${c.role}</span>
+                </div>
+            </div>
+            <button type="button" class="council-vote-remove" data-council-remove="${stakingEscapeHtml(c.address)}" aria-label="Remove from votes">×</button>
+        </div>`;
+    }).join('');
+    list.querySelectorAll('[data-council-remove]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const addr = btn.getAttribute('data-council-remove');
+            councilVoteSelected.delete(addr);
+            renderCouncilVoteSelected();
+            renderCouncilVoteAvailable();
+        });
+    });
+}
+
+// Wire the search + clear-all once at boot. The picker rebuilds itself on
+// every modal open, so handlers attached to elements that exist for the
+// page's lifetime are safe.
+(function wireCouncilVotePickerOnce() {
+    const search = document.getElementById('council-vote-search');
+    if (search) {
+        search.addEventListener('input', () => {
+            councilVoteSearchTerm = search.value || '';
+            renderCouncilVoteAvailable();
+        });
+    }
+    const clearBtn = document.getElementById('council-vote-clear');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            councilVoteSelected.clear();
+            renderCouncilVoteSelected();
+            renderCouncilVoteAvailable();
+        });
+    }
+})();
 
 function checkWalletForCouncil(modalType) {
     const address = getStoredWallet();
@@ -9871,18 +10061,19 @@ if (document.getElementById('submit-candidacy-tx-btn')) {
 async function submitCouncilVote() {
     const address = getStoredWallet();
     if (!address) return alert('Please connect your wallet first');
-    
-    const candidatesInput = document.getElementById('vote-candidates-input').value;
+
+    // Read from the in-memory picker state instead of a comma-separated
+    // text input. The Map is keyed by the same Polkadex SS58 address the
+    // chain's elections pallet expects, so addresses pass straight through
+    // to api.tx[electionsPallet].vote(...).
+    const candidates = Array.from(councilVoteSelected.keys());
+    if (candidates.length === 0) return alert('Pick at least one candidate from the list on the left.');
+    if (candidates.length > 16) return alert('You can vote for at most 16 candidates.');
+
     const stakeInput = document.getElementById('vote-stake-input').value;
-    
-    if (!candidatesInput || !stakeInput) return alert('Please fill in all fields');
-    
-    const candidates = candidatesInput.split(',').map(a => a.trim()).filter(a => a);
-    if (candidates.length > 16) return alert('You can vote for a maximum of 16 candidates');
-    if (candidates.length === 0) return alert('Please provide at least one candidate address');
-    
+    if (!stakeInput) return alert('Enter a backing stake.');
     const stakeAmount = parseFloat(stakeInput);
-    if (isNaN(stakeAmount) || stakeAmount <= 0) return alert('Invalid stake amount');
+    if (isNaN(stakeAmount) || stakeAmount <= 0) return alert('Invalid stake amount.');
     const stakePlanck = BigInt(Math.floor(stakeAmount * (10 ** 12)));
     
     try {
@@ -11100,8 +11291,14 @@ async function renderAccountLabelEditor(address) {
                 <div style="margin-top:8px;color:var(--text-muted);font-size:0.78rem;">One-time signature proves you own this address — no transaction, no gas. The same session also lets you post on the discussion board.</div>
             </div>`;
     } else {
+        // returnTo brings the user back to the current /account/<addr> page
+        // after the wallet connect picker resolves. Without it the connect
+        // flow silently navigates to the My Account dashboard, leaving the
+        // labels editor invisible — confusing for someone who just wanted
+        // to vote.
+        const returnTo = `/account/${encodeURIComponent(address)}`;
         suggestForm = `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border-color);color:var(--text-muted);font-size:0.82rem;">
-                <a href="/wallet" class="item-link" style="color:var(--brand-secondary);">Connect a wallet</a> to suggest or vote on labels.
+                <a href="/wallet?returnTo=${encodeURIComponent(returnTo)}" class="item-link" style="color:var(--brand-secondary);">Connect a wallet</a> to suggest or vote on labels.
            </div>`;
     }
 
