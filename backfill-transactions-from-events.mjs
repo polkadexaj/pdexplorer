@@ -190,12 +190,19 @@ function run() {
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`
     );
 
-    // Stream the transfer events so we never hold the whole (potentially huge)
-    // result set in memory. One full scan of the events table.
-    const cursor = db.prepare(
-        `SELECT block, event_index AS eventIndex, data, timestamp, block_hash AS blockHash, status
+    // Page through the transfer events by rowid so we never hold the whole
+    // (potentially huge) result set in memory. We deliberately avoid
+    // StatementSync.iterate() — it was added to node:sqlite AFTER Node 22.11,
+    // which is what the backend container pins, so it throws there. Paging on
+    // `rowid > ?` seeks straight into the table b-tree on each call, so the
+    // whole run is still a single linear pass over events (not a re-scan).
+    const READ_PAGE = Math.max(BATCH_SIZE, 5000);
+    const page = db.prepare(
+        `SELECT rowid AS rid, block, event_index AS eventIndex, data, timestamp, block_hash AS blockHash, status
            FROM events
-          WHERE section='balances' AND method='Transfer'`
+          WHERE section='balances' AND method='Transfer' AND rowid > ?
+          ORDER BY rowid
+          LIMIT ?`
     );
 
     let scanned = 0, parsed = 0, unparseable = 0, inserted = 0;
@@ -221,26 +228,34 @@ function run() {
         batch = [];
     };
 
-    for (const ev of cursor.iterate()) {
-        scanned++;
-        const t = parseTransfer(ev.data);
-        if (!t) { unparseable++; continue; }
-        parsed++;
-        batch.push({
-            hash: `event-${ev.block}-${ev.eventIndex}`,
-            from: t.from,
-            to: t.to,
-            block: ev.block,
-            amountDisplay: formatAmountDisplay(t.amountPdex),
-            amountPdex: t.amountPdex,
-            status: ev.status || 'success',
-            timestamp: ev.timestamp,
-            eventIndex: ev.eventIndex,
-            blockHash: ev.blockHash || '',
-        });
-        if (batch.length >= BATCH_SIZE) flush();
-        if (scanned % 100000 === 0) {
-            console.log(`[tx-backfill]   scanned ${scanned.toLocaleString('en-US')} transfer events, inserted ${inserted.toLocaleString('en-US')} so far`);
+    // Inserting into `transactions` never touches `events` rowids, so paging
+    // the source table stays stable while we write.
+    let lastRid = 0;
+    for (;;) {
+        const rows = page.all(lastRid, READ_PAGE);
+        if (!rows.length) break;
+        for (const ev of rows) {
+            lastRid = ev.rid;
+            scanned++;
+            const t = parseTransfer(ev.data);
+            if (!t) { unparseable++; continue; }
+            parsed++;
+            batch.push({
+                hash: `event-${ev.block}-${ev.eventIndex}`,
+                from: t.from,
+                to: t.to,
+                block: ev.block,
+                amountDisplay: formatAmountDisplay(t.amountPdex),
+                amountPdex: t.amountPdex,
+                status: ev.status || 'success',
+                timestamp: ev.timestamp,
+                eventIndex: ev.eventIndex,
+                blockHash: ev.blockHash || '',
+            });
+            if (batch.length >= BATCH_SIZE) flush();
+            if (scanned % 100000 === 0) {
+                console.log(`[tx-backfill]   scanned ${scanned.toLocaleString('en-US')} transfer events, inserted ${inserted.toLocaleString('en-US')} so far`);
+            }
         }
     }
     flush();
