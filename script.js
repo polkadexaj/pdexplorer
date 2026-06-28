@@ -3282,7 +3282,7 @@ const HELP_TOPICS = [
             <h3>KPI strip</h3>
             <ul>
                 <li><b>Indexed blocks</b> — how many blocks we have indexed vs. chain head.</li>
-                <li><b>Indexed transactions</b> — all signed financial transactions.</li>
+                <li><b>Indexed transactions</b> — count of balances transfers held in the local transaction index.</li>
                 <li><b>Validators</b> — active / total registered (with current era).</li>
                 <li><b>Nominators</b> — active / total.</li>
                 <li><b>Total staked</b> — total bonded PDEX (with % of issuance).</li>
@@ -11693,7 +11693,7 @@ function renderAnalyticsPage(snapshot, ts, priceData) {
             <div style="padding:20px;">
                 <div class="staking-summary-grid">
                     ${kpiCard('Indexed blocks',       stakingFormatNumber(snapshot.indexedBlocks), 'blocks in the local index')}
-                    ${kpiCard('Indexed transactions', stakingFormatNumber(snapshot.indexedTransactions), 'all-time')}
+                    ${kpiCard('Indexed transactions', stakingFormatNumber(snapshot.indexedTransactions), 'transfers in the local index')}
                     ${kpiCard(
                         'Validators',
                         `${stakingFormatNumber(snapshot.validatorCount)} <span style="color:var(--text-muted);font-size:0.7rem;font-weight:400;">/ ${stakingFormatNumber(snapshot.totalValidators || snapshot.validatorCount)}</span>`,
