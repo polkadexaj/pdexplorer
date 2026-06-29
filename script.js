@@ -3246,6 +3246,10 @@ const HELP_TOPICS = [
                 <li><b>Motions</b> — every council motion (active and historical) with threshold and tally. Click a motion # to see status, the call it dispatches, blocks, and on-chain proposal hash.</li>
             </ul>
             <p>The header has <b>Submit Candidacy</b> (run for a seat) and <b>Vote</b> (rank candidates in an ongoing election round) buttons.</p>
+            <h3>Filtering motions</h3>
+            <p>The Motions tab has a <b>status</b> pill row (Voting open, Threshold met, Rejected, Voting ended, Executed, Approved, Disapproved, Closed) and a <b>Call type</b> dropdown (e.g. <code>treasury.approveProposal</code>). Both filters apply to the open motions <i>and</i> the Resolved Motions table, and stay visible even when nothing is currently open — handy for finding, say, every treasury-approval motion the council has handled.</p>
+            <h3>Proposing a motion</h3>
+            <p>If your connected wallet holds a council seat, a <b>Propose motion</b> button appears on the Motions tab. Use it to table a treasury <b>approve</b> or <b>reject</b> for a pending proposal: pick the call, enter the treasury proposal #, set the approval threshold (defaults to a simple majority of seats), and sign. The motion then appears under Motions for the council to vote on, and dispatches its call once it reaches threshold. This is how an "open" treasury proposal actually gets approved — there is no approve button on the proposal itself.</p>
         `
     },
     {
@@ -9519,7 +9523,12 @@ setInterval(() => {
 let councilPalletName = 'elections'; // overridden by the /api/council response
 let councilData = null;
 // Per-tab filter state for the Motions tab — sticky across re-renders.
-let councilMotionsFilter = 'all';   // all | voting | approved | rejected | expired
+// Status keys are namespaced so open and resolved buckets never collide:
+//   open_voting | open_approved | open_rejected | open_expired
+//   res_executed | res_approved | res_disapproved | res_closed | (or 'all')
+let councilMotionsFilter = 'all';
+// Call-type filter (e.g. 'treasury.approveProposal'), 'unknown', or 'all'.
+let councilCallFilter = 'all';
 
 async function fetchCouncilData() {
     try {
@@ -9606,9 +9615,9 @@ function councilMotionStatus(m, currentBlock) {
     return { key: 'voting', label: 'Voting open', badge: 'neutral', closeable: false };
 }
 
-function renderCouncilMotions(data) {
+function renderCouncilMotions(data = councilData) {
     const root = document.getElementById('council-motions-content');
-    if (!root) return;
+    if (!root || !data) return;
     const motions = Array.isArray(data.motions) ? data.motions : [];
     const members = Array.isArray(data.members) ? data.members : [];
     const currentBlock = Number(data.currentBlock) || 0;
@@ -9627,43 +9636,91 @@ function renderCouncilMotions(data) {
             <div class="staking-summary-card"><div class="label">Your Role</div><div class="value" style="font-size:1rem;">${isCouncilMember ? 'Council member' : (stored ? 'Observer' : 'Not connected')}</div></div>
         </div>`;
 
-    // Pre-compute each open motion's resolved status so we can both filter on
-    // it and avoid recomputing inside the card renderer below.
-    const annotatedMotions = motions.map(m => ({ ...m, __status: councilMotionStatus(m, currentBlock) }));
-    // Status pill row — counts each bucket for the pill label.
-    const counts = { all: annotatedMotions.length, voting: 0, approved: 0, rejected: 0, expired: 0 };
-    for (const m of annotatedMotions) {
-        if (counts.hasOwnProperty(m.__status.key)) counts[m.__status.key]++;
-    }
-    const pill = (key, label) =>
-        `<button class="reward-filter-btn${councilMotionsFilter === key ? ' active' : ''}" data-motionfilter="${key}">${label}${counts[key] != null ? ` (${counts[key]})` : ''}</button>`;
-    const pillsHtml = `
-        <div class="staking-toolbar" style="margin-bottom:14px;">
-            <div class="reward-filter">
-                ${pill('all', 'All')}${pill('voting', 'Voting open')}${pill('approved', 'Threshold met')}${pill('rejected', 'Rejected')}${pill('expired', 'Voting ended')}
-            </div>
-        </div>`;
+    // Shared call-type key/label helpers — both open and resolved motions
+    // carry section/method, so a single dropdown can filter across both.
+    const callKeyOf = (m) => (m.section && m.method) ? `${m.section}.${m.method}` : 'unknown';
+    const callLabelOf = (key) => key === 'unknown' ? 'Other / unknown call' : key;
 
-    if (!motions.length) {
+    // Annotate open + resolved into one model so the status and call-type
+    // filters span both sections. Status keys are namespaced (open_/res_) so
+    // an open "Threshold met" never collides with a resolved "Approved".
+    const annotatedOpen = motions.map(m => {
+        const st = councilMotionStatus(m, currentBlock);
+        return { ...m, __status: st, __statusKey: 'open_' + st.key, __call: callKeyOf(m) };
+    });
+    const resolved = (Array.isArray(data.motionHistory) ? data.motionHistory : [])
+        .filter(m => m.status && m.status !== 'proposed')
+        .map(m => ({ ...m, __statusKey: 'res_' + m.status, __call: callKeyOf(m) }));
+
+    // Council-member-only CTA to table a new motion (e.g. a treasury approval).
+    const proposeBtn = isCouncilMember
+        ? `<button type="button" class="reward-filter-btn" id="open-propose-motion-btn" style="border-color:var(--brand-primary);color:var(--brand-primary);font-weight:600;"><i class='bx bx-plus-circle'></i> Propose motion</button>${helpIcon('council-and-motions', 'How to propose, vote on, and close motions')}`
+        : '';
+
+    // Nothing on chain at all — still surface the Propose action so a council
+    // member can open the first motion (the common "empty page" case).
+    if (annotatedOpen.length + resolved.length === 0) {
         root.innerHTML = summary
+            + (proposeBtn ? `<div class="staking-toolbar" style="margin-bottom:14px;"><div class="reward-filter">${proposeBtn}</div></div>` : '')
             + governanceIndexNote(data.history, 'motions')
-            + '<div style="padding:28px;text-align:center;color:var(--text-muted);">No motions are currently open before the council.</div>'
-            + renderResolvedMotions(data);
+            + '<div style="padding:28px;text-align:center;color:var(--text-muted);">No motions are currently open before the council.</div>';
+        wireMotionControls(root);
         return;
     }
 
+    // Build the status-pill set (only buckets that actually have rows) and the
+    // call-type <select> options, counting across the combined set.
+    const STATUS_ORDER = ['open_voting', 'open_approved', 'open_rejected', 'open_expired', 'res_executed', 'res_approved', 'res_disapproved', 'res_closed'];
+    const STATUS_LABELS = {
+        open_voting: 'Voting open', open_approved: 'Threshold met', open_rejected: 'Rejected', open_expired: 'Voting ended',
+        res_executed: 'Executed', res_approved: 'Approved', res_disapproved: 'Disapproved', res_closed: 'Closed'
+    };
+    const combined = annotatedOpen.concat(resolved);
+    const statusCounts = {}, callCounts = {};
+    for (const m of combined) {
+        statusCounts[m.__statusKey] = (statusCounts[m.__statusKey] || 0) + 1;
+        callCounts[m.__call] = (callCounts[m.__call] || 0) + 1;
+    }
+    // If a previously-selected filter no longer matches anything (data moved
+    // on), silently fall back to 'all' so the user never sees a dead view.
+    if (councilMotionsFilter !== 'all' && !statusCounts[councilMotionsFilter]) councilMotionsFilter = 'all';
+    if (councilCallFilter !== 'all' && !callCounts[councilCallFilter]) councilCallFilter = 'all';
+
+    const statusPills = ['all'].concat(STATUS_ORDER.filter(k => statusCounts[k]))
+        .map(k => {
+            const label = k === 'all' ? 'All' : STATUS_LABELS[k];
+            const count = k === 'all' ? combined.length : statusCounts[k];
+            return `<button class="reward-filter-btn${councilMotionsFilter === k ? ' active' : ''}" data-motionfilter="${k}">${label} (${count})</button>`;
+        }).join('');
+
+    const callKeys = Object.keys(callCounts).sort((a, b) => {
+        if (a === 'unknown') return 1;
+        if (b === 'unknown') return -1;
+        return a.localeCompare(b);
+    });
+    const callOptions = `<option value="all"${councilCallFilter === 'all' ? ' selected' : ''}>All calls (${combined.length})</option>`
+        + callKeys.map(k => `<option value="${stakingEscapeHtml(k)}"${councilCallFilter === k ? ' selected' : ''}>${stakingEscapeHtml(callLabelOf(k))} (${callCounts[k]})</option>`).join('');
+
+    const toolbar = `
+        <div class="staking-toolbar" style="margin-bottom:14px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;">
+            <div class="reward-filter">${statusPills}</div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <label for="motion-call-filter" style="font-size:0.8rem;color:var(--text-muted);">Call type</label>
+                <select id="motion-call-filter" class="motion-call-select" style="padding:6px 10px;border-radius:var(--radius-sm);background:rgba(0,0,0,0.3);color:var(--text-primary);border:1px solid var(--border-color);font-size:0.82rem;">${callOptions}</select>
+                ${proposeBtn}
+            </div>
+        </div>`;
+
     const roleNote = isCouncilMember
-        ? '<div style="margin-bottom:16px;color:var(--text-secondary);font-size:0.82rem;">You are a council member — you can vote on and close the motions below.</div>'
-        : `<div style="margin-bottom:16px;color:var(--text-muted);font-size:0.82rem;">${stored ? 'Voting and closing motions is restricted to council members.' : 'Connect a council member wallet to vote on or close motions.'}</div>`;
+        ? '<div style="margin-bottom:16px;color:var(--text-secondary);font-size:0.82rem;">You are a council member — you can propose, vote on, and close motions.</div>'
+        : `<div style="margin-bottom:16px;color:var(--text-muted);font-size:0.82rem;">${stored ? 'Proposing, voting and closing motions is restricted to council members.' : 'Connect a council member wallet to propose, vote on, or close motions.'}</div>`;
 
-    // Apply the pill filter before card rendering.
-    const visibleMotions = councilMotionsFilter === 'all'
-        ? annotatedMotions
-        : annotatedMotions.filter(m => m.__status.key === councilMotionsFilter);
+    // A motion is visible when it passes BOTH the status and call-type filters.
+    const matches = (m) => (councilMotionsFilter === 'all' || m.__statusKey === councilMotionsFilter)
+        && (councilCallFilter === 'all' || m.__call === councilCallFilter);
 
-    const emptyForFilter = visibleMotions.length === 0
-        ? `<div style="padding:28px;text-align:center;color:var(--text-muted);">No motions match the "${stakingEscapeHtml(councilMotionsFilter)}" filter.</div>`
-        : '';
+    const visibleMotions = annotatedOpen.filter(matches);
+    const visibleResolved = resolved.filter(matches);
 
     const cards = visibleMotions.map(m => {
         const st = m.__status;
@@ -9723,16 +9780,35 @@ function renderCouncilMotions(data) {
         </div>`;
     }).join('');
 
-    root.innerHTML = summary + pillsHtml + governanceIndexNote(data.history, 'motions') + roleNote
-        + '<div class="motion-list">' + emptyForFilter + cards + '</div>'
-        + renderResolvedMotions(data);
+    const openSection = visibleMotions.length ? `<div class="motion-list">${cards}</div>` : '';
+    const resolvedSection = renderResolvedMotions(visibleResolved);
+    const nothingVisible = (visibleMotions.length + visibleResolved.length) === 0
+        ? `<div style="padding:28px;text-align:center;color:var(--text-muted);">No motions match the current filters.</div>`
+        : '';
 
+    root.innerHTML = summary + toolbar + governanceIndexNote(data.history, 'motions') + roleNote
+        + openSection + nothingVisible + resolvedSection;
+
+    wireMotionControls(root);
+}
+
+// Wire the filter controls, Propose button, and per-motion action buttons.
+// Shared by every render path (including the empty state) so the Propose
+// action is always live for council members.
+function wireMotionControls(root) {
     root.querySelectorAll('[data-motionfilter]').forEach(btn => {
         btn.addEventListener('click', () => {
             councilMotionsFilter = btn.getAttribute('data-motionfilter');
             renderCouncilMotions();
         });
     });
+    const callSel = root.querySelector('#motion-call-filter');
+    if (callSel) callSel.addEventListener('change', () => {
+        councilCallFilter = callSel.value;
+        renderCouncilMotions();
+    });
+    const proposeBtn = root.querySelector('#open-propose-motion-btn');
+    if (proposeBtn) proposeBtn.addEventListener('click', openProposeMotionModal);
     root.querySelectorAll('.motion-aye-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), true)));
     root.querySelectorAll('.motion-nay-btn').forEach(b => b.addEventListener('click', () => councilMotionVote(b.getAttribute('data-hash'), b.getAttribute('data-index'), false)));
     root.querySelectorAll('.motion-close-btn').forEach(b => b.addEventListener('click', () => councilMotionClose(b.getAttribute('data-hash'), b.getAttribute('data-index'))));
@@ -9746,10 +9822,11 @@ function resolvedMotionBadge(status) {
     return '<span class="reward-badge neutral">Closed</span>';
 }
 
-function renderResolvedMotions(data) {
-    const history = Array.isArray(data.motionHistory) ? data.motionHistory : [];
-    const resolved = history.filter(m => m.status && m.status !== 'proposed');
-    if (!resolved.length) return '';
+// Renders the already-filtered list of resolved motions (the caller applies
+// the status + call-type filters so this table stays in sync with the open
+// cards above it). Returns '' when nothing matches.
+function renderResolvedMotions(resolved) {
+    if (!Array.isArray(resolved) || !resolved.length) return '';
     const rows = resolved.map(m => {
         // The motion # is keyed by the hash (not motionIndex), because that's
         // what the global click delegate uses to look up the row from
@@ -9809,6 +9886,102 @@ function councilMotionClose(hash, index) {
         onSuccess: () => setTimeout(fetchCouncilData, 2500)
     });
 }
+
+// --- Propose a council motion -------------------------------------------------
+// The collective takes a *call* to dispatch if the motion passes. We currently
+// support the two treasury approvals a council most often tables — approve and
+// reject a pending treasury proposal — built as treasury.approveProposal(id) /
+// treasury.rejectProposal(id) and wrapped in <pallet>.propose(threshold, call,
+// lengthBound). Threshold defaults to a simple majority of the current seats.
+function councilSimpleMajority() {
+    const seats = (councilData && Array.isArray(councilData.members)) ? councilData.members.length : 0;
+    return seats ? Math.floor(seats / 2) + 1 : 1;
+}
+
+function openProposeMotionModal() {
+    const modal = document.getElementById('council-propose-modal');
+    if (!modal) return;
+    const stored = getStoredWallet();
+    const members = (councilData && Array.isArray(councilData.members)) ? councilData.members : [];
+    const isMember = !!stored && members.some(m => isSameAddress(m.address, stored));
+
+    const warn = document.getElementById('propose-modal-wallet-warning');
+    if (warn) {
+        if (!stored) { warn.innerHTML = buildWalletConnectPrompt(); warn.style.display = 'block'; }
+        else if (!isMember) { warn.textContent = 'Only council members can propose a motion.'; warn.style.display = 'block'; }
+        else { warn.style.display = 'none'; warn.textContent = ''; }
+    }
+    const activeEl = document.getElementById('propose-active-wallet');
+    if (activeEl) activeEl.textContent = stored || '--';
+
+    const thInput = document.getElementById('propose-threshold');
+    if (thInput && !thInput.value) thInput.value = String(councilSimpleMajority());
+    const seatHint = document.getElementById('propose-threshold-hint');
+    if (seatHint) seatHint.textContent = members.length ? `Council has ${members.length} seats — simple majority is ${councilSimpleMajority()}.` : '';
+
+    const errEl = document.getElementById('propose-modal-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    modal.style.display = 'flex';
+}
+
+async function submitProposeMotion() {
+    const errEl = document.getElementById('propose-modal-error');
+    const showErr = (m) => { if (errEl) { errEl.textContent = m; errEl.style.display = 'block'; } };
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    if (!councilData || !councilData.collectivePallet) return showErr('Council data is not ready yet — try again in a moment.');
+    const stored = getStoredWallet();
+    const members = Array.isArray(councilData.members) ? councilData.members : [];
+    if (!stored) return showErr('Please connect your wallet first.');
+    if (!members.some(m => isSameAddress(m.address, stored))) return showErr('Only council members can propose a motion.');
+
+    const callType = (document.getElementById('propose-call-type') || {}).value || 'treasury.approveProposal';
+    const proposalId = parseInt((document.getElementById('propose-proposal-id') || {}).value, 10);
+    const threshold = parseInt((document.getElementById('propose-threshold') || {}).value, 10);
+
+    if (!Number.isInteger(proposalId) || proposalId < 0) return showErr('Enter a valid treasury proposal # (a whole number).');
+    if (!Number.isInteger(threshold) || threshold < 1) return showErr('Approval threshold must be a whole number of at least 1.');
+    const seats = members.length;
+    if (seats && threshold > seats) return showErr(`Threshold can't exceed the ${seats} council seats.`);
+
+    const pallet = councilData.collectivePallet;
+    await submitSignedTx({
+        buildTx: (api) => {
+            if (!api.tx.treasury || (!api.tx.treasury.approveProposal && !api.tx.treasury.rejectProposal)) {
+                throw new Error('The treasury pallet is not available on this runtime.');
+            }
+            const inner = callType === 'treasury.rejectProposal'
+                ? api.tx.treasury.rejectProposal(proposalId)
+                : api.tx.treasury.approveProposal(proposalId);
+            // length_bound must be >= the SCALE-encoded length of the proposed
+            // call. Pass the Call (inner.method), not the wrapping extrinsic.
+            const proposalCall = inner.method;
+            return api.tx[pallet].propose(threshold, proposalCall, proposalCall.encodedLength);
+        },
+        label: `Propose ${callType}(#${proposalId})`,
+        button: document.getElementById('submit-propose-tx-btn'),
+        busyText: 'Signing…',
+        idleText: 'Sign & Submit Motion',
+        onError: showErr,
+        onSuccess: () => {
+            const modal = document.getElementById('council-propose-modal');
+            if (modal) modal.style.display = 'none';
+            const idEl = document.getElementById('propose-proposal-id');
+            if (idEl) idEl.value = '';
+            setTimeout(fetchCouncilData, 2500);
+        }
+    });
+}
+
+(function wireProposeMotionModal() {
+    const modal = document.getElementById('council-propose-modal');
+    if (!modal) return;
+    const closeBtn = document.getElementById('close-propose-modal');
+    const submitBtn = document.getElementById('submit-propose-tx-btn');
+    if (closeBtn) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; });
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+    if (submitBtn) submitBtn.addEventListener('click', submitProposeMotion);
+})();
 
 // Tab switching
 const councilTabs = document.querySelectorAll('.council-page .account-tab');
