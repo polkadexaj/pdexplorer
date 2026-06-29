@@ -3249,8 +3249,8 @@ const HELP_TOPICS = [
             <h3>Filtering motions</h3>
             <p>The Motions tab has a <b>status</b> pill row (Voting open, Threshold met, Rejected, Voting ended, Executed, Approved, Disapproved, Closed) and a <b>Call type</b> dropdown (e.g. <code>treasury.approveProposal</code>). Both filters apply to the open motions <i>and</i> the Resolved Motions table, and stay visible even when nothing is currently open — handy for finding, say, every treasury-approval motion the council has handled.</p>
             <h3>Proposing a motion</h3>
-            <p>If your connected wallet holds a council seat, a <b>Propose motion</b> button appears on the Motions tab. Use it to table a treasury <b>approve</b> or <b>reject</b> for a pending proposal: pick the call, enter the treasury proposal #, set the approval threshold (defaults to a simple majority of seats), and sign. The motion then appears under Motions for the council to vote on, and dispatches its call once it reaches threshold. This is how an "open" treasury proposal actually gets approved — there is no approve button on the proposal itself.</p>
-            <p>You can also start this straight from a proposal: open any standing <b>open</b> proposal on the <a href="/treasury" class="item-link">Treasury</a> page (click its <code>#</code>) and, as a council member, use <b>Propose approval motion</b> / <b>Propose rejection motion</b> — it opens the same dialog pre-filled with that proposal's number.</p>
+            <p>A <b>Propose motion</b> button is shown on the Motions tab to everyone — you don't need to connect first to see it. Tabling a motion does require a council seat: when you act, you're prompted to connect a wallet, and the submission is restricted to current council members. Use it to table a treasury <b>approve</b> or <b>reject</b> for a pending proposal: pick the call, enter the treasury proposal #, set the approval threshold (defaults to a simple majority of seats), and sign. The motion then appears under Motions for the council to vote on, and dispatches its call once it reaches threshold. This is how an "open" treasury proposal actually gets approved — there is no approve button on the proposal itself.</p>
+            <p>You can also start this straight from a proposal: on the <a href="/treasury" class="item-link">Treasury</a> page, every open proposal row has a <b>Propose motion</b> button, and opening a proposal's detail (click its <code>#</code>) shows <b>Propose approval motion</b> / <b>Propose rejection motion</b>. Either opens the same dialog pre-filled with that proposal's number.</p>
         `
     },
     {
@@ -9623,7 +9623,7 @@ function renderCouncilMotions(data = councilData) {
     const members = Array.isArray(data.members) ? data.members : [];
     const currentBlock = Number(data.currentBlock) || 0;
     const stored = getStoredWallet();
-    const isCouncilMember = !!stored && members.some(m => m.address === stored);
+    const isCouncilMember = !!stored && members.some(m => isSameAddress(m.address, stored));
 
     if (!data.collectivePallet) {
         root.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted);">Council motions are not available on this runtime.</div>';
@@ -9653,10 +9653,10 @@ function renderCouncilMotions(data = councilData) {
         .filter(m => m.status && m.status !== 'proposed')
         .map(m => ({ ...m, __statusKey: 'res_' + m.status, __call: callKeyOf(m) }));
 
-    // Council-member-only CTA to table a new motion (e.g. a treasury approval).
-    const proposeBtn = isCouncilMember
-        ? `<button type="button" class="reward-filter-btn" id="open-propose-motion-btn" style="border-color:var(--brand-primary);color:var(--brand-primary);font-weight:600;"><i class='bx bx-plus-circle'></i> Propose motion</button>${helpIcon('council-and-motions', 'How to propose, vote on, and close motions')}`
-        : '';
+    // CTA to table a new motion (e.g. a treasury approval). Shown to everyone
+    // for discoverability; the modal + submit path prompt to connect and
+    // enforce council membership at action time.
+    const proposeBtn = `<button type="button" class="reward-filter-btn" id="open-propose-motion-btn" style="border-color:var(--brand-primary);color:var(--brand-primary);font-weight:600;"><i class='bx bx-plus-circle'></i> Propose motion</button>${helpIcon('council-and-motions', 'How to propose, vote on, and close motions')}`;
 
     // Nothing on chain at all — still surface the Propose action so a council
     // member can open the first motion (the common "empty page" case).
@@ -9714,7 +9714,7 @@ function renderCouncilMotions(data = councilData) {
 
     const roleNote = isCouncilMember
         ? '<div style="margin-bottom:16px;color:var(--text-secondary);font-size:0.82rem;">You are a council member — you can propose, vote on, and close motions.</div>'
-        : `<div style="margin-bottom:16px;color:var(--text-muted);font-size:0.82rem;">${stored ? 'Proposing, voting and closing motions is restricted to council members.' : 'Connect a council member wallet to propose, vote on, or close motions.'}</div>`;
+        : `<div style="margin-bottom:16px;color:var(--text-muted);font-size:0.82rem;">Anyone can view and explore motions. Proposing, voting and closing require a council seat — ${stored ? 'your connected wallet does not hold one.' : 'connect your council wallet to act.'}</div>`;
 
     // A motion is visible when it passes BOTH the status and call-type filters.
     const matches = (m) => (councilMotionsFilter === 'all' || m.__statusKey === councilMotionsFilter)
@@ -9747,14 +9747,14 @@ function renderCouncilMotions(data = councilData) {
             </details>`;
         };
 
-        let actions = '';
-        if (isCouncilMember) {
-            actions = `<div class="motion-actions">
+        // Actions are shown to everyone for discoverability. councilMotionVote /
+        // councilMotionClose prompt to connect and enforce council membership at
+        // click time, so a non-member simply gets a clear message.
+        const actions = `<div class="motion-actions">
                 <button class="motion-btn aye motion-aye-btn" data-hash="${m.hash}" data-index="${m.index}" ${votedAye ? 'disabled' : ''}>${votedAye ? 'Voted Aye' : 'Vote Aye'}</button>
                 <button class="motion-btn nay motion-nay-btn" data-hash="${m.hash}" data-index="${m.index}" ${votedNay ? 'disabled' : ''}>${votedNay ? 'Voted Nay' : 'Vote Nay'}</button>
                 <button class="motion-btn close motion-close-btn" data-hash="${m.hash}" data-index="${m.index}" ${st.closeable ? '' : 'disabled'} title="${st.closeable ? 'Finalize this motion' : 'Available once the vote is decided or has ended'}">Close motion</button>
             </div>`;
-        }
 
         return `<div class="motion-card">
             <div class="motion-card-head">
@@ -9863,6 +9863,10 @@ function renderResolvedMotions(resolved) {
 
 function councilMotionVote(hash, index, approve) {
     if (!councilData || !councilData.collectivePallet) return alert('Council data is not ready yet.');
+    if (!requireWallet('vote on council motions')) return;
+    const stored = getStoredWallet();
+    if (!(councilData.members || []).some(m => isSameAddress(m.address, stored)))
+        return alert('Only council members can vote on motions. Your connected wallet does not hold a council seat.');
     const idx = Number(index);
     if (!confirm(`Cast a ${approve ? 'AYE' : 'NAY'} vote on council motion #${idx}?`)) return;
     const pallet = councilData.collectivePallet;
@@ -9875,6 +9879,10 @@ function councilMotionVote(hash, index, approve) {
 
 function councilMotionClose(hash, index) {
     if (!councilData || !councilData.collectivePallet) return alert('Council data is not ready yet.');
+    if (!requireWallet('close council motions')) return;
+    const stored = getStoredWallet();
+    if (!(councilData.members || []).some(m => isSameAddress(m.address, stored)))
+        return alert('Only council members can close motions. Your connected wallet does not hold a council seat.');
     const idx = Number(index);
     const motion = (councilData.motions || []).find(m => m.hash === hash);
     if (!motion) return alert('Motion details are no longer available — refresh the page.');
@@ -10399,6 +10407,21 @@ if (document.getElementById('submit-vote-tx-btn')) {
 // --- Shared signed-transaction helper ---
 // Resolves the connected wallet, requests a signer from the extension, signs and
 // sends a transaction, and reports success/failure. Used by Treasury and Council.
+// Click-time wallet gate for action buttons. Governance actions are now shown
+// to everyone (for discoverability); when the user actually clicks one without
+// a connected wallet, this prompts them to connect and routes to the wallet
+// picker with a returnTo so they come back to where they were. Returns true
+// when a wallet is already connected (caller proceeds), false otherwise.
+function requireWallet(actionPhrase) {
+    if (getStoredWallet()) return true;
+    const msg = `Connect a wallet to ${actionPhrase || 'continue'}.`;
+    if (confirm(`${msg}\n\nGo to wallet connection now?`)) {
+        const here = (window.location.pathname || '/') + (window.location.search || '');
+        navigateTo('wallet?returnTo=' + encodeURIComponent(here));
+    }
+    return false;
+}
+
 async function submitSignedTx({ buildTx, label, button, busyText, idleText, onError, onSuccess }) {
     const fail = (m) => { if (onError) onError(m); else alert(m); };
     const address = getStoredWallet();
@@ -10597,7 +10620,7 @@ function treasuryPartyCell(name, address) {
 
 // Shared makeTable column factory for treasury proposals. `showStatus` adds
 // a Status / Outcome column at the right edge for Approved and History tabs.
-function buildTreasuryColumns(showStatus) {
+function buildTreasuryColumns(showStatus, opts = {}) {
     return [
         {
             key: 'id', label: 'Proposal', searchable: true,
@@ -10634,6 +10657,15 @@ function buildTreasuryColumns(showStatus) {
             sort: (a, b) => String(a.status || '').localeCompare(String(b.status || '')),
             filter: { type: 'select', options: ['proposed', 'approved', 'awarded', 'rejected'] },
             format: row => treasuryStatusBadge(row.status)
+        }] : []),
+        // Optional per-row council action (open proposals tab). Visible to all;
+        // the delegated handler prompts to connect and the modal enforces
+        // council membership. Only meaningful for still-open ('proposed') rows.
+        ...(opts.proposeAction ? [{
+            key: '__propose', label: 'Action',
+            format: row => row.status === 'proposed'
+                ? `<button type="button" class="treasury-propose-row-btn reward-filter-btn" data-proposal-id="${stakingEscapeHtml(String(row.id))}" style="padding:4px 10px;font-size:0.76rem;border-color:var(--brand-primary);color:var(--brand-primary);white-space:nowrap;"><i class='bx bx-plus-circle'></i> Propose motion</button>`
+                : '<span style="color:var(--text-muted);">—</span>'
         }] : [])
     ];
 }
@@ -10661,7 +10693,7 @@ function mountTreasuryProposalsTable(list) {
         defaultSort: { key: 'id', dir: 'desc' },
         globalSearch: true, summarySuffix: 'proposals',
         emptyMessage: 'No open proposals.',
-        columns: buildTreasuryColumns(false)
+        columns: buildTreasuryColumns(false, { proposeAction: true })
     });
 }
 function mountTreasuryApprovedTable(list) {
@@ -10799,19 +10831,12 @@ function renderTreasuryDetail(row) {
 
     // "Convert to motion" — a standing open (status 'proposed') treasury
     // proposal is approved/rejected by the council via a motion, not directly.
-    // Surface that action here for council members so they don't have to hunt
-    // for it on the Council → Motions tab. Opens the Propose Motion modal
-    // pre-filled with this proposal's id and the chosen call.
-    const stored = getStoredWallet();
-    const councilLoaded = !!(typeof councilData === 'object' && councilData && Array.isArray(councilData.members) && councilData.members.length);
-    const members = councilLoaded ? councilData.members : [];
-    const isCouncilMember = !!stored && members.some(m => isSameAddress(m.address, stored));
+    // We surface that action on every open proposal (for ALL viewers, so the
+    // path is discoverable) — the Propose Motion modal prompts to connect and
+    // enforces council membership at submit, so it's safe to show broadly.
+    // Opens the modal pre-filled with this proposal's id and the chosen call.
     const isOpen = row.status === 'proposed';
-    // Show when the proposal is open and a wallet is connected, and either we've
-    // confirmed council membership OR the roster isn't loaded yet (don't hide
-    // the action from a council member who hasn't opened /council). The modal
-    // and submit path enforce membership regardless, so this is safe.
-    const proposeActions = (isOpen && !!stored && (isCouncilMember || !councilLoaded)) ? `
+    const proposeActions = isOpen ? `
         <div style="margin-top:22px;padding-top:18px;border-top:1px solid var(--border-color);">
             <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:10px;">Council action ${helpIcon('council-and-motions', 'How treasury proposals are approved via council motions')}</div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
@@ -10928,18 +10953,6 @@ function openGovernanceDetailModal({ kind, row, returnPage, returnTab }) {
 
     renderBody();
     modal.style.display = 'flex';
-
-    // If this is an OPEN treasury proposal but we don't yet know the council
-    // roster (the user may have come straight to /treasury), fetch it and
-    // re-render so the council-member action shows / hides accurately. Until it
-    // loads, renderTreasuryDetail shows the action optimistically for any
-    // connected wallet — the Propose modal + submit still enforce membership.
-    const councilLoaded = !!(typeof councilData === 'object' && councilData && Array.isArray(councilData.members) && councilData.members.length);
-    if (kind === 'treasury' && row.status === 'proposed' && !councilLoaded && typeof fetchCouncilData === 'function') {
-        Promise.resolve(fetchCouncilData()).then(() => {
-            if (modal.style.display !== 'none') renderBody();
-        }).catch(() => {});
-    }
 }
 
 function closeGovernanceDetailModal({ restorePage = true } = {}) {
@@ -11194,6 +11207,18 @@ async function submitReferendumVote() {
         }
         if (!row) return;
         openGovernanceDetailModal({ kind, row, returnPage, returnTab });
+    });
+
+    // Delegated handler for the per-row "Propose motion" button on the open
+    // treasury proposals table. Opens the Propose Motion modal pre-filled with
+    // the proposal id (defaulting to an approval); the modal handles connect +
+    // council-membership gating.
+    document.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('.treasury-propose-row-btn') : null;
+        if (!btn) return;
+        e.preventDefault();
+        const proposalId = btn.getAttribute('data-proposal-id');
+        openProposeMotionModal({ proposalId, callType: 'treasury.approveProposal' });
     });
 })();
 
